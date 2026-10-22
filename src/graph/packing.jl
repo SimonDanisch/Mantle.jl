@@ -3,57 +3,54 @@
 """
     ArgPassing
 
-How a compiled argument is passed: NotPassed, InlineBytes or DeviceAllocation.
+How a compiled argument is passed: `NotPassed`, `InlineBytes` or `DeviceAllocation`.
 """
 abstract type ArgPassing end
 
 """
     NotPassed()
 
-No compiled parameter or slot. Covers zero-size isbits values and type-valued constants;
-skipping bytes without skipping the slot would misalign every following argument.
+No compiled parameter and no slot: zero-size isbits values and type-valued
+constants. Skipping the bytes but not the slot would misalign every later argument.
 """
 struct NotPassed <: ArgPassing end
 
 """
     InlineBytes()
 
-Copy an ordinary argument's bytes, including isbits device-array descriptors, into its slot.
+Copy the argument's bytes (including isbits device-array descriptors) into its slot.
 """
 struct InlineBytes <: ArgPassing end
 
 """
     DeviceAllocation()
 
-Bind a native allocation rather than copying its bytes. Vulkan writes its device address;
-Metal binds the resident buffer. Backends specialize passedas for allocation handles.
+Bind a native allocation instead of copying bytes (Vulkan writes its address,
+Metal binds the buffer). Backends specialise `passedas` for their handles.
 """
 struct DeviceAllocation <: ArgPassing end
 
 """
     passedas(T) -> ArgPassing
 
-Choose passing from the argument's type. Ask passedas(typeof(Float32)) about the value
-Float32; passedas(Float32) describes a Float32 scalar. Only native allocation classification
-is backend-specific; the NotPassed rule is shared.
+How an argument of type `T` is passed: `passedas(Float32)` is a `Float32` scalar,
+`passedas(typeof(Float32))` the value `Float32`.
 """
 passedas(::Type{T}) where {T} = notpassed(T) ? NotPassed() : InlineBytes()
 
 """
     notpassed(T) -> Bool
 
-Whether GPUCompiler emits no parameter. T <: Type covers both Type{T} signature types
-and typeof(T)==DataType. Zero-size isbits types cover ghost values without requiring LLVM
-inside generated functions. Boxed non-isbits types are not ghosts; kernel validation rejects them.
-See test_argument_packing.jl for comparison with the compiler rule.
+Whether GPUCompiler emits no parameter for `T`: `Type` values and zero-size
+isbits types, decided without LLVM so generated functions can call it.
+Non-isbits types are not ghosts; kernel validation rejects them.
 """
 notpassed(::Type{T}) where {T} = T <: Type || (isbitstype(T) && sizeof(T) == 0)
 
 """
     passedslots(types) -> Vector{Int}
 
-Return argument indices that occupy slots, in compiled-layout order. Used by generated
-packers so the walk is resolved when specializing.
+Indices of the arguments that occupy slots, in layout order, for generated packers.
 """
 function passedslots(types)
     slots = Int[]
@@ -66,8 +63,8 @@ end
 """
     eachpassedarg(f, args) -> Int
 
-Call f(slot,arg,passing) for each passed argument and return the slot count. Slots skip
-NotPassed arguments. Backends choose their own byte offsets/alignment.
+Call `f(slot, arg, passing)` for each passed argument and return the slot count.
+`NotPassed` arguments take no slot; byte offsets and alignment are the backend's.
 """
 function eachpassedarg(f, args::Tuple)
     slot = 1
@@ -80,23 +77,21 @@ function eachpassedarg(f, args::Tuple)
     return slot - 1
 end
 
-# Record-time pointer locations; notify_move! owns allocator-side patch application.
+# Record-time pointer locations; `notify_move!` applies the patches.
 
 """
     nestinglevels(T) -> Int
 
-Depth consumed by an aggregate when finding patchable device pointers: Tuple/NamedTuple
-are transparent argument groups (zero); declared structs consume one level. Deeper scene
-structures invalidate their recording on movement rather than receiving partial patches.
+Nesting depth an aggregate adds when searching for patchable device pointers:
+zero for `Tuple`/`NamedTuple`, one for a struct.
 """
 nestinglevels(::Type{<:Tuple}) = 0
 nestinglevels(::Type{<:NamedTuple}) = 0
 nestinglevels(::Type) = 1
 
-"""Find pointer fields within the aggregate depth budget. Tuples/NamedTuples are transparent;
-structures deeper than one level are invalidated on movement, not partially patched."""
+"""Append pointer-field offsets of `S` at most one struct level deep; deeper pointers
+are not patched, so their recording is invalidated on a move."""
 function devptroffsets!(offs::Vector{Int}, S::Type, base::Int, depth::Int)
-    # Deeper structs require re-recording; partial pointer patches would leave stale fields.
     depth > 1 && return offs
     for i in 1:fieldcount(S)
         F = fieldtype(S, i)
@@ -113,8 +108,8 @@ end
 """
     devicepointeroffsets(T) -> NTuple{N,Int}
 
-Return device-pointer byte offsets resolved from T at specialization. Core.LLVMPtr and
-Ptr both carry complete addresses. Non-isbits types have no inline pointer fields to patch.
+Byte offsets of the device pointers (`Core.LLVMPtr` or `Ptr`) inside isbits `T`,
+resolved at specialisation; empty for non-isbits types.
 """
 @generated function devicepointeroffsets(::Type{T}) where {T}
     offs = Int[]
@@ -126,8 +121,9 @@ end
 """
     notepacked!(plan, T, at, target, off)
 
-Register device-pointer addresses read from packed bytes at host address at, byte off of
-target. notify_move! consumes the table. Types without pointers compile to a no-op.
+Register in `plan.patchtab` each nonzero device pointer of a `T` packed at host
+address `at`, i.e. at byte `off` of `target`, for `notify_move!`. A no-op for
+types without pointers.
 """
 @inline function notepacked!(pl, ::Type{T}, at::Ptr{UInt8}, target, off::Int) where {T}
     fields = devicepointeroffsets(T)

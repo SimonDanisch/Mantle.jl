@@ -1,18 +1,11 @@
-# The user-facing video-decode entry points.
-#
-# Wrappers over `VideoDecode.decode_h264` that supply `vk_context()` — so a
-# caller does not hold a context — which is exactly why they could not stay in
-# Lava when it stopped having one. They were the tail of `Lava.jl`; the decoder
-# they call has been beside them in `runtime/video.jl` all along.
+# Video-decode entry points that default to `vk_context()`.
 
 """
-    decode_h264_gpu(annexb::Vector{UInt8}; maxframes) -> (width, height, Vector{LavaArray{UInt8,2}})
+    decode_h264_gpu(annexb; ctx = vk_context(), maxframes = typemax(Int)) -> (width, height, ys)
 
-Hardware-decode an H.264 Annex-B elementary stream on the GPU (VK_KHR_video_decode),
-keeping every decoded luma (Y) plane GPU-resident: each frame is returned as a
-device-local `LavaArray{UInt8,2}` (cropped to the display size), never touching host
-memory. Feed these straight into Lava kernels / the motion tracker. Requires a device
-created with video decode support (`vk_context().video_decode_available`).
+Hardware-decode an H.264 Annex-B stream. `ys` holds each frame's luma plane as a
+device-local `LavaArray{UInt8,2}` cropped to the display size, in display order.
+Requires `ctx.video_decode_available`.
 """
 function decode_h264_gpu(annexb::Vector{UInt8}; ctx::VkContext = vk_context(), kw...)
     w, h, ys, _ = VideoDecode.decode_h264(ctx, annexb; kw...)
@@ -20,30 +13,19 @@ function decode_h264_gpu(annexb::Vector{UInt8}; ctx::VkContext = vk_context(), k
 end
 
 """
-    decode_h264_nv12(annexb; maxframes) -> (width, height, ys, uvs)
+    decode_h264_nv12(annexb; ctx = vk_context(), maxframes = typemax(Int)) -> (width, height, ys, uvs)
 
-Like [`decode_h264_gpu`] but also returns the chroma plane: `ys` are the luma
-`LavaArray{UInt8,2}` (width×height) and `uvs` the interleaved-U/V chroma
-`LavaArray{UInt8,2}` (width×(height÷2)) for each frame — the two planes of NV12,
-GPU-resident. Convert to RGB on-GPU with GPUFiltering's `nv12torgb!`.
+Like [`decode_h264_gpu`](@ref), plus `uvs`: each frame's interleaved U/V plane as
+a `width × (height ÷ 2)` `LavaArray{UInt8,2}`. GPUFiltering's `nv12torgb!`
+converts the pair to RGB.
 """
 function decode_h264_nv12(annexb::Vector{UInt8}; ctx::VkContext = vk_context(), kw...)
     w, h, ys, uvs = VideoDecode.decode_h264(ctx, annexb; chroma=true, kw...)
     return (w, h, ys, uvs)
 end
 
-# `decode_h264_luma` is core's: it is this decode plus a download, and names no driver.
-
-# The streaming decoder for a caller holding the backend; the device's method is in
-# `graph.jl`, beside `videodecodes(::LavaDevice)`.
+# `decode_h264_luma` (this decode plus a download) is defined in core. The
+# `LavaDevice` method of `h264decoder` is in `graph.jl`.
 h264decoder(b::LavaBackend, paramnals::AbstractVector{UInt8}; kw...) =
     VideoDecode.H264Decoder(vk_context(b), paramnals; kw...)
-
-# ---- Profiling (kernel SPIR-V stats + per-dispatch GPU timing) ----
-
-# ---- Phase 2: Graphics ----
-
-# ---- Phase 2: Ray Tracing ----
-
-# ---- Compute kernels ----
 

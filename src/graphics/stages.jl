@@ -1,31 +1,8 @@
-# The stages a pipeline is made of.
-#
-# A stage is one thing, so it is one type. As a flat list of keywords —
-# `vertex`, `fragment`, `geometry` as a `(func, GeometryConfig)` tuple,
-# `tess_control`, `tess_eval`, `varyings`, plus the fixed-function state — a
-# stage's function, its configuration and its interface are three separate
-# arguments held together by convention alone.
-#
-# ── Only outputs are declared ────────────────────────────────────────────────
-#
-# A stage declares what it PRODUCES and nothing about what it consumes, because
-# its inputs are the previous stage's outputs. Declaring both would put every
-# interface in the description twice and turn a wiring mistake into something
-# that has to be validated; declared once, there is nothing to disagree with.
-# [`stageinputs`](@ref) reads a consumer's inputs off its producer.
-#
-# ── One list per stage, not one `varyings` ───────────────────────────────────
-#
-# `varyings` names one interface, and a pipeline with a geometry stage has two:
-# vertex → geometry and geometry → fragment. One `outputs` list per stage covers
-# any number of them, and says what it is without knowing what OpenGL called
-# it.
-#
-# ── Flat ─────────────────────────────────────────────────────────────────────
-#
-# An entry may be `Flat{T}`, which says the value belongs to the primitive
-# rather than the vertex. See `KernelInterface.Flat`: nothing wraps the value,
-# only the declaration carries it.
+# The stages a pipeline is made of, one type per stage holding its function,
+# configuration and interface. A stage declares only its outputs; its inputs are
+# the previous stage's outputs (`stageinputs`). An entry may be `Flat{T}`: the
+# value belongs to the primitive rather than the vertex, and only the declaration
+# carries it (see `KernelInterface.Flat`).
 
 """
     ShaderStage
@@ -44,21 +21,16 @@ stagefunction(s::ShaderStage) = s.f
 """
     stageoutputs(s::ShaderStage) -> NamedTuple
 
-What this stage produces, as a NamedTuple of types. Entries may be `Flat{T}`.
-
-`position` is never in it: every stage that has one has one, and a list that had
-to include it would eventually be written without it.
+What this stage produces, as a NamedTuple of types; entries may be `Flat{T}`.
+`position` is never in it; [`outputtype`](@ref) adds it.
 """
 stageoutputs(s::ShaderStage) = s.outputs
 
 """
     VertexShader(f; outputs = (;))
 
-The per-vertex stage.
-
-`f` takes the pass's buffer arguments and returns `(position = …, outputs…)`.
-Which buffers those are is the DRAW's business, not the pipeline's, so they are
-not declared here.
+The per-vertex stage. `f` takes the draw's buffer arguments, which the draw and
+not the pipeline declares, and returns `(position = …, outputs…)`.
 
     VertexShader(project; outputs = (uv = Vec2f, tint = Flat{Vec4f}))
 """
@@ -71,14 +43,9 @@ VertexShader(f; outputs::NamedTuple = (;)) = VertexShader(f, outputs)
 """
     FragmentShader(f; textures = 0)
 
-The per-fragment stage.
-
-Its inputs are the previous stage's outputs and its outputs are the pass's colour
-attachments — a shader compiled for one attachment when the pass has three would
-silently drop two, so the count comes from the pass.
-
-`textures` is how many BOUND textures the body samples through
-`sample_texture_2d`, and it is the one thing that has to be declared: see
+The per-fragment stage. Its inputs are the previous stage's outputs; its outputs
+are the pass's colour attachments, whose count comes from the pass. `textures` is
+how many bound textures the body samples through `sample_texture_2d`; see
 [`ntextures`](@ref).
 """
 struct FragmentShader{F} <: ShaderStage
@@ -91,14 +58,10 @@ stageoutputs(::FragmentShader) = (;)
 """
     ntextures(s::ShaderStage) -> Int
 
-How many BOUND textures this stage samples, which is the highest binding it names
-plus one. Zero for a stage that samples none, which is most of them.
-
-Declared and not derived, because it is part of the stage's INTERFACE and both
-backends need it before they see the body: a descriptor set layout has that many
-entries on Vulkan, and on Metal a texture is an entry-function parameter, so the
-count decides the signature. The body still names its slots through
-`sample_texture_2d(binding, …)`; this only says how many there are.
+How many bound textures this stage samples: the highest binding it names plus
+one, zero for most stages. Declared rather than derived because both backends
+need it before seeing the body: it sizes the descriptor set layout on Vulkan and
+the entry-function signature on Metal.
 """
 ntextures(::ShaderStage) = 0
 ntextures(s::FragmentShader) = s.textures
@@ -106,19 +69,12 @@ ntextures(s::FragmentShader) = s.textures
 """
     GeometryShader(f; outputs, input, output, max_vertices, invocations = 1)
 
-The per-primitive stage, which sees a whole input primitive and emits vertices.
-
-`input` and `output` are topologies: `input` fixes how many vertices one
-invocation sees, `output` is what the emitted vertices are grouped into. `f`
-takes `(emitter, prim)` — see `KernelInterface.emit!`.
-
-    GeometryShader(expand; outputs = (uv = Vec2f, width = Flat{Float32}),
-                           input = LineStripAdjacency(), output = TriangleStrip(),
-                           max_vertices = 4)
-
-Ask [`supports_geometry_stage`](@ref) before building a pipeline with one. A
-backend without the stage may still be able to run the body through a
-[`MeshShader`](@ref), which is the more general of the two.
+The per-primitive stage: sees a whole input primitive and emits vertices.
+`input` fixes how many vertices one invocation sees, `output` what the emitted
+vertices are grouped into. `f` takes `(emitter, prim)`; see
+`KernelInterface.emit!`. Ask [`supports_geometry_stage`](@ref) before building a
+pipeline with one; a backend without the stage can run the body through a
+[`MeshShader`](@ref).
 """
 struct GeometryShader{F, O<:NamedTuple, C<:GeometryConfig} <: ShaderStage
     f::F
@@ -138,13 +94,10 @@ end
     MeshShader(f; outputs, max_vertices, max_primitives,
                  topology = TriangleList(), threads = 1)
 
-The stage that writes vertices and primitives into a mesh output object.
-
-`f` takes `(out, …)` and cooperates with the rest of its threadgroup on one
-object; `max_vertices` and `max_primitives` bound it and are compile-time
-constants a backend needs to emit the entry point at all.
-
-Ask [`supports_mesh_pipeline`](@ref) first.
+The stage that writes vertices and primitives into a mesh output object. `f`
+takes `(out, …)` and cooperates with its threadgroup on one object;
+`max_vertices` and `max_primitives` are compile-time bounds a backend needs to
+emit the entry point. Ask [`supports_mesh_pipeline`](@ref) first.
 """
 struct MeshShader{F, O<:NamedTuple, C<:MeshConfig} <: ShaderStage
     f::F
@@ -162,10 +115,8 @@ end
 """
     ObjectShader(f; threads = 1)
 
-The stage that decides how many mesh threadgroups to dispatch.
-
-Optional on both APIs, and it produces no interface of its own — what it hands
-down is a payload, which has no ground truth yet; see
+The optional stage that decides how many mesh threadgroups to dispatch. It
+declares no outputs; what it hands down is a payload, see
 `KernelInterface.ObjectConfig`.
 """
 struct ObjectShader{F, C<:ObjectConfig} <: ShaderStage
@@ -190,10 +141,6 @@ stageconfig(s::ObjectShader) = s.config
     stageinputs(producer) -> NamedTuple
 
 What the stage after `producer` receives, which is what `producer` produces.
-
-A separate name from [`stageoutputs`](@ref) even though it returns the same
-thing, because the two read differently at the call site and the identity is the
-point being made.
 """
 stageinputs(producer::ShaderStage) = stageoutputs(producer)
 
@@ -212,15 +159,10 @@ flatoutputs(s::ShaderStage) = flatnames(stageoutputs(s))
 
 The NamedTuple type a backend builds this stage's output struct from: the
 declared list with every `Flat` removed, and `position` in front.
-
-Flatness decides WHERE a value is delivered, never what it is, so it does not
-appear here.
 """
 function outputtype(s::ShaderStage)
     v = valuetypes(stageoutputs(s))
-    # `Vec4f`, because a clip position IS one, and both backends declare it that
-    # way: an `NTuple{4,Float32}` field costs a conversion in `getfield` for one
-    # thing with two spellings, and nothing needs the tuple. `mangle_varying`
-    # gives both the same string, which is all the two stages link by.
+    # `Vec4f`, as both backends declare a clip position; an `NTuple{4,Float32}`
+    # would cost a conversion in `getfield`.
     return NamedTuple{(:position, keys(v)...), Tuple{Vec4f, values(v)...}}
 end

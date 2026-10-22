@@ -1,34 +1,19 @@
-# Moving bytes, and handing a pool region to something that expects an array.
-#
-# Unified memory makes most of this shorter than the Vulkan equivalent: there is
-# no staging buffer, no transfer queue and no barrier between a CPU write and a
-# GPU read. What does NOT change is who owns the memory — the pool does, and
+# Transfers and array views over pool regions. The pool owns every `MTLBuffer`;
 # everything here borrows.
 
-# Where a `Shared` buffer is in the host address space. Core builds `hostview`
-# and the three transfer verbs over this — see `hostspan` in
-# `memory/resources.jl`, so the checked `unsafe_wrap` is written once and not
-# per backend. What it is checked against: `reinterpret` refuses a struct with
-# padding, and Hikari's `LightBVHNode` is 60 bytes holding 54 of fields.
+# Host address of a `Shared` buffer. Core builds `hostview` and the transfer verbs
+# over it (`hostspan` in `memory/resources.jl`).
 Mantle.hostspan(::MetalDevice, buf::MTL.MTLBuffer) =
     (convert(Ptr{UInt8}, MTL.contents(buf)), Int(buf.length))
 
 """
     deviceview(dev, a) -> MtlArray
 
-A **borrowed** `MtlArray` over `a`'s slice of its pool block.
-
-This is the bridge the whole backend exists for: MPSGraphs, Metal's FFT and any
-`MtlArray` code work on a Mantle region without knowing it is one, and without
-copying. `a` keeps a suballocated view of a block the pool owns.
-
-Borrowed is the load-bearing word. The `DataRef` finalizer frees NOTHING — the
-`MTLBuffer` belongs to the pool, and a second owner would free it out from under
-every other tenant of the same block. The `Managed` around it is the buffer's
-(`managedbuffer`), shared with every other view of it: it records which queue last
-used the buffer, so that a host read through any view waits for it. `MtlArray`'s own `offset` field is what
-makes the suballocation invisible to the consumer, so nothing downstream has to
-learn about regions.
+A borrowed `MtlArray` over `a`'s slice of its pool block, without copying, so
+MPSGraph and other `MtlArray` code can run on a Mantle region. Its `DataRef`
+finalizer frees nothing: the pool owns the `MTLBuffer`. The `Managed` is the
+buffer's (`managedbuffer`), shared by all its views, so a host read through any
+view waits for the queue that last used it.
 """
 function deviceview(d::MetalDevice, a::DeviceArray{T,N}) where {T,N}
     buf = memoryof(region(a))::MTL.MTLBuffer
@@ -38,12 +23,8 @@ end
 """
     upload!(dev, a, first, data)
 
-Write `data` into `a` starting at element `first`.
-
-A plain `copyto!` into the mapped bytes, because the storage is `Shared` and the
-CPU and GPU see the same memory. On a discrete part this would be a staging
-buffer and a blit; here the absence of one is the point, and the copy itself is
-core's over `hostspan`.
+Write `data` into `a` starting at element `first`: a `copyto!` into the mapped
+`Shared` bytes (core's `hostupload!`). Does not wait; the graph orders it.
 """
 upload!(d::MetalDevice, a::DeviceArray, first::Integer, data::AbstractVector) =
     Mantle.hostupload!(d, a, first, data)
@@ -51,25 +32,16 @@ upload!(d::MetalDevice, a::DeviceArray, first::Integer, data::AbstractVector) =
 """
     download(dev, a) -> Vector
 
-Read `a` back to the host.
-
-**Synchronises, and must** — core's `hostdownload` waits on `awaitwrites` first.
-Unified memory means the CPU and GPU address the same bytes; it does NOT mean a
-kernel writing them has finished.
+Read `a` back to the host. Waits on `awaitwrites` first: unified memory does not
+mean a kernel writing the bytes has finished.
 """
 download(d::MetalDevice, a::DeviceArray) = Mantle.hostdownload(d, a)
 
 """
     devicecopy!(dev, dst, src, n) -> dst
 
-Copy `n` elements device-to-device.
-
-Through the mapped bytes rather than a blit encoder: both regions are `Shared`,
-so once outstanding work has landed this is a `memmove`. `resize!` on a
-`Buffer` is the caller that matters: it copies the existing contents into a
-fresh region before releasing the previous one, and a blit there would need a
-submission and a wait. Core's `hostdevicecopy!` does the waiting for the same reason `download`
-does.
+Copy `n` elements device-to-device through the mapped bytes, after `awaitwrites`.
+`resize!` copies through this, where a blit would need its own submission.
 """
 devicecopy!(d::MetalDevice, dst::DeviceArray{T}, src::DeviceArray{T}, n::Integer) where {T} =
     Mantle.hostdevicecopy!(d, dst, src, n)
@@ -77,23 +49,11 @@ devicecopy!(d::MetalDevice, dst::DeviceArray{T}, src::DeviceArray{T}, n::Integer
 """
     bufferusage(dev, T) -> nothing
 
-What extra a buffer of `T` must be created with.
-
-Nothing, ever. Vulkan needs `BUFFER_USAGE_INDIRECT_BUFFER_BIT` on a buffer a
-draw will read its parameters from, and that bit has to be known at creation —
-which is why the portable interface has this hook at all. Metal decides what a
-buffer is for when it is bound, so there is nothing to declare.
+Always `nothing`: Metal decides a buffer's use at bind time, so no creation flag
+such as Vulkan's `INDIRECT_BUFFER_BIT` exists.
 """
 bufferusage(::MetalDevice, ::Type) = nothing
 
-# ── Moves ────────────────────────────────────────────────────────────────────
-#
-# The one thing a move asks of this backend. Everything else about it — which
-# recorded plans hold an address in the moved range, where inside their argument
-# memory it landed, and when the patch may be written — is core's.
-#
-# This did not exist until 2026-09-14, and its absence was silent: core's
-# `resource_moved!` hook defaulted to `nothing`, so `resize!`ing a buffer a
-# recorded plan reads left the recording on the retired storage. It read plausible
-# stale values rather than faulting, because a retired region is not freed.
+# The only part of a move core asks of a backend; which recorded plans hold an
+# address in the moved range, and patching them, is core's.
 Mantle.deviceaddress(::MetalDevice, buf::MTL.MTLBuffer) = UInt64(buf.gpuAddress)

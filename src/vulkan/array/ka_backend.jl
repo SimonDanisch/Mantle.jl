@@ -1,23 +1,15 @@
-# KernelAbstractions.jl backend for Lava.jl
-#
-# Implements LavaBackend <: KA.Backend for Vulkan compute dispatch.
-# Pattern follows AMDGPU.jl's ROCKernels implementation.
+# KernelAbstractions backend `LavaBackend`: the host side of KA launches on Vulkan.
 
 import KernelAbstractions as KA
 import Adapt
 
 export LavaBackend
 
-# ── Dispatch name helper ──
-# Extract a descriptive kernel name for dispatch logging.
-# For workqueue foreach dispatches, the KA kernel is always `_workqueue_map_kernel!`
-# but the actual inner function (e.g. `vp_trace_shadow_rays_kernel!`) is in args.
-# all_args layout: (kernel_func, ctx, inner_func, queue, extra_args...)
-# `@noinline`: callers reach this only through `invokelatest`, so the string
-# machinery it touches stays out of the launch path's inference chain.
+# Kernel name for dispatch logging. A `workqueue_map_kernel!` launch (Hikari)
+# carries its inner function in `all_args[3]`, so that name is appended.
+# `@noinline` keeps the string handling out of the launch path's inference.
 @noinline function dispatch_name(@nospecialize(f), @nospecialize(all_args))
     fname = nameof(typeof(f))
-    # Check if this is a workqueue_map_kernel dispatch — inner func is arg 3
     if length(all_args) >= 3 && occursin("workqueue_map_kernel", string(fname))
         inner = all_args[3]
         return "$(fname)[$(nameof(typeof(inner)))]"
@@ -25,31 +17,19 @@ export LavaBackend
     return string(fname)
 end
 
-# ── Backend struct ──
-
 """
     LavaBackend <: KA.Backend
 
-Lava's GPU compute backend: a device and the two queues its work goes out on.
-
-  * `dispatch_bq`: where KA kernel dispatches are recorded.
-  * `upload_bq`:   where CPU→GPU transfers (upload!, download!, staging)
-                   record their copies. May be the same queue as dispatch_bq
-                   (single-queue mode) or a separate async queue for true
-                   upload/compute overlap.
-
-    LavaBackend()                        # the process default device, both queues its primary one
+    LavaBackend()                        # process default device
     LavaBackend(ctx)                     # a specific device
-    LavaBackend(bq)                      # single queue for both
-    LavaBackend(dispatch_bq, upload_bq)  # split: enables pipelining
+    LavaBackend(bq)                      # one channel for both
+    LavaBackend(dispatch_bq, upload_bq)
 
-Every spelling PINS its queues when it is constructed, `LavaBackend()` included:
-it reads the default device once, at the call, and never again. The alternative
-is resolving the default at every property access, which answers "which device"
-from a global on every launch and means a backend handed to
-code that also held a second device dispatched on whichever one was current. A
-backend built before a `reset_device!` is dead after it, like every array it
-allocated, and is rebuilt the same way they are.
+KA backend for one Vulkan device. Kernels are recorded on `dispatch_bq`;
+`KA.synchronize` also flushes `upload_bq` when it differs, though no transfer
+path records on it. Every constructor pins its channels, `LavaBackend()`
+included, so a backend never follows a later default device. After
+`reset_device!` it is dead, like the arrays it allocated.
 """
 struct LavaBackend <: KA.Backend
     dispatch_bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
@@ -63,19 +43,16 @@ LavaBackend(bq::SubmitChannel{<:VulkanQueue}) = LavaBackend(bq, bq)
 """
     LavaDeviceBackend <: KA.Backend
 
-A `LavaBackend` as a kernel sees it: a type to dispatch on and nothing to launch
-with. Kernels capture their backend — TrixiParticles' neighbour loop closes over
-`semi.parallelization_backend` to choose a loop by type — and CUDA's, ROCm's and
-Metal's backends are empty structs that can ride along as they are. A
-`LavaBackend` holds its queues, which are not bits.
+A `LavaBackend` as a kernel sees it: an empty type to dispatch on. Kernels may
+capture their backend to choose a code path by type, and a `LavaBackend` holds
+channels, which are not bits.
 """
 struct LavaDeviceBackend <: KA.Backend end
 
 Adapt.adapt_structure(::LavaAdaptor, ::LavaBackend) = LavaDeviceBackend()
 
-# A backend holds no array a kernel reads. Walked as a struct, its queue leads to
-# the `Vulkan.Instance` whose destructor captures it, the cycle the `DeviceArray`
-# method in `graph/lifetime.jl` documents, and the launch overflows the stack.
+# A backend holds no array a kernel reads. Walking it reaches the cycle through
+# `Vulkan.Instance` (see `graph/lifetime.jl`) and overflows the stack.
 holdleaves!(holder, ::LavaBackend) = nothing
 
 # The device it launches on; the two channels only when they differ.
@@ -85,17 +62,8 @@ function Base.show(io::IO, b::LavaBackend)
     print(io, ")")
 end
 
-# The three Mantle verbs that dispatch on the BACKEND rather than on the context.
-#
-# Here and not in `runtime/device.jl` beside their `VkContext` methods: that file
-# is included seven files before this one, so a signature there cannot name
-# `LavaBackend` yet. A method's argument types are resolved when it is DEFINED,
-# unlike a function body — which is why the `vk_context(b)` call below is fine
-# where an annotation would not be.
-#
-# `supports_batch_queue` vs `supports_graphics`: having a queue to batch onto is
-# a separate question from being able to rasterise. See `graph/queue.jl` and
-# `graphics/commands.jl` for the declarations.
+# Core verbs on the backend. Not beside the `VkContext` methods in
+# `runtime/device.jl`, which is included before `LavaBackend` is defined.
 supports_batch_queue(::LavaBackend) = true
 supports_graphics(::LavaBackend) = true
 waitidle(b::LavaBackend) = waitidle(vk_context(b))
@@ -104,80 +72,45 @@ waitidle(b::LavaBackend) = waitidle(vk_context(b))
     vk_context(backend) -> VkContext
     vk_context(a::LavaArray) -> VkContext
 
-The device a backend or an array belongs to.
-
-The accessor the rest of the stack should reach for instead of calling
-`vk_context()` and hoping. `vk_context()` stays as the convenience default for
-the single-device case; what has to stop is code *depending* on it, because a
-global cannot answer "which device" once there are two.
-
-**No new state.** Both are derived from what these objects already carried:
-the channel's `ctx` for a backend and `Buffer.ctx` for an array. `VulkanQueue`
-already holds it — `ctx::Any`, sixty-odd lines into its field list — and a
-second copy of a fact the queue holds can only ever disagree with it.
-
+The device a backend or array belongs to, read from its channel or buffer. Use
+it instead of the global `vk_context()` whenever such an object is at hand.
 """
 vk_context(b::LavaBackend) = (ctxof(b.dispatch_bq))::VkContext
 vk_context(a::LavaArray) = (a.buf[].ctx)::VkContext
-# What a kernel library asks: `caps(backend)`, so a downstream package never has
-# to hold a `VkContext` to find out what the device it is launching on offers.
-#
-# This IS `KernelInterface.caps` — imported at the top of `Lava.jl` — so these two
-# methods are also Lava's whole implementation of KI's one required capability
-# query. `matrix_shapes`, `supports`, `bestshape` and `wggranularity` derive from
-# it in KI and are not written on this side at all.
+# `caps` is `KernelInterface.caps` (imported in `Mantle.jl`), so libraries query
+# a device through its backend or array without a `VkContext`.
 caps(b::LavaBackend) = caps(vk_context(b))
 caps(a::LavaArray) = caps(vk_context(a))
-# `videodecodes` is core's question (`runtime/backendhooks.jl`); the answer is a
-# property of the context, decided when the device was created.
+# Core's query (`runtime/backendhooks.jl`), fixed at device creation.
 videodecodes(ctx::VkContext) = ctx.video_decode_available
 videodecodes(b::LavaBackend) = videodecodes(vk_context(b))
 # `shaderFloat64` is enabled on every device this backend creates.
 supports_float64(::LavaBackend) = true
-# Asked of the physical device, which is what device creation asked before enabling it.
+# Queried from the physical device, as device creation does before enabling it.
 supports_int64_atomics(ctx::VkContext) =
     VK.get_physical_device_features_2(ctx.physical_device,
         VK.PhysicalDeviceVulkan12Features).next.shader_buffer_int_64_atomics
 supports_int64_atomics(b::LavaBackend) = supports_int64_atomics(vk_context(b))
-# A view of a device array is still on that device. `probe_broadcast!` is handed
-# `dest`, which the broadcast machinery may hand it as a `SubArray` or a
-# `ReshapedArray` — walking to the parent is the whole answer, and it is the same
-# `AnyLavaArray` nest `_copyto!` already understands.
-#
-# One method per member of `AnyLavaArray` (gpuarrays.jl:91), and they have to stay
-# in step: that Union lists six wrappers and this list had three, so
-# `probe_broadcast!` — which does `vk_context(dest).diag.broadcast_probe` — threw
-# a MethodError for `Adjoint`/`Transpose`. GPUArrays' own broadcasting suite
-# caught it, 12 errors in "Adjoint and Transpose", because a transposed device
-# array is an ordinary thing to broadcast over.
+# A view is on its parent's device. One method per `AnyLavaArray` wrapper; keep
+# the two lists in step, since `probe_broadcast!` calls `vk_context(dest)`.
 vk_context(a::SubArray) = vk_context(parent(a))
 vk_context(a::Base.ReshapedArray) = vk_context(parent(a))
 vk_context(a::Base.PermutedDimsArray) = vk_context(parent(a))
 vk_context(a::LinearAlgebra.Transpose) = vk_context(parent(a))
 vk_context(a::LinearAlgebra.Adjoint) = vk_context(parent(a))
 
-# Two backends are the same backend when they drive the same DEVICE. Raycore
-# compares a TLAS's backend against the one a kernel is launched on to refuse a
-# cross-backend adapt, and RayMakie asks whether an array's backend is the
-# screen's; both are questions about the device, and a backend on a second
-# queue of the same device answers them the same way as the primary one does.
-# Which queue a backend uses is a scheduling choice, not an identity.
+# Backends are equal when they drive the same device; the channel is a
+# scheduling choice. Raycore and RayMakie compare backends to check that data
+# and launch share a device.
 Base.:(==)(a::LavaBackend, b::LavaBackend) = vk_context(a) === vk_context(b)
 Base.hash(b::LavaBackend, h::UInt) = hash(objectid(vk_context(b)), hash(:LavaBackend, h))
 
-# ── Backend queries ──
-
-# Derive the backend from the array's own context so cross-context arrays
-# dispatch against the correct queue instead of the global default.
+# The array's own device, not the global default.
 KA.get_backend(a::LavaArray) = LavaBackend((a.buf[].ctx)::VkContext)
-# KA.synchronize submits all recorded dispatches and waits for GPU completion.
-# This matches CUDA/AMDGPU semantics: after synchronize(), the CPU can safely
-# read GPU results. GPU-side ordering between dispatches is handled by pipeline
-# the barrier every closed command buffer opens with, so synchronize() is only needed when the CPU
-# must observe GPU results (or at natural batch boundaries like end-of-sample).
+# Wait for all work submitted on the backend's channels, so the host can read
+# results. Dispatches are ordered on the GPU without it.
 function KA.synchronize(backend::LavaBackend)
     flush!(backend.dispatch_bq)
-    # If split, the upload queue may have pending transfers worth flushing too.
     if backend.upload_bq !== backend.dispatch_bq
         flush!(backend.upload_bq)
     end
@@ -189,8 +122,8 @@ function KA.allocate(backend::LavaBackend, ::Type{T}, dims::Tuple; unified::Unio
     bq = backend.dispatch_bq
     dims = Int.(dims)
     nbytes = checkedbytes(T,dims)
-    # Auto-unified for tiny allocations (≤ 64 bytes, e.g. WorkQueue.size
-    # counters) — BAR memory enables direct CPU readback without staging.
+    # Allocations up to 64 bytes (counters) are host-mapped, so the host reads
+    # them without staging.
     want_unified = something(unified, false) || nbytes <= 64
     return LavaArray{T,length(dims)}(undef, dims; bq, unified=want_unified)
 end
@@ -203,21 +136,17 @@ function KA.copyto!(::LavaBackend, A, B)
     return
 end
 
-# Adapt: convert Array ↔ LavaArray, ON THIS BACKEND'S DEVICE. `Adapt.adapt(backend, x)`
-# is how RayMakie uploads a scene and Hikari its adapted accel. On the BACKEND
-# and not the type: `Adapt.adapt(LavaArray, a)` allocates on the process default
-# device whatever backend was asked.
+# `Adapt.adapt(backend, x)` uploads to the backend's device;
+# `Adapt.adapt(LavaArray, x)` uses the process default device.
 Adapt.adapt_storage(b::LavaBackend, a::Array) = LavaArray(a; bq = b.dispatch_bq)
 
-"""Allocate a LavaArray with INDEX_BUFFER_BIT for use as a Vulkan index buffer,
-on `bq`'s device.
+"""
+    alloc_index_buffer(bq, data) -> LavaArray{UInt32,1}
 
-Takes the CHANNEL and not a backend, because its one caller is
-`Mantle.indexbuffer(::LavaDevice, …)` and a device holds a channel. It took a
-`LavaBackend` while RayMakie called it directly through `Base.get_extension`;
-the portable spelling normalises to a device before it dispatches, so the
-backend form had no caller left and the mismatch was a `MethodError` on every
-indexed draw."""
+Upload `data` into a new index buffer (`INDEX_BUFFER_BIT`) on `bq`'s device.
+Takes a channel because its caller, `Mantle.indexbuffer(::LavaDevice, ...)`,
+holds one.
+"""
 function alloc_index_buffer(bq::SubmitChannel{<:VulkanQueue}, data::AbstractVector{UInt32})
     arr = LavaArray{UInt32,1}(undef, (length(data),); bq,
         extra_usage=UInt32(VK.BUFFER_USAGE_INDEX_BUFFER_BIT))
@@ -227,49 +156,23 @@ end
 Adapt.adapt_storage(::LavaBackend, a::LavaArray) = a
 Adapt.adapt_storage(::KA.CPU, a::LavaArray) = Array(a)
 
-# @Const support: stop Adapt recursion at the device array level.
-# Without this, constify on SubArray{...,ReshapedArray{...,LavaDeviceArray}} recurses into
-# ReshapedArray → calls Base.reshape → SignedMultiplicativeInverse constructor on GPU,
-# which has a throw(ArgumentError("...$d")) that generates ijl_get_nth_field_checked.
-# AMDGPU handles this by casting the pointer to constant address space; we just return
-# the device array as-is since Vulkan BDA pointers are already readonly-capable.
+# `@Const` leaves a device array as is: its BDA pointer can already be read-only.
+# KA 0.10 rebuilds reshaped and permuted wrappers around the adapted parent
+# without re-validating, so no throwing `reshape` constructor reaches the device.
 Adapt.adapt_storage(::KA.ConstAdaptor, a::LavaDeviceArray) = a
-# Reshaped and permuted wrappers are KernelAbstractions' (0.10): it rebuilds them
-# around the adapted parent without re-validating, so no constructor with a
-# throwing, string-building error path reaches the device.
 
-# Type-based adapt_storage for Adapt.adapt(LavaArray, x) dispatch. `adapt(LavaArray, x)`
-# names a TYPE, not a device, so this is the one device-less allocation there can
-# be — the process-default analogue of `defaultbackend()`. ambient-allocation-ok
+# `adapt(LavaArray, x)` names a type, not a device, so it allocates on the
+# process default device. ambient-allocation-ok
 Adapt.adapt_storage(::Type{<:LavaArray}, a::Array) = LavaArray(a)
 Adapt.adapt_storage(::Type{<:LavaArray}, a::LavaArray) = a
 
-# ── Launch configuration ──
-
 """
-    caps(ctx).workgrouplimit :: Int
+    workgroup_limit(ctx) -> Int
 
-Largest workgroup Lava will ask the device for — its own
-`maxComputeWorkGroupInvocations`. Requesting more throws.
-
-Read from [`DeviceCaps`](@ref) rather than held as a constant: the limit differs
-between devices, so a process-wide value answers one device's question for all
-of them.
-
-**The pipeline cache key must hash every byte.** `Base.hash` on a large `Vector`
-*samples* elements, and the 256- and 512-wide modules of one kernel differ at
-exactly one byte — the `LocalSize` operand — so they collide: the 512 launch
-looks up the 256 pipeline, dispatches a 256-thread shader over a grid computed
-for 512, and writes `256/wg` of its output, with no error anywhere. Whichever
-size compiled first wins, and whether two modules collide depends on which bytes
-the sampling skipped. [`spirv_content_hash`](@ref) reads all of them.
-
-That generalises past workgroups: any two SPIR-V modules differing only in bytes
-a sampling hash skips would share a pipeline, which is a silent wrong-results
-bug for any pair of instantiations differing in a literal.
-`test/test_workgroup_limit.jl` pins every size on both launch spellings and
-asserts that two one-byte-different modules do not share a cache key.
-
+The device's `maxComputeWorkGroupInvocations`, from [`DeviceCaps`](@ref);
+requesting more throws. Modules for two workgroup sizes differ in one
+`LocalSize` byte, so the pipeline cache key must hash every byte
+([`spirv_content_hash`](@ref)), not a sample as `Base.hash` does.
 """
 workgroup_limit(ctx::VkContext) = caps(ctx).workgrouplimit
 
@@ -278,11 +181,10 @@ workgroup_limit(ctx::VkContext) = caps(ctx).workgrouplimit
 @inline statictuple(@nospecialize(_)) = nothing
 
 """
-Throw if `wg` exceeds [`workgroup_limit`](@ref) for `ctx`.
+    check_workgroup(ctx, wg; static = false) -> wg
 
-Loud rather than clamped: a kernel that stages into `@localmem` sizes its tile to
-the workgroup it asked for, so quietly handing it a smaller one trades a wrong
-answer for a different wrong answer.
+Throw if `wg` exceeds [`workgroup_limit`](@ref). Not clamped: a kernel sizes its
+`@localmem` tile to the workgroup it asked for.
 """
 @inline check_workgroup(ctx::VkContext, ::Nothing; static::Bool = false) = nothing
 @inline function check_workgroup(ctx::VkContext, wg; static::Bool = false)
@@ -308,21 +210,13 @@ function KA.launch_config(kernel::KA.Kernel{LavaBackend}, ndrange, workgroupsize
     end
 
     iterspace, dynamic = if KA.workgroupsize(kernel) <: KA.DynamicSize && workgroupsize === nothing
-        # Core's default, the same on every backend (see `defaultgroup`). It walks
-        # the tuple recursively: no `ntuple` over a runtime length, whose `1:n`
-        # recorded an edge on `Tuple{Colon, Int64, Any}` that `Unitful`'s `(:)`
-        # method invalidated (25 025 of Lava's 36 245 rejected CodeInstances when
-        # SAM 2's image loaded after VideoEditor).
+        # Core's default, the same on every backend.
         workgroupsize = Mantle.defaultgroup(ndrange, workgroup_limit(vk_context(kernel.backend)))
         KA.partition(kernel, ndrange, workgroupsize)
     else
-        # Both spellings land here, and only one of them is in `workgroupsize`:
-        # `kernel(backend, wg)` puts the size in the kernel's TYPE and passes the
-        # keyword as `nothing`, so checking the keyword alone would miss it. Which
-        # of the two it is also decides the cap — see `check_workgroup`.
+        # `kernel(backend, wg)` puts the size in the kernel's type and passes the
+        # keyword as `nothing`, so check whichever holds it.
         static = workgroupsize === nothing
-        # `vk_context(kernel.backend)`, not the global: the limit is the device's
-        # and a KA kernel carries the backend it was built for.
         check_workgroup(vk_context(kernel.backend),
                         static ? statictuple(KA.workgroupsize(kernel)) : workgroupsize;
                         static = static)
@@ -332,8 +226,6 @@ function KA.launch_config(kernel::KA.Kernel{LavaBackend}, ndrange, workgroupsize
     return ndrange, workgroupsize, iterspace, dynamic
 end
 
-# ── Context creation ──
-
 function KA.mkcontext(kernel::KA.Kernel{LavaBackend}, _ndrange, iterspace)
     KA.CompilerMetadata{KA.ndrange(kernel), KA.DynamicCheck}(_ndrange, iterspace)
 end
@@ -342,45 +234,24 @@ function KA.mkcontext(kernel::KA.Kernel{LavaBackend}, I, _ndrange, iterspace, ::
     KA.CompilerMetadata{KA.ndrange(kernel), Dynamic}(I, _ndrange, iterspace)
 end
 
-# ── Argument conversion ──
-
-# Reflection conversion is pure. Cached descriptors do not retain source arrays;
-# dispatch callers hold original arguments/closures separately with holdleaves!.
+# Pure conversion for type reflection; launch paths hold the originals with
+# `holdleaves!`.
 KA.argconvert(::KA.Kernel{LavaBackend}, a::LavaArray{T,N}) where {T,N} =
     LavaDeviceArray{T,N}(Ptr{T}(bda_address(a)), a.dims)
 KA.argconvert(::KA.Kernel{LavaBackend}, x) = x
 
-# ── Kernel call (main entry point) ──
-#
-# `find_tlas_in_args` scans the kernel's pre-adapt arg tuple for any value
-# that holds a live VulkanTLAS reference, so callers can write
-#   `kernel(accel, args...; ndrange=...)`
-# with `accel::AdaptedAccel` (or any value carrying one) and have
-# `enable_ray_query=true` + the HWTLAS descriptor binding wired automatically
-# at compile + dispatch.  This keeps the SW/HW swap a single-arg change at
-# the call site — Hikari's `Raycore.closest_hit(accel, ray)` polymorphism
-# falls through unchanged.
-#
-# Whether an argument *can* carry a HWTLAS is a property of its type, so the scan
-# is resolved at compile time: a compute kernel — every kernel in a DNN or
-# broadcast workload — gets `nothing` and no code at all. The recursive
-# `Base.tail` walk it replaces did not fold away on the long argument tuples KA
-# produces (kernel args plus a `CompilerMetadata` plus a `Val` per static
-# parameter), and showed up as the second-largest host cost in the MatAnyone
-# inference loop, on kernels that have no HWTLAS and never could.
-#
-# Later arguments win, matching the accumulate-forward order of the walk.
+# `find_tlas_in_args` returns the hardware TLAS of any pre-adapt argument with
+# an `hwtlas` field (such as `AdaptedAccel`), so passing an accel compiles with
+# ray query and binds the TLAS descriptor. Resolved from the argument types at
+# compile time, so kernels without one pay nothing. Later arguments win.
 @generated function find_tlas_in_args(args::Tuple)
     ts = fieldtypes(args)
     all(isconcretetype, ts) || return :(_find_tlas(args, nothing))
     expr = :(nothing)
     for (i, T) in enumerate(ts)
         if T <: Tuple
-            # A tuple argument is the argument list grouped, so it is walked
-            # through rather than treated as one value — the same transparency
-            # `storage`, `holdleaves!` and `nestinglevels` give it. Without this
-            # an accel inside one compiled with ray query disabled and failed in
-            # the emitter instead of at the call site.
+            # A tuple argument is a grouped argument list: walk into it, as
+            # `storage` and `holdleaves!` do.
             expr = :(let h = find_tlas_in_args(args[$i])
                          h === nothing ? $expr : h
                      end)
@@ -394,8 +265,8 @@ KA.argconvert(::KA.Kernel{LavaBackend}, x) = x
 end
 @inline _find_tlas(::Tuple{}, acc) = acc
 @inline _find_tlas(args::Tuple, acc) = _find_tlas(Base.tail(args), _maybe_tlas(first(args), acc))
-# `AdaptedAccel` is declared in raytracing/hwtlas.jl (loaded after this file);
-# loose-typed dispatch + a runtime field check keeps the include order intact.
+# Fallback for non-concrete argument tuples: a field check, so any value with
+# an `hwtlas` field counts.
 @inline function _maybe_tlas(x, acc)
     if hasfield(typeof(x), :hwtlas)
         h = getfield(x, :hwtlas)
@@ -404,21 +275,13 @@ end
     return acc
 end
 
-# Cached per-kernel iteration plan, on `vkctx.caches` — see `IterPlan`. Key =
-# (typeof(obj), ndrange, workgroupsize); `typeof(obj)` carries the F type plus
-# KA's static NDRange / WG-size type parameters, so two Kernel instances with the
-# same shape share the plan. Built lazily on first launch.
-#
-# The device is not in the key and does not need to be, because the cache belongs
-# to one. Process-wide it would be a wrong-answer path: `block_dims` is
-# `pad_to_3d(vkctx, …)` over the device's `max_wg_dims`, so the first device to
-# launch a given kernel shape would decide the block grid for every device
-# after.
+# The `IterPlan` for `obj` at this shape, cached in `vkctx.caches.iterplans` by
+# `typeof(obj)` (function and KA's static sizes) and `(ndrange, workgroupsize)`.
+# Per device, because `pad_to_3d` reads the device's `max_wg_dims`.
 function get_or_build_iter_plan(obj::KA.Kernel{LavaBackend}, ndrange, workgroupsize,
                                 vkctx::VkContext)
-    # `K` is known at THIS call site — the caller has `ndrange` in hand — so the
-    # scan below tests a concrete `IterEntry{K}` and compares an isbits tuple with
-    # `===`. No hash of a heterogeneous key, no dynamic `isequal`. See `IterEntry`.
+    # `K` is concrete here, so the scan tests `IterEntry{K}` and compares an
+    # isbits key with `===` (see `IterEntry`).
     k = (ndrange, workgroupsize)
     K = typeof(k)
     cache = vkctx.caches.iterplans
@@ -450,9 +313,9 @@ end
 """
     launchindirect!(bq, obj, args, count, workgroupsize, tlas)
 
-Launch `obj` over the element count in the device array `count`, in one one-shot:
-the prepare that turns the count into group counts, its barrier, the dispatch.
-The count is held like an argument, because only the prepare names it.
+Launch `obj` over the element count in the device array `count` as one
+one-shot: the prepare that turns it into group counts, a barrier, the dispatch.
+`count` is held like an argument, because only the prepare names it.
 """
 function launchindirect!(bq, obj, args, count::LavaArray, workgroupsize, tlas)
     oneshot!(bq; tag = :launch) do e
@@ -468,88 +331,44 @@ function launchindirect!(bq, obj, args, count::LavaArray, workgroupsize, tlas)
 end
 
 function (obj::KA.Kernel{LavaBackend})(args...; ndrange=nothing, workgroupsize=nothing)
-    # `vk_context(obj.backend)`, not the global: a KA kernel carries the backend
-    # it was built for, and that backend knows its device. This is the accessor
-    # `test_backend_context.jl` exists to pin.
+    # The kernel's own device, not the global context.
     validate_launch_args(vk_context(obj.backend), args)
-    # No capture check: a graph is DECLARED, through
-    # `dispatch!(p, kernel, args, ndrange)`, so a launch reaching this function
-    # is an immediate launch and nothing else.
+    # Always an immediate launch; graphs declare passes with `dispatch!`.
     bq = obj.backend.dispatch_bq
 
-    # Auto-discover HWTLAS for ray-query kernels — extract BEFORE Adapt strips
-    # hwtlas (kernel form has hwtlas=nothing).
+    # Before Adapt, which sets `hwtlas` to `nothing`.
     tlas = find_tlas_in_args(args)
 
-    # GPU-resident ndrange → indirect dispatch (no CPU readback). A `DeviceRange`
-    # is the portable spelling; its count is the array the prepare reads, and its
-    # ceiling bounds nothing here, since the device knows the count.
+    # A device-resident count (`DeviceRange` or `LavaArray`) launches indirectly,
+    # without a readback; the `DeviceRange` ceiling is unused here.
     ndrange isa DeviceRange &&
         return launchindirect!(bq, obj, args, storage(ndrange.count), workgroupsize, tlas)
     ndrange isa LavaArray &&
         return launchindirect!(bq, obj, args, ndrange, workgroupsize, tlas)
 
-    # KA's launch_config / partition / mkcontext / blocks / workitems plus our
-    # pad_to_3d add up to ~50% of per-record cost in tight loops, yet they only
-    # depend on (typeof(obj), ndrange, workgroupsize) — typeof(obj) carries the
-    # static NDRange/WG-size and F type parameters. Cache the whole plan so the
-    # second-and-later launch with the same shape is one Dict lookup.
+    # KA's launch configuration plus `pad_to_3d` cost about half the host time of
+    # a launch and depend only on kernel type and shape, so the plan is cached.
     plan = get_or_build_iter_plan(obj, ndrange, workgroupsize, ctxof(bq))
-    # NOTE the `nblocks == 0` check lives inside the barrier, not here. Reading
-    # any field off `plan` at this point is a dynamic `getfield` on an abstract
-    # value, which boxes — the very cost the barrier exists to remove.
-    # FUNCTION BARRIER, and it is worth 176 bytes on every dispatch.
-    #
-    # `IterPlan{Ctx}` is parametric, so the `::IterPlan` the cache lookup can
-    # promise is a UnionAll, not a concrete type. Reading `plan.ka_ctx` /
-    # `.block_dims` / `.ws_3d` inline here is therefore a dynamic `getfield` that
-    # boxes its result — 32 bytes each, measured — and because `ka_ctx` then has
-    # no type, the `all_args` tuple downstream cannot be inferred either, for
-    # another 80.
-    #
-    # Handing `plan` to a separate function costs ONE dynamic dispatch and makes
-    # every use of it inside concrete. This is the standard cure for an
-    # unavoidably-abstract value on a hot path, and the alternative (threading
-    # `Ctx` through the caller) would infect the whole entry point with a type
-    # parameter that exists only to satisfy inference.
+    # Function barrier: the cache returns an abstract `IterPlan`, and reading its
+    # fields here (including `nblocks`) would box them. One dynamic dispatch makes
+    # every use inside `launch_planned!` concrete.
     return launch_planned!(bq, obj, args, plan, tlas)
 end
 
 """
     lavakernel(kernel, ndrange; workgroupsize = nothing) -> LavaKernel
 
-A kernel with its iteration plan already resolved and **concretely typed**, so a
-launch is a static call with no cache lookup and no boxing.
-
-The plain path cannot get there. `IterPlan{Ctx}` is parametric, the per-device
-cache can only promise the `IterPlan` UnionAll, and every route out of an
-abstract container costs at least one dynamic dispatch — measured, on an
-otherwise-warm dispatch that builds nothing:
-
-    abstract cache, fields read inline   96 bytes
-    abstract cache + function barrier    16 bytes     <- the plain path today
-    plan held in a concrete field         0 bytes     <- this
-
-`Ctx` is a pure function of the kernel TYPE (verified: identical for ndrange 16,
-1000, 1024 and 4096) and is `isbits`, so resolving it once at construction is
-sound — the plan's *values* depend on `ndrange`, its *type* never does. That is
-what makes holding it legitimate rather than a cache that can go stale on shape.
-
-`P` is a type parameter so a caller that stores a `LavaKernel` in a concretely
-typed field gets `lk.plan` for free. Storing one in a `::LavaKernel` field (the
-UnionAll) throws that away and lands back on the dynamic path — parameterise the
-holder, e.g. `struct MyOp{KK}; kern::KK; end`.
+`kernel` with its iteration plan resolved and concretely typed, so a launch is
+a static call with no cache lookup and no allocation; the plain call pays one
+dynamic dispatch. The plan's type depends only on the kernel type, its values on
+`ndrange`. Store it in a concretely typed field (`struct MyOp{KK}; kern::KK; end`);
+a `::LavaKernel` field falls back to dynamic dispatch.
 """
 struct LavaKernel{K,P,Q}
     inner::K
     plan::P
-    # The queue, concrete. `LavaBackend` stores a
-    # `dispatch_bq::SubmitChannel{<:VulkanQueue}` (it pins its device at
-    # construction), so `backend.dispatch_bq` is a plain field load. Typing the
-    # plan is worthless unless the call it feeds is static: a dynamic call boxes
-    # its arguments, so a concrete `IterPlan{Ctx}` (a large isbits struct) is
-    # copied into a fresh box on every launch, measured at 144 B/dispatch, three
-    # times the abstract-plan barrier it is meant to beat.
+    # Concrete, so the call the plan feeds is static: a dynamic call would box
+    # the isbits plan on every launch.
     bq::Q
 end
 
@@ -560,7 +379,7 @@ function lavakernel(obj::KA.Kernel{LavaBackend}, ndrange; workgroupsize = nothin
     return LavaKernel(obj, plan, bq)
 end
 
-"""Launch a [`compiled`](@ref) kernel: no lookup, no barrier, static dispatch."""
+"""Launch a [`lavakernel`](@ref): no lookup, no barrier, static dispatch."""
 function (lk::LavaKernel)(args...)
     tlas = find_tlas_in_args(args)
     return launch_planned!(lk.bq, lk.inner, args, lk.plan, tlas)
@@ -573,20 +392,16 @@ end
     block_dims = plan.block_dims
     ws_3d      = plan.ws_3d
 
-    # One command buffer per launch, with nothing consulted about an open batch:
-    # joining one would make where a launch's commands land depend on
-    # task-global state this function is never told about. A declared graph is
-    # the batching, and a better one, at one submit with the barriers derived:
-    # 153 ms against 204.
+    # One command buffer per launch, never joining an open batch, which would
+    # depend on task-global state; batching is what a declared graph is for.
     oneshot!(bq; tag = :launch) do e
         emitlaunch!(e, obj, args, ka_ctx, block_dims, ws_3d, tlas)
     end
     return nothing
 end
 
-# The body both paths share: pin every LavaArray leaf in the closure and the
-# args into the recording (a `@generated` walker, zero alloc), then launch.
-# `Adapt.adapt` is pure — it only strips.
+# Shared by both launch paths: hold every leaf of the closure and arguments in
+# the one-shot, then adapt (which holds nothing) and launch.
 @inline function emitlaunch!(e, obj, args, ka_ctx, block_dims, ws_3d, tlas)
     owner = e.owner
     holdleaves!(owner, obj.f)
@@ -598,33 +413,22 @@ end
     ka_launch!(e, converted_f, all_args, block_dims, ws_3d, tlas)
 end
 
-# Vulkan dispatch is max 3D. pad_to_3d maps the N-D block grid to a 3D dispatch,
-# splitting large dimensions across Y/Z when needed to stay within device limits.
-# Uses actual device maxComputeWorkGroupCount (queried once, cached).
-#
-# CRITICAL: pad_to_3d must NEVER over-dispatch (produce more workgroups than requested).
-# Kernels like AK._accumulate_block! write to auxiliary arrays indexed by workgroup ID
-# without bounds checks — phantom workgroups cause out-of-bounds GPU memory writes.
+# Vulkan dispatches are at most 3-D: `pad_to_3d` maps the block grid onto
+# `ctx.max_wg_dims`, splitting large dimensions across Y and Z. Extra workgroups
+# write out of bounds in kernels that index auxiliary arrays by workgroup id
+# without checks (AK's `_accumulate_block!`), so splits use exact factors where
+# they exist.
 
-# Per-dimension workgroup count limits live on `VkContext.max_wg_dims` — queried
-# once at device creation. `pad_to_3d` and friends reach them via `ctxof(bq)`.
-
-# Find exact factor of n that is ≤ max_dim, for splitting workgroup counts.
-# Returns the largest factor ≤ max_dim, or max_dim if none found (over-dispatch).
+# A divisor of `n` within 3 of `max_dim`, else the smallest divisor in
+# `cld(n, max_dim):max_dim`, else `max_dim`, which over-dispatches.
 function find_split_factor(n::Int, max_dim::Int)
-    # Try exact division first (fast path for powers of 2, multiples of common factors)
     for d in (max_dim, max_dim-1, max_dim-2, max_dim-3)
         d > 0 && n % d == 0 && return d
     end
-    # Try small factors of n that would make the other dimension ≤ max_dim
-    # We need X such that X ≤ max_dim and n/X ≤ max_dim (for 2D split)
-    # So X ≥ cld(n, max_dim)
     lo = cld(n, max_dim)
     for x in lo:min(n, max_dim)
         n % x == 0 && return x
     end
-    # No exact factor found — find tightest over-approximation
-    # This should be extremely rare (requires n > max_dim^2 with no factors in range)
     return max_dim
 end
 
@@ -632,21 +436,17 @@ function pad_to_3d(ctx::VkContext, t::NTuple{1,<:Integer})
     n = Int(t[1])
     max_x, max_y, _ = ctx.max_wg_dims
     n <= max_x && return (n, 1, 1)
-    # Need to split into X * Y (or X * Y * Z)
-    # Find X such that X divides n exactly and X ≤ max_x
     x = find_split_factor(n, max_x)
     y = cld(n, x)
     if x * y == n && y <= max_y
         return (x, y, 1)
     end
-    # 2D split didn't work exactly, try 3D
     if y > max_y
-        # Flatten into 3D
         xy = x * min(y, max_y)
         z = cld(n, xy)
         return (x, min(y, max_y), z)
     end
-    # Over-dispatch (y > exact). This is dangerous for kernels without bounds checks.
+    # Over-dispatch: unsafe for kernels without bounds checks.
     @warn "pad_to_3d: over-dispatching $n as ($x, $y, 1) = $(x*y) workgroups" maxlog=1
     return (x, y, 1)
 end
@@ -656,21 +456,14 @@ function pad_to_3d(ctx::VkContext, t::NTuple{2,<:Integer})
     if x <= max_x && y <= max_y
         return (x, y, 1)
     end
-    # Flatten and re-split
     return pad_to_3d(ctx, (x * y,))
 end
 function pad_to_3d(::VkContext, t::NTuple{3,<:Integer})
     (Int(t[1]), Int(t[2]), Int(t[3]))
 end
-# For N>3: drop trailing unit axes first, and only flatten if something non-unit
-# is left past the third.
-#
-# A trailing `1` carries no information — `(8, 1152, 4, 1)` is the same grid as
-# `(8, 1152, 4)` — but flattening it to 1D and re-splitting loses the 1:1
-# correspondence between the dispatch and the block grid, which is exactly what
-# `directdispatch` needs. Rank-4 ndranges ending in a batch of 1 are the common
-# shape in this codebase (`(W, H, C, 1)`), so this is what lets them index
-# without dividing.
+# N > 3: drop trailing unit axes and flatten only if a non-unit axis remains past
+# the third. This keeps the common `(W, H, C, 1)` grid 1:1 with the dispatch,
+# which `directdispatch` needs to index without dividing.
 function pad_to_3d(ctx::VkContext, t::NTuple{N,<:Integer}) where N
     n = N
     while n > 3 && Int(t[n]) == 1
@@ -680,43 +473,24 @@ function pad_to_3d(ctx::VkContext, t::NTuple{N,<:Integer}) where N
     return pad_to_3d(ctx, ntuple(i -> Int(t[i]), n))
 end
 
-"""
-Internal launch function for KA kernels. Compiles and dispatches the GPU function.
-"""
-
-# Per device: a `LaunchPlan` holds a `VkPipeline` (GUARDRAILS §8). Same shape as
-# `LINKED_KERNEL_CACHE` — an outer dict keyed by `ctx.id`, so the inner one keeps
-# the `DataType` key that makes the lookup a pointer compare.
-
+# Per device, because a `LaunchPlan` holds a `VkPipeline`. The `DataType` key
+# makes the lookup a pointer compare.
 @inline launch_plan_cache(ctx) = ctx.caches.launchplans
 
 @inline function launch_plan(bq::SubmitChannel{<:VulkanQueue}, @nospecialize(f), all_args::Tuple,
                              wg::NTuple{3,Int}, ray_query::Bool)
-    # The KERNEL is part of the key, not only its arguments. `typeof(all_args)`
-    # alone was enough while every kernel came from `@kernel`, whose launch puts
-    # a `CompilerMetadata` in `all_args[1]`. A macro-free `KernelInterface`
-    # kernel is a plain function and that slot is `nothing`, so two kernels with
-    # the same signature share one entry and the second is handed the first's
-    # pipeline. Mantle's own `gemv` generates exactly that: `gemvk_4_128_64` and
-    # `gemvk_8_128_64` take `(C, A, B, K::Int, N::Int)` at workgroup 128, and the
-    # 8-row launch ran the 4-row pipeline — half its outputs were never written
-    # and came back at whatever the caller had left in them.
+    # The key includes the kernel type: a KI kernel has `nothing` in
+    # `all_args[1]`, so two with the same argument types would share a pipeline.
     key = Tuple{typeof(f), typeof(all_args)}
     world = Base.get_world_counter()
-    # `ctxof(bq)`, and the assert is the whole point: the driver bundle's `ctx` is
-    # declared `::Any` (it must be — `VkContext` owns the queue, so one direction
-    # of the cycle is untyped). Without the assert `ctx.caches.launchplans` infers
-    # as `Any`, which makes the `get` below a dynamic dispatch and the loop over
-    # `v` a fully dynamic iteration — measured at **464 bytes per dispatch**, on a
-    # warm cache that builds nothing. Every other `ctxof(bq)` in this file already
-    # carries the assert; this one did not.
+    # `ctxof(bq)` asserts `VkContext`; the driver's `ctx` field is untyped, and an
+    # untyped cache makes the lookup below allocate on every dispatch.
     cache = launch_plan_cache(ctxof(bq))
     v = get(cache, key, nothing)
     if v !== nothing
         for q in v
-            # `q::LaunchPlan` on an element of a `Vector{Any}` is a pointer
-            # check, not a copy. Iterating a `Vector{LaunchPlan}` instead boxes
-            # 64 bytes here on every dispatch — see `DeviceCaches.launchplans`.
+            # A typeassert on a `Vector{Any}` element does not copy; a
+            # `Vector{LaunchPlan}` would box on every read.
             p = q::LaunchPlan
             (p.world === world && p.wg === wg && p.ray_query === ray_query) && return p
         end
@@ -724,60 +498,28 @@ Internal launch function for KA kernels. Compiles and dispatches the GPU functio
     build_launch_plan!(bq, f, all_args, wg, ray_query, key, world)
 end
 
-# ── The function barrier, and why this is two functions instead of one.
-#
-# `all_args` is a fully concrete tuple type — a different one for every kernel in
-# the program — so ANY method taking it is inferred once per kernel. That is
-# correct and unavoidable for the code that packs arguments, which genuinely
-# needs each type. It is pure waste for everything downstream of it, which needs
-# only `tt`.
-#
-# Measured on SAM 2's encoder, first call in a fresh process: 16 981
-# MethodInstances inferred, 11 729 of them owned by Lava, ~26 s of the ~36 s of
-# first-call latency. The launch path was ~1 000 of each of `build_launch_plan!`,
-# `get_compiled_kernel_and_pipeline` and the cache lookups beneath it — one per
-# kernel, for functions whose bodies do not depend on the kernel at all.
-# `@nospecialize` was already on `f` and `tt` and did not help: inference still
-# specialises a callee to inline it into a specialised caller, so the widening
-# has to be paired with a barrier the compiler will not cross.
-#
-# This is CUDA.jl's shape (`cudacall` keeps the argument-dependent part to a thin
-# shell over a type-erased worker). The split point is `tt`: everything above it
-# is per-kernel and tiny, everything below is per-kernel-invariant and large.
+# `all_args` has a different concrete type per kernel, so any method taking it is
+# inferred per kernel. This method only computes `tt`; the kernel-independent
+# rest is `build_launch_plan_tt!` behind `Ref{Any}` boxes, so it is inferred once.
+# `@nospecialize` alone does not prevent the per-kernel specialisation.
 @noinline function build_launch_plan!(bq::SubmitChannel{<:VulkanQueue}, @nospecialize(f), all_args::Tuple,
                                       wg::NTuple{3,Int}, ray_query::Bool,
                                       key::DataType, world::UInt64)
-    # Excludes f — GPUCompiler prepends typeof(f). all_args are already
-    # post-adapt (LavaDeviceArray, not Ptr{T}).
-    #
-    # Computed here, and only here, because `typeof(all_args)` cannot stand in for
-    # it: a type-valued argument erases to `DataType` in the tuple type, and
-    # `arg_sigtype` recovers the `Type{X}` GPUCompiler needs.
+    # Drops `all_args[1]`, the function slot GPUCompiler prepends itself.
+    # `arg_sigtype` recovers `Type{X}` for type-valued arguments, which
+    # `typeof(all_args)` erases to `DataType`.
     tt = Tuple{map(arg_sigtype, Base.tail(all_args))...}
-    # `key` is boxed for the same reason `tt` is, and it is worth naming because
-    # it is easy to miss: `key::DataType` looks like an ordinary value parameter,
-    # but a *type-valued* argument enters the lattice as `Type{Tuple{…}}`, so
-    # Julia specialises on it exactly as it would on `tt`. Leaving it unboxed
-    # while boxing the other two took this from 1 238 specialisations to 909, not
-    # to 1.
+    # `key` is boxed too: a type-valued argument specialises like `tt`.
     build_launch_plan_tt!(bq, Ref{Any}(f), Ref{Any}(tt), Ref{Any}(key), wg, ray_query, world)
 end
 
-"""The half of `build_launch_plan!` that does not depend on the kernel's argument
-types — inferred once for the whole program rather than once per kernel.
+"""
+    build_launch_plan_tt!(bq, fbox, ttbox, keybox, wg, ray_query, world) -> LaunchPlan
 
-**The `Ref{Any}` boxes are the erasure, and `@nospecialize` is not a substitute.**
-Julia ignores `@nospecialize` for exactly the two kinds of argument this takes:
-specialising on a singleton function type is free, and a `Type{T}` argument is
-how dispatch is spelled, so both are always specialised on. Measured: with
-`@nospecialize` on both and `@noinline` on the method, this still had 1 238
-specialisations, one per kernel — the annotation had no effect at all. Boxed, the
-signature is `RefValue{Any}` twice and there is one.
-
-The cost is that `f` and `tt` come out as `Any` and every call below here is a
-dynamic dispatch. That is the right trade on this path and only on this path:
-`launch_plan` reaches it solely on a cache miss, i.e. once per kernel per world,
-and what follows is a SPIR-V compile. On the hit path nothing here runs."""
+The kernel-independent half of `build_launch_plan!`, inferred once. The
+`Ref{Any}` boxes erase `f`, `tt` and `key`, for which Julia ignores
+`@nospecialize`. Runs only on a launch-plan cache miss, before a compile.
+"""
 @noinline function build_launch_plan_tt!(bq::SubmitChannel{<:VulkanQueue}, fbox::Base.RefValue{Any},
                                          ttbox::Base.RefValue{Any},
                                          keybox::Base.RefValue{Any},
@@ -798,27 +540,26 @@ and what follows is a SPIR-V compile. On the hit path nothing here runs."""
     p
 end
 
+"""
+    ka_launch!(e, f, all_args, block_dims, workgroup_size, tlas = nothing)
+
+Look up or compile `f` for the post-adapt `all_args`, pack the arguments into
+`e`'s one-shot and record the dispatch over `block_dims`. `all_args[1]` is the
+function slot and is not part of the signature.
+"""
 function ka_launch!(e::Emitter, @nospecialize(f), all_args::Tuple,
                     block_dims::NTuple{3,Int}, workgroup_size::NTuple{3,Int},
-                    tlas=nothing)  # positional, Nothing default — hot path
+                    tlas=nothing)  # positional: no keyword NamedTuple on the hot path
     bq = queueof(e)
-    # When `tlas` was auto-discovered from kernel args (e.g. an AdaptedAccel
-    # was passed), enable ray_query so the SPIR-V emitter binds the HWTLAS
-    # descriptor and accepts OpRayQueryInitializeKHR / Proceed / Get*KHR.
+    # A TLAS argument compiles with ray query and binds the TLAS descriptor.
     plan = launch_plan(bq, f, all_args, workgroup_size, tlas !== nothing)
 
-    # The one-shot owns the argument memory and is what the packed buffers are
-    # pinned into, so it is taken ONCE from the emitter and passed. Reaching it
-    # through the queue at each call cost 96 bytes a dispatch when the queue's
-    # field came back abstract — `test_dispatch_allocation.jl` is the cliff
-    # detector for exactly this.
+    # The one-shot owns the argument memory. Taken once from the emitter:
+    # reaching it through the queue allocates when that field infers abstract.
     owner = e.owner
     arg_buf = get_arg_buffer(owner, plan.total_size)
 
-    # The KA.Kernel entry point already ran `Adapt.adapt(LavaAdaptor(owner), ..)`
-    # on each original arg, which both pinned every LavaArray (and nested
-    # LavaArrays in wrapper structs) AND stripped them to LavaDeviceArray.
-    # Here `all_args` is post-adapt, so pack sees no further pinnable leaves.
+    # `all_args` is post-adapt; the caller already held the original leaves.
     pack_args_direct!(owner, arg_buf.mapped_ptr, arg_buf.address, plan.offsets,
                        plan.arg_buffer_size, plan.byval_sizes, all_args)
 
@@ -828,16 +569,11 @@ function ka_launch!(e::Emitter, @nospecialize(f), all_args::Tuple,
                                  dispatch_name(f, all_args), " groups=", block_dims)::String
         driver(bq).last_dispatch_info = name
     end
-    # Dispatch with N-D block grid (preserves KA's block dimensions).
     emit_dispatch!(e, plan.pipeline, arg_buf.address, block_dims, tlas, name)
     return nothing
 end
 
-# ── Indirect dispatch support ──
-#
-# Internal Lava kernels only ever see `LavaDeviceArray` / `LavaDeviceArray`
-# — never `Ptr{T}` / `unsafe_load`.  Callers wrap raw GPU memory in
-# `LavaArray`/`LavaArray view` before handing it to the kernel.
+# Indirect dispatch. Kernels take `LavaDeviceArray`s, never raw pointers.
 
 function prepare_indirect_kernel(indirect::LavaDeviceArray{UInt32,1},
                                   ndrange_buf::LavaDeviceArray{Int32,1},
@@ -862,17 +598,15 @@ end
 """
     ka_launch_indirect!(e, obj, args, ndrange_buf, workgroupsize, original_args, adaptor, tlas)
 
-Launch a KA kernel using indirect dispatch, into the one-shot `e` writes.
-`ndrange_buf` is a GPU array containing the work item count (1-element Int32
-array). The prepare-indirect kernel writes group counts to an indirect buffer,
-a barrier makes them visible, and the main kernel dispatches off them — three
-commands in one closed buffer.
+Record an indirect launch of `obj` into `e`: a prepare kernel turns the item
+count in `ndrange_buf` (1-element `Int32`) into group counts, a barrier makes
+them visible, and the dispatch reads them.
 """
 function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, workgroupsize,
                              original_args, adaptor::LavaAdaptor,
-                             tlas=nothing)  # positional — same NamedTuple-avoidance as ka_launch!
+                             tlas=nothing)  # positional, as in ka_launch!
     bq = queueof(e)
-    # Respect static workgroup size from @kernel definition
+    # Keyword, then the `@kernel` static size, then 256.
     ws = if workgroupsize !== nothing
         workgroupsize isa Integer ? (workgroupsize,) : workgroupsize
     elseif KA.workgroupsize(obj) <: KA.StaticSize
@@ -883,12 +617,9 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
     ws_3d = pad_to_3d(ctxof(bq), ws)
     ws_prod = prod(ws)
 
-    # We need to compile the kernel with a static ndrange for __validindex.
-    # Use DynamicCheck so the kernel checks bounds at runtime via the iterspace.
-    # We compile with a large ndrange; the actual dispatch count comes from indirect buffer.
-    # Key insight: __validindex checks `I in __ndrange(ctx)`, and __ndrange(ctx) returns
-    # the ndrange from CompilerMetadata. We set this to a large value so threads always pass.
-    # The kernel's own bounds check (e.g. `if i <= queue.size[1]`) handles the real bound.
+    # The group count comes from the indirect buffer. A large ndrange makes
+    # `__validindex` pass for every thread; the kernel must bound itself against
+    # the real count (e.g. `i <= queue.size[1]`).
     big_ndrange = (1024 * 1024 * ws_prod,)
     ndrange_tuple = length(ws) == 1 ? big_ndrange :
                     length(ws) == 2 ? (big_ndrange[1], 1) :
@@ -896,14 +627,13 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
     iterspace, dynamic = KA.partition(obj, ndrange_tuple, ws)
     ctx = KA.mkcontext(obj, ndrange_tuple, iterspace)
 
-    # Caller already pinned the original args via `holdleaves!`; pin the
-    # closure's captures here. `Adapt.adapt` is pure now (strip only).
+    # The caller held the arguments; hold the closure's captures as well.
     batch = adaptor.batch
     holdleaves!(batch, obj.f)
     converted_f = Adapt.adapt(adaptor, obj.f)
     all_args = (converted_f, ctx, args...)
 
-    # Kernel ABI is post-adapt: LavaDeviceArray etc.
+    # Signature of the post-adapt arguments, function slot dropped.
     tt = Tuple{map(arg_sigtype, Base.tail(all_args))...}
     enable_ray_query = tlas !== nothing
     compiled, pipeline, offsets, byval_sizes = get_compiled_kernel_and_pipeline(
@@ -912,8 +642,7 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
     inline_extra = compute_inline_extra_from_byval(byval_sizes)
     total_size = compiled.push_info.arg_buffer_size + inline_extra
 
-    # GC.@preserve on original_args keeps the pre-strip LavaArrays reachable
-    # through this function.
+    # Keep the pre-adapt arrays reachable while their addresses are packed.
     GC.@preserve original_args begin
 
     arg_buf = get_arg_buffer(batch, total_size)
@@ -928,11 +657,8 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
                                  dispatch_name(obj.f, all_args))::String
         driver(bq).last_dispatch_info = name
     end
-    # The prepare, the barrier that makes its write visible to the command
-    # processor, then the dispatch that reads it. Fusing the prepares of several
-    # launches is a pass's business, which knows which of its dispatches are
-    # device-sized without being told (see `emitprepares!`); this path is the
-    # one nothing declared.
+    # Prepare, barrier for the indirect read, dispatch. Graph passes fuse their
+    # prepares instead (`emitprepares!`).
     prepare_indirect_dispatch!(e, indirect_view, ndrange_buf, ws_prod)
     indirectbarrier!(e, VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK.PIPELINE_STAGE_DRAW_INDIRECT_BIT,
                      VK.ACCESS_INDIRECT_COMMAND_READ_BIT)
@@ -943,16 +669,6 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
     return nothing
 end
 
-# ── Device code is not here ──
-#
-# Everything a kernel BODY calls left this file for Lava when the runtime moved:
-# `getindex`/`setindex!`/`linear_index` on a `LavaDeviceArray` are in
-# `Lava/src/device/devicearray.jl`, and the `KA.__index_*`, `KA.__validindex`,
-# `KA.__synchronize` and `KA.Scratchpad` overrides are in
-# `Lava/src/device/ndrange.jl`.
-#
-# They were still here after the split, which meant Lava could not compile a
-# kernel that indexed an array without Mantle loaded — silently, because the
-# result is a valid empty entry point rather than an error. What stays in this
-# file is the HOST half: the backend struct, launch configuration, argument
-# packing and dispatch.
+# Device-side code (`LavaDeviceArray` indexing and the KA index, synchronize and
+# scratchpad overrides) is in Lava's `device/devicearray.jl` and
+# `device/ndrange.jl`, so Lava compiles kernels without Mantle loaded.

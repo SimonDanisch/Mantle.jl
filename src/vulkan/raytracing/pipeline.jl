@@ -1,18 +1,13 @@
-# Ray tracing pipeline creation and dispatch for Lava.jl
-#
-# Creates VkRayTracingPipelineKHR from SPIR-V shader modules.
-# Manages shader binding table (SBT) layout and dispatch.
+# Ray-tracing pipelines from SPIR-V, their shader binding tables, and trace dispatch.
 
 const VK_SHADER_UNUSED_KHR = ~UInt32(0)  # 0xFFFFFFFF
 
 """
     LavaRTPipeline
 
-A compiled ray tracing pipeline with shader binding table.
-
-Subtypes `CompiledRTPipeline` (`runtime/coretypes.jl`) so `DeviceCaches` can
-cache one: this type holds the `VkContext` that holds those caches, so the
-concrete name cannot appear in the cache's field type.
+A compiled ray-tracing pipeline with its shader binding table. Subtypes
+`CompiledRTPipeline` (`runtime/coretypes.jl`) because it holds the `VkContext`
+whose `DeviceCaches` store it, so the cache cannot name the concrete type.
 """
 struct LavaRTPipeline <: CompiledRTPipeline
     pipeline::VK.Pipeline
@@ -26,34 +21,23 @@ struct LavaRTPipeline <: CompiledRTPipeline
     miss_region::VK.StridedDeviceAddressRegionKHR
     hit_region::VK.StridedDeviceAddressRegionKHR
     callable_region::VK.StridedDeviceAddressRegionKHR
-    # Push constant size
     push_constant_size::UInt32
     # Stage flags for push constants and descriptor sets
     stage_flags::VK.ShaderStageFlag
-    # Context this pipeline was built against (for descriptor-set creation,
-    # SBT uploads, etc. — no global lookups needed).
+    # The context this pipeline was built against.
     ctx::VkContext
 end
 
 """
-    create_rt_pipeline(raygen_spirv, miss_spirv, chit_spirvs;
+    create_rt_pipeline(ctx, raygen_spirv, miss_spirv, chit_spirv(s);
+                       anyhit_spirv=nothing, intersection_spirv=nothing,
                        push_constant_size=8) -> LavaRTPipeline
 
-Create a ray tracing pipeline from raygen + miss + N closest-hit SPIR-V
-binaries.
-
-Layout:
-  - Group 0:                raygen (GENERAL)
-  - Group 1:                miss (GENERAL)
-  - Group 2 .. 1+N:         closest-hit hit groups (TRIANGLES_HIT_GROUP, or
-                            PROCEDURAL_HIT_GROUP when `intersection_spirv` is
-                            given — AABB primitives whose hit is computed by an
-                            intersection shader rather than by the hardware
-                            triangle test)
-  - Optional any-hit:       shared across every hit group when supplied
-  - Optional intersection:  ditto; makes the groups procedural
-  - Descriptor set 0/0:     AccelerationStructure (HWTLAS)
-  - Push constant:          BDA pointer (8 bytes by default)
+A ray-tracing pipeline from raygen, miss and one or more closest-hit SPIR-V
+binaries. Groups: 0 raygen, 1 miss, 2..1+N one hit group per closest-hit, all
+sharing the optional any-hit and intersection shaders; an intersection shader
+makes them `PROCEDURAL_HIT_GROUP`s over AABBs. Set 0, binding 0 is the TLAS; the
+push constant is the argument buffer's device address.
 """
 function create_rt_pipeline(ctx::VkContext,
                             raygen_spirv::Vector{UInt8},
@@ -80,7 +64,6 @@ function create_rt_pipeline(ctx::VkContext,
     n_chits = length(chit_spirvs)
     n_chits >= 1 || throw(ArgumentError("create_rt_pipeline: at least one closest-hit shader required"))
 
-    # Create shader modules
     raygen_mod = create_shader_module(dev, raygen_spirv)
     check_validation_errors!("vkCreateShaderModule (raygen)")
     miss_mod = create_shader_module(dev, miss_spirv)
@@ -95,15 +78,12 @@ function create_rt_pipeline(ctx::VkContext,
     end
 
     has_anyhit = anyhit_spirv !== nothing
-    # An intersection shader turns every hit group PROCEDURAL: the two group
-    # types are alternatives, not options to combine. A procedural group's
-    # primitives are AABBs, and the intersection shader is what decides whether
-    # and where a ray hits inside one — so the hardware triangle test is not
-    # skipped, it is simply not what the BLAS holds.
+    # An intersection shader makes every hit group procedural: the BLAS holds
+    # AABBs, and the shader decides whether and where a ray hits inside one.
     has_isect = intersection_spirv !== nothing
 
-    # Shader stages: 0=raygen, 1=miss, 2..1+N=closest-hit per chit_spirvs,
-    # then optional anyhit at the next index.
+    # Stages: 0 raygen, 1 miss, 2..1+N closest-hits, then the optional any-hit
+    # and intersection.
     stages = VK.PipelineShaderStageCreateInfo[
         VK.PipelineShaderStageCreateInfo(
             VK.SHADER_STAGE_RAYGEN_BIT_KHR, raygen_mod, "main"),
@@ -148,7 +128,7 @@ function create_rt_pipeline(ctx::VkContext,
         all_stage_flags |= VK.SHADER_STAGE_INTERSECTION_BIT_KHR
     end
 
-    # Shader groups: raygen (0), miss (1), then one triangles-hit-group per chit.
+    # Groups: raygen (0), miss (1), then one hit group per closest-hit.
     groups = VK.RayTracingShaderGroupCreateInfoKHR[
         VK.RayTracingShaderGroupCreateInfoKHR(
             VK.RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,
@@ -197,11 +177,8 @@ function create_rt_pipeline(ctx::VkContext,
 
     layout = VK.PipelineLayout(dev, [ds_layout], push_ranges)
 
-    # Create RT pipeline
-    # Same no-compile verification the compute path uses: with PIPELINE_NO_COMPILE
-    # set the driver refuses to build a binary rather than compiling one, so a run
-    # that completes provably did zero driver compilation. RT is the path that
-    # matters most for startup — a RayDemo scene is mostly RT pipelines.
+    # With PIPELINE_NO_COMPILE the driver refuses to compile, as on the compute
+    # path, so a completed run did no driver compilation.
     rt_flags = VK.PipelineCreateFlag(0)
     if PIPELINE_NO_COMPILE[]
         rt_flags |= VK.PipelineCreateFlag(VK.PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) |
@@ -219,8 +196,8 @@ function create_rt_pipeline(ctx::VkContext,
         dev, [rt_ci]; pipeline_cache=ctx.pipeline_cache)
     pipeline = pipelines[1]
 
-    # Build SBT (raygen + miss + N hit groups; any-hit is shared inside each
-    # triangles-hit-group, not a separate SBT entry).
+    # SBT: raygen, miss, N hit groups; any-hit and intersection belong to the
+    # hit groups, not separate entries.
     sbt_buf, raygen_region, miss_region, hit_region, callable_region =
         build_sbt(ctx, pipeline, rt_props, n_chits)
 
@@ -285,14 +262,8 @@ function tracecommand!(e::Emitter, p::LavaRTPipeline, indirect::LavaArray{UInt32
     return nothing
 end
 
-"""Build the SBT for raygen + miss + `n_hit_groups` triangles-hit-groups.
-
-Pipeline group ordering matches `create_rt_pipeline`:
-  - group 0           : raygen
-  - group 1           : miss
-  - groups 2..1+N     : the N hit groups, in chit order.
-
-Per-instance dispatch picks an SBT hit-group entry by
+"""Build the SBT for raygen, miss and `n_hit_groups` hit groups, in the group order
+of `create_rt_pipeline`. An instance picks its hit group with
 `instanceShaderBindingTableRecordOffset` (0..N-1).
 """
 function build_sbt(ctx::VkContext, pipeline::VK.Pipeline, rt_props::RTPipelineProperties,
@@ -302,8 +273,8 @@ function build_sbt(ctx::VkContext, pipeline::VK.Pipeline, rt_props::RTPipelinePr
     handle_size = rt_props.shader_group_handle_size
     base_align = rt_props.shader_group_base_alignment
 
-    # Each group entry must be aligned to shader_group_handle_alignment
-    # but stride must be multiple of shader_group_handle_alignment
+    # Entry strides are multiples of shader_group_handle_alignment; regions
+    # start at shader_group_base_alignment.
     handle_size_aligned = align_up(handle_size, rt_props.shader_group_handle_alignment)
 
     # Pull every pipeline group handle: raygen + miss + N hit groups = 2 + N

@@ -1,28 +1,13 @@
-# External-memory interop: share Lava-produced images with other APIs.
-#
-# An `VulkanExternalImage` owns a dedicated, exportable Vulkan image allocation on
-# Lava's device. Its memory can be handed to another API as an opaque fd
-# (`memoryfd`) — e.g. imported into OpenGL via GL_EXT_memory_object_fd — so
-# a frame computed in a Lava kernel reaches the other API with **zero
-# copies across PCIe** (one device-local blit, no host roundtrip).
-#
-# Everything here is additive and opt-in: nothing runs unless an
-# VulkanExternalImage is created. The allocation is deliberately dedicated and
-# outside the pooled allocator — external memory must not be sub-allocated
-# (importers see the whole allocation), and NVIDIA requires dedicated
-# allocations for exported images anyway.
-#
-# See VideoEdit/interop_mwe.jl for a full Vulkan↔GL validation including
-# the GL import side.
+# External-memory interop. Exported images get a dedicated allocation outside the
+# pool: importers see the whole allocation, and NVIDIA requires dedicated
+# allocations for exported images.
 
 """
     VulkanExternalImage(ctx, width, height; format = VK.FORMAT_R8G8B8A8_UNORM)
 
-A GPU image whose memory can be exported to other APIs (see [`memoryfd`](@ref)).
-OPTIMAL tiling, `TRANSFER_DST | SAMPLED` usage. Fill it from a `LavaArray`
-with `copyto!(img, array)`. Requires `VK_KHR_external_memory_fd` (enabled
-automatically at device creation when the driver offers it; check
-`vk_context().external_memory_available`).
+An image on `ctx` whose memory [`memoryfd`](@ref) exports to other APIs. OPTIMAL
+tiling, `TRANSFER_DST | SAMPLED` usage; fill it with `copyto!(img, array)`.
+Requires `ctx.external_memory_available` (`VK_KHR_external_memory_fd`).
 """
 mutable struct VulkanExternalImage <: ExternalImage
     image::VK.Image
@@ -63,16 +48,15 @@ end
 """
     memoryfd(img::VulkanExternalImage) -> Int
 
-Export the image's memory as an opaque file descriptor
-(`VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT`). Each call duplicates a
-new fd; the importer takes ownership (e.g. `glImportMemoryFdEXT` consumes
-it). Importers must import exactly `img.allocation_size` bytes and, for
-GL, mark the memory object dedicated and the texture OPTIMAL-tiled.
+Export the image's memory as a new opaque fd per call; the importer owns it
+(`glImportMemoryFdEXT` consumes it). Importers must import exactly
+`img.allocation_size` bytes and, in GL, mark the memory object dedicated and the
+texture OPTIMAL-tiled.
 """
 function memoryfd(img::VulkanExternalImage)
     ctx = img.ctx
-    # VK.jl's high-level get_memory_fd_khr passes a Ref{Int64} where the
-    # C signature wants int*, so call the low-level entry point directly.
+    # VK.jl's `get_memory_fd_khr` passes a `Ref{Int64}` where the C signature
+    # wants `int*`, so call the entry point directly.
     fptr = VK.function_pointer(ctx.device, "vkGetMemoryFdKHR")
     pfd = Ref{Int32}(-1)
     info = VK._MemoryGetFdInfoKHR(img.memory,
@@ -85,14 +69,10 @@ end
 """
     copyto!(img::VulkanExternalImage, a::LavaArray) -> img
 
-Blit the array's bytes into the external image (device-local copy — the
-data never leaves the GPU). The array must hold at least
-`4 * width * height` bytes of pixel data in x-contiguous row order matching
-the image format. Waits for pending Lava kernels writing `a`, then blocks
-until the copy has landed, so the importer may sample immediately.
-
-Runs as a one-shot submission on the context's secondary compute queue —
-it never interleaves with the submit channel's batched submissions.
+Copy at least `4 * width * height` bytes of x-contiguous rows from `a` into the
+image on the GPU. Synchronizes `a`'s backend first, then submits on
+`ctx.compute_queue` and waits for that queue to go idle, so the importer may
+sample immediately. Leaves the image in `GENERAL` layout.
 """
 function Base.copyto!(img::VulkanExternalImage, a::LavaArray)
     nbytes = length(a) * sizeof(eltype(a))
@@ -104,8 +84,8 @@ function Base.copyto!(img::VulkanExternalImage, a::LavaArray)
 
     managed = a.buf[]
     src_offset = UInt64(pool_offset(managed) + a.offset)
-    # VK.jl handles are refcounted and destroy themselves via finalizers —
-    # no manual destroy (a second vkDestroy* on the same handle segfaults).
+    # VK.jl handles destroy themselves in finalizers; a manual destroy here
+    # would destroy them twice and segfault.
     pool = @vk_checked "external_copy_pool" VK.create_command_pool(ctx.device, ctx.queue_family_index)
     let
         cb = first(@vk_checked "external_copy_cb" VK.allocate_command_buffers(ctx.device,
@@ -138,8 +118,6 @@ function Base.copyto!(img::VulkanExternalImage, a::LavaArray)
     end
     return img
 end
-
-# ── Host memory the device reads in place ────────────────────────────────────
 
 """
     importhost(bq, ptr, nbytes) -> VkManagedBuffer
@@ -178,16 +156,16 @@ canimporthost(backend::LavaBackend) = vk_context(backend).host_import_alignment 
 
 function importhost(backend::LavaBackend, A::DenseArray{T,N}) where {T,N}
     managed = importhost(backend.dispatch_bq, pointer(A), sizeof(A))
-    # The release holds `A`, so the memory stays mapped while the array can be
-    # named, and waits for the device before the buffer goes: the destroy is
-    # deferred, and `A` may be unmapped as soon as the closure is collected.
+    # The release closure keeps `A` alive. It synchronizes first because
+    # `vk_free!` defers the destroy, and `A` may be freed once the closure is
+    # collected.
     ref = GPUArrays.DataRef(managed) do buf
         KA.synchronize(backend)
         vk_free!(buf)
         A
         return
     end
-    # ambient-allocation-ok: a wrapper over `ref`, whose buffer was imported on
-    # `backend.dispatch_bq` and carries that context; nothing is allocated here.
+    # ambient-allocation-ok: wraps `ref`, whose buffer carries the context of
+    # `backend.dispatch_bq`; nothing is allocated.
     return LavaArray{T,N}(ref, size(A))
 end

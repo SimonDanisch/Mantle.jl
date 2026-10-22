@@ -1,34 +1,11 @@
-# Tracing PROCEDURAL (AABB) geometry on Metal.
-#
-# ── Why this is not just another linked function ─────────────────────────────
-#
-# Triangle traversal is one MSL call: `intersector<instancing, triangle_data>`
-# answers a ray with a hit and nothing in between. A BOX cannot be answered that
-# way — what is inside it is the shader's to say, which is what
-# `procedural_candidate` says — so the traversal has to STOP at every candidate
-# and ask.
-#
-# Metal's inline ray query (`intersection_query<>`) does exactly that, and like
-# `intersector<>` it is a C++ class template the Metal frontend instantiates and
-# inlines, so the LOOP can only be MSL. The BODY is Julia. They meet through a
-# `[[visible]]` function in a visible function table:
-#
-#     MSL  intersection_query        -> the loop, and only MSL can hold it
-#     AIR  visible function          -> `procedural_candidate`, compiled from Julia
-#     back the new best, four floats -> the loop commits if it improved
-#
-# Only scalars and one pointer cross that boundary. No query object does, which
-# is what made this look impossible from the Julia side: there is no query in
-# scope to ask, so the candidate's primitive and ray arrive as PARAMETERS that
-# `stage_builtins!` appends — the same mechanism `vertex_index()` uses.
+# Tracing procedural (AABB) geometry on Metal. The traversal loop is an MSL
+# `intersection_query<>` (a C++ template, so MSL only); at each box candidate it
+# calls `procedural_candidate`, compiled from Julia as a `[[visible]]` function
+# in a visible function table. Only scalars and one payload pointer cross; the
+# candidate's ray and primitive arrive as parameters `stage_builtins!` appends.
 
-# ── The running best, as four floats ─────────────────────────────────────────
-#
-# A visible function returns a value and has no other way out, so the payload's
-# best hit has to fit in one. Four 32-bit fields is what a hit record is in
-# practice -- `Hikari.FEMHit` is `(t, ξ₁, ξ₂, cell)` -- and packing by FIELD
-# rather than by `reinterpret` keeps it honest for a struct that is not a
-# primitive type, which `reinterpret` refuses on a GPU.
+# The running best hit crosses back as four floats, packed per field because
+# `reinterpret` refuses non-primitive structs on the GPU.
 
 @inline _as_f32(x::Float32) = x
 @inline _as_f32(x::UInt32)  = reinterpret(Float32, x)
@@ -50,7 +27,11 @@ A payload's running best hit, as the four floats a visible function returns.
     return Expr(:block, Expr(:meta, :inline), Expr(:tuple, vals...))
 end
 
-"""    unpackbest(B, v) — the inverse of [`packbest`](@ref)."""
+"""
+    unpackbest(B, v) -> B
+
+The inverse of [`packbest`](@ref).
+"""
 @generated function unpackbest(::Type{B}, v::NTuple{4,Float32}) where {B}
     args = [:(_from_f32($(fieldtype(B, i)), v[$i])) for i in 1:fieldcount(B)]
     return Expr(:block, Expr(:meta, :inline), Expr(:call, B, args...))
@@ -61,23 +42,13 @@ struct ProceduralOut
     v::NTuple{4,Float32}
 end
 
-# ── The visible function ─────────────────────────────────────────────────────
-
 """
     ProceduralVisible{P,B}()
 
-The callable compiled as an AIR visible function for a payload of type `P` whose
-best hit is `B`.
-
-A callable STRUCT and not a closure, because it has to be compiled by type:
-`Metal.methodinstance(ProceduralVisible{P,B}, tt)` is what names it, exactly as
-`MetalFragmentStage` names a fragment shader.
-
-`P` is the DEVICE side of the payload — what `Adapt.adapt` made of it — so its
-array fields are `MtlDeviceArray`s and the whole struct is plain bits. It
-arrives as ONE pointer at the buffer holding those bits, which is what keeps the
-MSL below free of the payload's shape: one source, compiled once per device,
-whatever a caller is tracing.
+The callable compiled as an AIR visible function for device-side payload type `P`
+(plain bits) with best-hit type `B`. A struct, not a closure, so it compiles by
+type. The payload arrives as one pointer, so the MSL traversal is independent of
+its layout.
 """
 struct ProceduralVisible{P,B} end
 
@@ -96,18 +67,10 @@ procedural_visible_tt() = Tuple{Float32, Float32, Float32, Float32,
                                 Core.LLVMPtr{UInt8, Metal.AS.Device},
                                 StageOut{ProceduralOut}}
 
-# ── The traversal ────────────────────────────────────────────────────────────
-#
-# `scene->cand` is the visible function table, and `scene->payload` the bytes of
-# the adapted payload. Both live in the SAME argument buffer as the acceleration
-# structure, which is why the Julia side's `ccall` keeps its one-pointer
-# signature and nothing about it is payload-shaped.
-#
-# The builtin order is `(direction, origin, prim)` and NOT declaration order:
-# `stage_builtins!` appends the globals it turns into parameters sorted BY NAME,
-# and `__air_candidate_direction` < `__air_candidate_origin` <
-# `__air_candidate_prim`. Getting it wrong compiles, links, runs, and reports
-# every ray a miss.
+# The table (`scene->cand`) and the payload bytes share the acceleration
+# structure's argument buffer, so the Julia `ccall` keeps a one-pointer signature.
+# The builtins are passed as `(direction, origin, prim)` because `stage_builtins!`
+# appends them sorted by global name; another order reports every ray a miss.
 const PROCEDURAL_MSL = """
 #include <metal_stdlib>
 #include <metal_raytracing>
@@ -204,9 +167,7 @@ kernel void __metal_proc_table_host(device uint *sink [[buffer(0)]],
 { return trace_proc(scene, ox,oy,oz, dx,dy,dz, tmin, tmax, cull, true); }
 """
 
-# ── The host side ────────────────────────────────────────────────────────────
-
-"""One device's procedural traversal: the MSL pair, compiled once."""
+"""Devices (by `MTLDevice` pointer) whose MSL procedural traversal is registered."""
 const PROC_FUNCS = Dict{Any,Nothing}()
 const PROC_FUNCS_LOCK = ReentrantLock()
 
@@ -226,23 +187,15 @@ end
 """
     procedural_payload_bytes(payload) -> MtlVector{UInt8}
 
-The DEVICE-side payload, as bytes a visible function can load in one go.
-
-`Metal.mtlconvert` is what a kernel launch would do to it, so what lands here is
-exactly the struct the shader sees — `MtlDeviceArray`s holding device addresses,
-scalars inline. Nothing about the payload's SHAPE reaches the MSL that way,
-which is why there is one traversal source and not one per payload type.
+The bytes of `Metal.mtlconvert(payload)`, the struct a kernel launch would pass.
+Throws if that is not plain bits.
 """
 function procedural_payload_bytes(payload)
     dev_side = Metal.mtlconvert(payload)
     isbitstype(typeof(dev_side)) ||
         error("a procedural payload must adapt to plain bits to cross into a " *
               "visible function; `$(typeof(dev_side))` does not")
-    # Copied through a pointer, not `reinterpret(UInt8, [x])`: a payload with
-    # PADDING — `Hikari.FEMElements` has some — makes `reinterpret` refuse with
-    # "Padding of type UInt8 is not compatible". The padding bytes travel too and
-    # are never read; what matters is that the fields land at the offsets the
-    # device-side struct declares.
+    # Through a pointer: `reinterpret` refuses structs with padding.
     n = sizeof(dev_side)
     bytes = Vector{UInt8}(undef, n)
     ref = Ref(dev_side)
@@ -256,13 +209,9 @@ end
 """
     procedural_resident!(d, payload)
 
-Make every buffer the payload REACHES resident.
-
-The payload's own bytes being resident is not enough: they hold device
-ADDRESSES, and a buffer reached by a stored address is exactly the case Metal
-cannot infer — the shader reads zeros and the candidate rejects every box. The
-symptom is a traversal that offers candidates and never commits one, which looks
-like a wrong solve and is not.
+Make the buffers of `payload`'s top-level `MtlArray` fields resident. Metal cannot
+infer residency for buffers reached by stored address; the shader then reads
+zeros and the candidate rejects every box.
 """
 function procedural_resident!(d::MetalDevice, payload)
     for i in 1:fieldcount(typeof(payload))
@@ -273,24 +222,19 @@ function procedural_resident!(d::MetalDevice, payload)
     return nothing
 end
 
-"""The device-side type of `payload`, which is what `ProceduralVisible` is compiled for."""
+"""The device-side type of `payload`, the `P` of `ProceduralVisible`."""
 procedural_device_type(payload) = typeof(Metal.mtlconvert(payload))
 
 """
     procedural_table(d, payload, best_type) -> (table, pipeline)
 
 Compile this payload's `procedural_candidate` as a visible function and put it
-in a one-entry table.
-
-The table is built against a PIPELINE because a function handle is only
-meaningful for the pipeline that linked the function — so the pipeline here is
-the traversal's own, and the table it yields is what every shading kernel binds.
+in a one-entry table. A function handle only exists for a pipeline that links the
+function, so the table is built against a pipeline created for that purpose.
 """
 function procedural_table(d::MetalDevice, payload, ::Type{B}) where {B}
     P = procedural_device_type(payload)
     fn = compile_procedural_candidate(d, P, B)
-    # A pipeline whose only job is to own the handle. `__metal_linked_closest_proc`
-    # is the natural carrier: it is the function that will call it.
     ensure_procedural_linked!(d)
     lib = MTL.MTLLibrary(d.dev, PROCEDURAL_MSL)
     host = MTL.MTLFunction(lib, "__metal_proc_table_host")
@@ -307,8 +251,7 @@ function procedural_table(d::MetalDevice, payload, ::Type{B}) where {B}
               "an unset table entry is a GPU fault, not an error")
     table = MTL.MTLVisibleFunctionTable(pipe, MTL.MTLVisibleFunctionTableDescriptor(1))
     MTL.set_function!(table, handle, 0)
-    # `sync!` makes the table resident; see `newstructure` for why it has to
-    # leave the set on its own when it is collected.
+    # Leaves the residency set when collected, as in `newstructure`.
     finalizer(Metal.forget_resident!, table)
     return (table, pipe)
 end
@@ -316,32 +259,21 @@ end
 """The start of every procedural candidate's function name; the rest names its types."""
 const PROCEDURAL_CANDIDATE_PREFIX = "__metal_linked_procedural_candidate_"
 
-"""Compile `ProceduralVisible{P,B}` and keep its library alive with the function."""
+"""Compile `ProceduralVisible{P,B}` and register it for every pipeline on `d`."""
 function compile_procedural_candidate(d::MetalDevice, ::Type{P}, ::Type{B}) where {P,B}
-    # A name per payload type. Every pipeline links each registered table function
-    # once, by NAME, so one name for all of them kept whichever payload registered
-    # first: a second payload type's traces called the first one's candidate, and
-    # a sphere solve answered a box query with t = 1700. Which one won depended on
-    # which test or scene ran first.
+    # One name per payload type: pipelines link registered functions by name, so
+    # a shared name calls whichever payload's candidate registered first.
     name = string(PROCEDURAL_CANDIDATE_PREFIX, string(hash((P, B)); base = 16))
-    # Inlined whole for the reason `compile_stage_function` gives.
+    # `always_inline` as in `compile_stage_function`.
     cfg = Metal.compiler_config(d.dev; stage = :candidate, name, always_inline = true)
     job = Metal.GPUCompiler.CompilerJob(
         Metal.methodinstance(ProceduralVisible{P,B}, procedural_visible_tt()), cfg)
     lib = MTL.MTLLibraryFromData(d.dev, Metal.compile_to_metallib(job).metallib)
     fn = MTL.MTLFunction(lib, name)
-    # Registered like the MSL traversal is, so EVERY kernel pipeline compiled
-    # for this device links it. A visible function table entry names a function
-    # handle, and a handle is only meaningful for a pipeline that has the
-    # function — the shading kernel is a different pipeline from the one the
-    # table was built against, and without this its traversal calls a table slot
-    # that resolves to nothing and reports every ray a miss.
-    # `register_table_function!`, not `register_linked_function!`: this one is
-    # reached through a VISIBLE FUNCTION TABLE, so it has to land in the
-    # pipeline's `functions` and not its `privateFunctions`. A private function
-    # may be inlined, and an inlined function has no address for a table entry
-    # to point at — the call is made, returns undef, and the traversal commits
-    # nothing. That is not hypothetical; it is what this did.
+    # Every kernel pipeline on this device must link it, or the shading
+    # kernel's table slot resolves to nothing and every ray misses. A table
+    # function, not a linked one: a `privateFunctions` entry may be inlined and
+    # then has no address, so the call returns undef and nothing commits.
     Metal.register_table_function!(d.dev, fn)
     return fn
 end

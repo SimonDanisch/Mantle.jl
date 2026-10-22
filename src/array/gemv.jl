@@ -1,21 +1,18 @@
-# Portable GEMV with separate kernels for the two contiguous axes.
-# K-contiguous reads/reduction arrangement derives from llama.cpp's
-# mul_mat_vec.comp / mul_mat_vec_base.glsl (MIT).
-# K-contiguous: reuse a vector slice across NROWS columns, reduce within subgroups,
-# then sum their shared partials. N-contiguous: split K across row groups and use
-# a uniform shared-memory tree. Bias/epilogue fuse into the N-contiguous store.
-# Julia specializes the callable types; buffer IDs derive from their parameters.
+# Portable GEMV, one kernel per contiguous axis. K-contiguous (derived from
+# llama.cpp's mul_mat_vec.comp / mul_mat_vec_base.glsl, MIT): a vector slice is
+# reused across NROWS columns, reduced within subgroups, then across them in
+# shared memory. N-contiguous: K is split across row groups and combined by a
+# shared-memory tree; bias and epilogue fuse into the store.
 
 struct KContiguousGEMV{NROWS,BLOCK,SUB} <: Function end
 
 """
     gemv_kcontig_kernel(NROWS, BLOCK, SUB) -> kernel
 
-`C[n] = sum_k A[k] * B[k, n]`, one workgroup per `NROWS` output columns.
-
-Lanes split contiguous K reads, sharing each vector load across NROWS columns.
-SUB is the device's reported subgroup width; partial groups use cld(BLOCK,SUB).
-The generated body uses scalar accumulators and literal shared extents.
+`C[n] = sum_k A[k] * B[k, n]`, one workgroup per `NROWS` output columns. Lanes
+split contiguous K reads and share each vector load across the NROWS columns.
+`SUB` is the device's subgroup width; a partial last subgroup counts in
+`cld(BLOCK, SUB)`.
 """
 function gemv_kcontig_kernel(NROWS::Int, BLOCK::Int, SUB::Int)
     0 < NROWS <= BLOCK && SUB > 0 || throw(ArgumentError(
@@ -34,17 +31,16 @@ end
         tid = KI.get_local_id().x - 1
         grp = KI.get_group_id().x - 1
         n0 = grp * $NROWS
-        # The HARDWARE's subgroup width, not 32. `sub_group_reduce_add`
-        # below reduces over whatever the device actually uses, so
-        # partitioning by any other number makes several lanes think they
-        # are leaders of the same subgroup and each write the whole sum.
+        # The device's subgroup width, not 32: `sub_group_reduce_add` reduces
+        # over it, and any other partition makes several lanes of one subgroup
+        # each write the whole sum as its leader.
         lane = tid % $SUB
         sub = tid ÷ $SUB
 
         Base.Cartesian.@nexprs $NROWS r -> acc_r = 0.0f0
 
-        # Walk K in steps of 4*BLOCK. The A slice is read ONCE per step
-        # and reused for all NROWS columns — the whole point.
+        # Walk K in steps of 4*BLOCK; the A slice is read once per step and
+        # reused for all NROWS columns.
         k = tid * 4
         @inbounds while k < K
             a_1 = A[k + 1]
@@ -169,9 +165,8 @@ end
 """
     gemv_ncontig_config(M, K, limit) -> (TM, BLOCK, UNROLL)
 
-Default TM=32, block<=1024 and unroll=4 retain the measured configurations.
-Round smaller/unusual device limits down to a valid power-of-two reduction
-size; every returned block fits the limit. Device-specific retuning needs data.
+TM = 32, block <= 1024 and unroll = 4 (the measured configuration), rounded down
+to a power-of-two reduction that fits `limit`.
 """
 function gemv_ncontig_config(M::Int, K::Int, limit::Int)
     limit > 0 || throw(ArgumentError("gemv: workgroup limit must be positive"))
@@ -183,9 +178,8 @@ end
 """
     gemv_config(K, N, limit) -> (NROWS, BLOCK)
 
-Rows and threads per workgroup. Defaults balance vector reuse against occupancy;
-rows never exceed the block, including on small workgroup limits. These are
-starting points for device/workload measurements, not universal optima.
+Rows and threads per workgroup, balancing vector reuse against occupancy; rows
+never exceed the block. Starting points, not tuned per device.
 """
 function gemv_config(K::Int, N::Int, limit::Int)
     limit > 0 || throw(ArgumentError("gemv: workgroup limit must be positive"))
@@ -198,9 +192,7 @@ end
     gemv!(C, A, B; nrows = nothing, block = nothing) -> C
 
 `C = A * B` for `A` a length-`K` vector and `B` a `K x N` matrix, `C` length `N`.
-
-nrows/block override selection for tuning. These kernels are distinct from
-matrix-matrix products; compare them on the consuming device/workload.
+`nrows`/`block` override the selection for tuning.
 """
 function gemv!(C::AbstractGPUArray{Float32}, A::AbstractGPUArray{Float32}, B::AbstractGPUArray{Float32,2};
                nrows::Union{Nothing,Int} = nothing, block::Union{Nothing,Int} = nothing)
@@ -226,10 +218,8 @@ end
     gemv!(C, x, Wt::Transpose; bias, epilogue, tm, block, unroll) -> C
 
 `C[m] = epilogue(bias[m] + sum_k W[m, k] * x[k])`, for `Wt = transpose(W)` with
-`W` stored `(M, K)`.
-
-Transpose selects this layout without copying the weight. C and x may have
-any shape with the required linear length; no temporary vector view is needed.
+`W` stored `(M, K)`; the `Transpose` selects this layout without copying. `C` and
+`x` may have any shape of the right length.
 """
 function gemv!(C, x, Wt::Transpose{Float32,<:AbstractGPUArray{Float32,2}}; kw...)
     W = parent(Wt)
@@ -241,9 +231,9 @@ end
 """
     gemv_ncontig_launches(C, x, W, M, K, limit; bias, epilogue, tm, block, unroll)
 
-One launch selected for eager submission or graph declaration. W is the dense
-(M,K) storage, without a Transpose wrapper. Explicit extents/limit also support
-resources before placement. Selection validates lengths and kernel constraints.
+The launch for eager submission or graph declaration, after validating lengths.
+`W` is the dense (M, K) storage without the `Transpose`; explicit extents and
+`limit` allow resources that are not placed yet.
 """
 function gemv_ncontig_launches(C, x, W, M::Int, K::Int, limit::Int;
                                bias = nothing, epilogue = identity,

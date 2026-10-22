@@ -1,19 +1,9 @@
-# Vulkan-side errors, and the two helpers that only make sense next to a device.
-#
-# Split out of what is now Lava's `runtime/errors.jl`: `LavaError`,
-# `LavaCompilationError`, `SourceMap`, `validate_spirv` and `disassemble_spirv`
-# stayed there because they are the compiler's. These did not.
-#
-# `@vk_checked` is the reason the split had to happen rather than being tidy: it
-# expands to a call to `check_validation_errors!` WITHOUT escaping the name, so
-# the call resolves in the macro's DEFINING module. Left in Lava, every use of it
-# here would have looked for Lava's `check_validation_errors!` — which is now
-# this package's — and found nothing.
+# Vulkan call errors and the checks that report them.
 
 """
     LavaVulkanError <: Exception
 
-Error from a Vulkan API call with context.
+A failed Vulkan call: its name, `VkResult`, message and an optional suggestion.
 """
 struct LavaVulkanError <: Exception
     call::String
@@ -31,35 +21,24 @@ function Base.showerror(io::IO, e::LavaVulkanError)
 end
 
 """
-    safe_fin_log(msg)
+    safe_fin_log(msg::String)
 
-Finalizer-safe logging. Uses `jl_safe_printf` which is a raw ccall that
-cannot yield — the only form of diagnostic output allowed inside a Julia
-finalizer.  `msg` must be a `String` that already contains any trailing
-newline; no interpolation at call time (that would trigger dispatch /
-world-age / allocation).  Prefer short fixed strings built by the caller.
+Print from a finalizer through `jl_safe_printf`, which cannot yield. `msg` is
+passed as the argument of a `"%s"` format, so `%` in it is safe; it must carry
+its own trailing newline.
 """
-# `msg` goes through a "%s" FORMAT, not as the format string itself.
-# `jl_safe_printf(const char *fmt, ...)` interprets its first argument as a
-# printf format, so a message containing `%` — a path, a driver string, an
-# exception text like "100% of heap" — was undefined behaviour: `%s` would read
-# a nonexistent vararg off the stack, inside a finalizer, where there is no way
-# to recover. Passing the string as an ARGUMENT makes any content safe, and
-# costs nothing.
 @inline safe_fin_log(msg::String) =
     ccall(:jl_safe_printf, Cvoid, (Cstring, Cstring), "%s", msg)
 
 """
-    @vk_checked site_str vk_call
+    @vk_checked site vk_call
 
-Wrap a Vulkan API call that returns a `ResultTypes.Result`: `unwrap` it
-(propagating VkResult errors as exceptions), then flush accumulated
-validation-layer messages via `check_validation_errors!(site_str)`.  Ensures
-no validation error survives past the create/allocate call that produced
-it and leaks into an unrelated later frame's diagnostic.
+`unwrap` the `Result` of `vk_call`, throwing on a failed `VkResult`, then call
+`check_validation_errors!(site)`, which throws if the default context captured
+validation errors, so an error is reported at the call that produced it.
+`check_validation_errors!` is not escaped and resolves in this module.
 
-Usage:
-    pipeline = @vk_checked "create_graphics_pipeline" VK.create_graphics_pipelines(dev, [ci])[1]
+    pipelines, _ = @vk_checked "vkCreateGraphicsPipelines" VK.create_graphics_pipelines(dev, [ci])
 """
 macro vk_checked(site, call)
     quote

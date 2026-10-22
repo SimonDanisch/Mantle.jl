@@ -10,8 +10,6 @@ const EPA_MAX_VERTS = 32
 const EPA_MAX_FACES = 64
 const EPA_MAX_EDGES = 64
 
-# EPAResult
-
 """EPAResult
 
 Closest-face normal of A-B, penetration depth, world-space contact on A,
@@ -26,9 +24,8 @@ struct EPAResult
     converged::Bool
 end
 
-# Rebuild a four-point support candidate with shape A's world-space points.
-# Returns (Minkowski vertices, A support points); degenerate directions use
-# canonical axes. No separate seed-success flag is returned.
+# Four seed support pairs: (Minkowski vertices, shape A's world-space points).
+# Degenerate directions fall back to canonical axes; there is no success flag.
 @inline function seed_polytope(A::ConvexShape, B::ConvexShape,
                                T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32},
                                eps::Float32)
@@ -49,8 +46,7 @@ end
     end
     sA2, _, m2 = support_pair_world(A, B, T_A, T_B, d2)
 
-    # Direction 3: perpendicular to (m2 - m1) toward origin.  Use the same
-    # triple-product trick as gjk's do_simplex_line.
+    # Direction 3: perpendicular to (m2 - m1), toward the origin.
     edge12 = m2 - m1
     AO     = -m1   # toward origin from m1
     d3     = triple_product_dir(edge12, AO)
@@ -64,8 +60,7 @@ end
     e12 = m2 - m1
     e13 = m3 - m1
     n4  = cross(e12, e13)
-    # Flip if origin is on the opposite side from n4.  Origin is on the
-    # +n4 side iff dot(n4, -m1) > 0  <=>  dot(n4, m1) < 0.
+    # Flip toward the origin, which is on the +n4 side iff dot(n4, m1) < 0.
     if dot(n4, m1) > 0f0
         n4 = -n4
     end
@@ -142,14 +137,14 @@ end
     return EPAResult(normal, distance, contact, iter, converged)
 end
 
-# Fixed-capacity MVectors are device-local scratch. CPU compilation may heap
-# allocate them; fixed capacity alone is not a host allocation-free guarantee.
+# The fixed-capacity MVectors are device-local scratch; on the CPU they may
+# heap-allocate.
 
 """epa(A, B, T_A, T_B, gjk_simplex; max_iters=24, eps=1f-4) -> EPAResult
 
-Recover closest-face penetration data after GJK reports overlap. The simplex
-argument is retained for compatibility but unused: EPA rebuilds support pairs
-to track shape A's contact points. See EPAResult for orientation and failure data."""
+Recover closest-face penetration data after GJK reports overlap. `gjk_simplex`
+is unused: EPA rebuilds support pairs to track shape A's contact points. See
+EPAResult for orientation and failure data."""
 function epa(A::ConvexShape, B::ConvexShape,
              T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32},
              gjk_simplex::NTuple{4,Vec3f};
@@ -164,7 +159,6 @@ function epa(A::ConvexShape, B::ConvexShape,
     face_alive = MVector{EPA_MAX_FACES, Bool}(undef)
     edges    = MVector{EPA_MAX_EDGES, NTuple{2,Int32}}(undef)
 
-    # Seed the polytope.
     seed_m, seed_sA = seed_polytope(A, B, T_A, T_B, eps)
     verts_m[1]  = seed_m[1];  verts_sA[1] = seed_sA[1]
     verts_m[2]  = seed_m[2];  verts_sA[2] = seed_sA[2]
@@ -172,14 +166,12 @@ function epa(A::ConvexShape, B::ConvexShape,
     verts_m[4]  = seed_m[4];  verts_sA[4] = seed_sA[4]
     n_verts = 4
 
-    # Polytope centroid as the "interior reference" for outward-normal
-    # orientation.  The origin is interior too, but using the centroid is
-    # more numerically robust against the origin lying exactly on a face.
+    # The centroid orients outward normals; the origin is interior too but may
+    # lie exactly on a face.
     interior = (verts_m[1] + verts_m[2] + verts_m[3] + verts_m[4]) * 0.25f0
 
-    # Tetrahedron faces: (1,2,3), (1,3,4), (1,4,2), (2,4,3) -- four triangles
-    # touching all 4 vertices.  Winding will be canonicalized below by
-    # compute_face_plane (which flips the normal away from `interior`).
+    # The tetrahedron's faces; `compute_face_plane` orients each normal away
+    # from `interior`.
     face_v[1] = (Int32(1), Int32(2), Int32(3))
     face_v[2] = (Int32(1), Int32(3), Int32(4))
     face_v[3] = (Int32(1), Int32(4), Int32(2))
@@ -193,12 +185,11 @@ function epa(A::ConvexShape, B::ConvexShape,
         face_alive[i] = true
     end
 
-    # Main expansion loop.
     last_idx = -1
     for iter in 1:max_iters
         idx = find_closest_face(face_alive, face_d, n_faces)
         if idx <= 0
-            # No live faces -- polytope corrupted.  Fall back to last known.
+            # No live faces: the polytope is corrupt; fall back to the last face.
             n_  = (last_idx > 0) ? face_n[last_idx] : Vec3f(1f0, 0f0, 0f0)
             d_  = (last_idx > 0) ? face_d[last_idx] : 0f0
             return EPAResult(n_, d_, Vec3f(0f0), iter, false)
@@ -211,36 +202,28 @@ function epa(A::ConvexShape, B::ConvexShape,
         sA_new, _, m_new = support_pair_world(A, B, T_A, T_B, n_face)
         d_new  = dot(m_new, n_face)
 
-        # Convergence test: if the new support point doesn't lie further out
-        # than the face plane, the face IS the closest face on the surface
-        # of the Minkowski difference.
+        # Converged: the new support point is not farther out than the face plane.
         if d_new - d_face < eps
             return face_result(verts_m, verts_sA, face_v[idx], n_face, d_face, iter, true)
         end
 
-        # Expand: remove every face visible from the new support point,
-        # collect silhouette edges (boundary edges of the removed region),
-        # then add a new triangular face per silhouette edge fanning out
-        # from m_new.
+        # Expand: remove every face visible from m_new, collect the silhouette
+        # edges of the removed region, and fan a new face from m_new over each.
         n_edges = 0
         @inbounds for fi in 1:n_faces
             if !face_alive[fi]
                 continue
             end
-            # A face is "visible" from m_new if m_new is on the outward side
-            # of the face plane: dot(face.normal, m_new - face_vertex) > 0.
+            # Visible: m_new is on the outward side of the face plane.
             v_idx_fi = face_v[fi]
             v1_fi    = verts_m[v_idx_fi[1]]
             if dot(face_n[fi], m_new - v1_fi) > 0f0
-                # Mark dead and add its 3 edges to the silhouette buffer.
-                # Interior edges (shared between two visible faces) will
-                # appear twice; we cancel those pairs out when adding.
+                # Mark dead and add its edges. An edge shared by two visible
+                # faces appears again reversed, and the pair cancels.
                 face_alive[fi] = false
                 for (a, b) in ((v_idx_fi[1], v_idx_fi[2]),
                                (v_idx_fi[2], v_idx_fi[3]),
                                (v_idx_fi[3], v_idx_fi[1]))
-                    # Look for a matching reverse edge (b, a) already in
-                    # the buffer.  If found, remove it (interior edge).
                     found = 0
                     for ei in 1:n_edges
                         e = edges[ei]
@@ -255,8 +238,8 @@ function epa(A::ConvexShape, B::ConvexShape,
                         n_edges -= 1
                     else
                         if n_edges >= EPA_MAX_EDGES
-                            # Silhouette buffer exhausted: bail with the best-known closest-face data
-                            # and converged=false.  Allocation-free path so the kernel compiles to SPIR-V.
+                            # Silhouette buffer full: closest face, converged=false.
+                            # No allocation, so the kernel compiles to SPIR-V.
                             return EPAResult(face_n[idx], face_d[idx], Vec3f(0f0), iter, false)
                         end
                         n_edges += 1
@@ -267,16 +250,13 @@ function epa(A::ConvexShape, B::ConvexShape,
         end
 
         if n_edges == 0
-            # No face was visible to the new support point.  This means
-            # m_new lies inside the polytope -- numerical hiccup; treat as
-            # converged at the closest face.
+            # No face visible: m_new is inside the polytope through rounding;
+            # treat as converged.
             return face_result(verts_m, verts_sA, face_v[idx], n_face, d_face, iter, true)
         end
 
-        # Add the new vertex.
         if n_verts >= EPA_MAX_VERTS
-            # Vertex storage exhausted: return the closest-face data so far, converged=false.
-            # No string interpolation -- keeps the GPU lowering allocation-free.
+            # Vertex storage full: closest face, converged=false.
             return EPAResult(face_n[idx], face_d[idx], Vec3f(0f0), iter, false)
         end
         n_verts += 1
@@ -284,13 +264,11 @@ function epa(A::ConvexShape, B::ConvexShape,
         verts_sA[n_verts] = sA_new
         new_v_idx = Int32(n_verts)
 
-        # Add a new triangular face per silhouette edge, fanning from m_new.
-        # Face winding (a, b, new) is set such that compute_face_plane will
-        # canonicalize the outward direction relative to `interior`.
+        # One face per silhouette edge, fanning from m_new; `compute_face_plane`
+        # orients it.
         @inbounds for ei in 1:n_edges
             if n_faces >= EPA_MAX_FACES
-                # Face storage exhausted: return the closest-face data so far, converged=false.
-                # Allocation-free; required for the SPIR-V lowering.
+                # Face storage full: closest face, converged=false.
                 return EPAResult(face_n[idx], face_d[idx], Vec3f(0f0), iter, false)
             end
             # Slot reuse: scan for a dead face slot first; only grow if none.
@@ -317,7 +295,7 @@ function epa(A::ConvexShape, B::ConvexShape,
         end
     end
 
-    # Cap-out: return the closest-face data at the current state.
+    # Iteration cap: closest face at the current state, converged=false.
     idx = find_closest_face(face_alive, face_d, n_faces)
     if idx <= 0
         return EPAResult(Vec3f(1f0, 0f0, 0f0), 0f0, Vec3f(0f0), max_iters, false)

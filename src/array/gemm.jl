@@ -1,8 +1,7 @@
-# Core GEMM kernels and shape selection use KernelInterface operations.
-# Backends route their own array mul! methods here or to native libraries.
-# Cooperative matrices require Float16 16×16×16 support and 32-lane subgroups;
-# scalar staged and strided kernels cover other supported types/shapes.
-# Staging/blocking derives from reference/mul_mm (llama.cpp, MIT).
+# Core GEMM kernels and shape selection over KernelInterface operations; backends
+# route their `mul!` here or to native libraries. Cooperative matrices need fp16
+# 16×16×16 support and 32-lane subgroups; scalar staged and strided kernels cover
+# the rest. Staging and blocking derive from llama.cpp's mul_mm (MIT).
 const GEMM_TILE = 16
 const GEMM_WORKGROUP = 64  # two subgroups for the register-blocked kernel
 const GEMM_MAXBLOCK = 4    # largest register block `@nexprs` is unrolled for
@@ -21,31 +20,27 @@ const GemmTiling = NTuple{6,Int}
 
 """Supported staged tilings in selection order. `gemm_tiling` takes the first
 exactly dividing, non-aliasing entry; forced tilings still require exact extents.
-BK=16 covers reductions that cannot use BK=32. See `test_gemm_staged.jl`."""
+BK=16 covers reductions that cannot use BK=32."""
 const GEMM_TILINGS = (
-    # Prefer the measured 128×128 block; BK=16 also covers K not divisible by 32.
-    (4, 2, 2, 4, 32, 8),    # 128 x 128 x 32, 8 warps — the reference block
-    (4, 2, 2, 4, 16, 8),    # 128 x 128 x 16, 8 warps — llama.cpp's own BK
+    (4, 2, 2, 4, 32, 8),    # 128 x 128 x 32, 8 warps, the reference block
+    (4, 2, 2, 4, 16, 8),    # 128 x 128 x 16, 8 warps, llama.cpp's own BK
     (3, 2, 2, 4, 32, 8),    #  96 x 128, 8 warps
     (2, 2, 2, 4, 32, 8),    #  64 x 128, 8 warps
     (2, 2, 2, 2, 32, 8),    #  64 x  64, 4 warps
     (1, 2, 2, 4, 32, 8),    #  32 x 128, 8 warps
-    (1, 1, 2, 4, 32, 8),    #  32 x  64, 8 warps — one tile per warp, widest reach
+    (1, 1, 2, 4, 32, 8),    #  32 x  64, 8 warps, one tile per warp, widest reach
 )
 
-# Core owns the staged tile capability beside its implementation.
 staged_gemm_tile() = GEMM_TILE
 
 """Whether the staged block exactly divides M, N and K. Its loads are unmasked."""
 @inline gemm_divides(c::GemmTiling, M::Int, N::Int, K::Int) =
     M % gemm_bm(c) == 0 && N % gemm_bn(c) == 0 && K % gemm_bk(c) == 0
 
-"""Reject non-power-of-two row blocks at K divisible by 256. The 96-row block
-measured a sharp regression there; cache-set aliasing is suspected, not proven.
-The rule's extension to other non-power-of-two blocks is unqualified."""
+"""Reject non-power-of-two row blocks at K divisible by 256, where the 96-row block
+measured a sharp regression; other non-power-of-two blocks are excluded untested."""
 @inline gemm_aliasing(c::GemmTiling, K::Int) = !ispow2(gemm_bm(c)) && K % 256 == 0
 
-# Shared default for launch selection and staged eligibility.
 const GEMM_STAGED_DEFAULT = true
 
 """Default off: double buffering did not improve the measured workloads."""
@@ -119,15 +114,11 @@ const COOPMAT_SUBGROUP = 32
 const GEMM_SUBGROUP = COOPMAT_SUBGROUP
 
 
-# Register-blocked kernels require exact output/K tile extents. With split K,
-# each split writes its own plane for later reduction. Generate literal block
-# sizes: conditional fragment definitions caused poor native code generation.
-"""Initialize an fp32 accumulator from zero or row bias broadcast with stride 0.
-Bias loads retain their element type before conversion. Stride-0 broadcast is
-qualified by `test_coopmat_epilogue.jl`; it is not a portable specification guarantee."""
+"""Initialize an fp32 accumulator from zero or a row bias broadcast with stride 0,
+loaded in its own element type before conversion. Stride-0 broadcast is tested,
+not guaranteed by the specification."""
 @inline accinit(::Nothing, ptr, off) = zero(AcceleratedMatrix{Float32,GEMM_TILE,GEMM_TILE,Accumulator})
 @inline function accinit(bias, ptr, off)
-    # Load bias in its element type before converting the values to fp32.
     b = AcceleratedMatrix{eltype(bias),GEMM_TILE,GEMM_TILE,Accumulator}(ptr, off, 0)
     return convert(AcceleratedMatrix{Float32,GEMM_TILE,GEMM_TILE,Accumulator}, b)
 end
@@ -152,6 +143,9 @@ identity skips the component walk."""
     copyto!(pointer(C), off, ld, m)
 end
 
+# Register-blocked kernel: exact output and K tile extents; with split K each
+# split writes its own plane for a later reduction. Block sizes are literals:
+# conditional fragment definitions generated poor native code.
 struct BlockedGEMM{BLK} <: Function end
 
 function blocked_gemm_kernel(blk::Int)
@@ -182,9 +176,8 @@ end
         # KPER is static and divides K into equal tile counts, allowing fixed-trip loops.
         klo = sk * KPER * GEMM_TILE
 
-        # Zero, or the bias broadcast down the tile's rows — `bias` is
-        # indexed by the output ROW, so the offset follows `tm` and `i` and
-        # is independent of `j`.
+        # Zero, or the bias broadcast down the tile's rows: indexed by output
+        # row, so the offset follows `tm` and `i`, not `j`.
         bp = bias === nothing ? bias : pointer(bias)
         Base.Cartesian.@nexprs $BLK j -> Base.Cartesian.@nexprs $BLK i ->
             c_i_j = accinit(bias, bp, 1 + tm + (i - 1) * GEMM_TILE)
@@ -261,8 +254,7 @@ struct StagedGEMM{FAMILY,CFG} <: Function end
     widemul(Int(M),Int(N)) < typemax(Int32)
 
 """Select a configuration-specialized callable without a mutable kernel catalog.
-Schedules preserve their distinct measured shared/register storage and barriers.
-:ablation is diagnostic only; :nostage deliberately computes an incorrect result."""
+:ablation is diagnostic only; its :nostage variant deliberately computes a wrong result."""
 function staged_gemm_kernel(cfg::GemmTiling, family::Symbol=:scalar)
     staged_gemm_supported(cfg,family) || throw(ArgumentError(
         "gemm: unsupported $family tiling $cfg"))
@@ -319,9 +311,6 @@ function staged_gemm_body(family, cfg)
             # The K-block trip count is static; splitidx handles staging-index correctness.
             for kb in 0:(K ÷ $BK - 1)
                 k0 = kb * $BK
-                # One element per lane per step, and it stays that way — see the
-                # note on wide staging loads above.
-                #
                 # A block: rows [tm, tm+BM) × cols [k0, k0+BK), column-major both sides.
                 @inbounds for r in 0:($AREPS - 1)
                     idx = tid + r * $WG
@@ -425,9 +414,8 @@ function staged_gemm_body(family, cfg)
             Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
                 c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
 
-            # Function-storage arrays are scalar-replaced by Lava's normal
-            # pipeline. They are the one-tile register queue, not another
-            # workgroup allocation.
+            # Scalar-replaced into registers by Lava: the one-tile register
+            # queue, not a workgroup allocation.
             nextA = MVector{$AREPS2,GemmV2}(undef)
             nextB = MVector{$BREPS2,GemmV2}(undef)
 
@@ -530,7 +518,7 @@ function staged_gemm_body(family, cfg)
             nkb = Int32(K ÷ $BK)
 
             # Prologue: block 0 into buffer 0, so the loop always has a tile
-            # to compute on and only ever stages the NEXT one.
+            # to compute on and only stages the next one.
             @inbounds for r in Int32(0):Int32($AREPS2 - 1)
                 idx = tid + r * Int32($WG)
                 p, kk = splitidx(idx, Val($BM2))
@@ -574,8 +562,8 @@ function staged_gemm_body(family, cfg)
                 end
 
                 $(stagedmma(STM,STN,NKT,LDA2,LDB2,2; aoffset=:(Int(rda)),boffset=:(Int(rdb))))
-                # ONE barrier: it both publishes the tile just staged and
-                # retires the reads of the tile just consumed.
+                # One barrier publishes the tile just staged and retires the
+                # reads of the tile just consumed.
                 KI.barrier()
             end
 
@@ -740,21 +728,18 @@ end
 
 """    gemmaccum(T) -> Type
 
-Float16 destinations accumulate in Float32 and round once on store.
-Other destination types retain their precision. See `test_gemm_fp16_accum.jl`."""
+Float16 destinations accumulate in Float32 and round once on store; other
+destination types keep their precision."""
 @inline gemmaccum(::Type{Float16}) = Float32
 @inline gemmaccum(::Type{T}) where {T} = T
 
-# The strided kernel covers small/ragged products and Float64/complex output.
-# Operands are dense bases plus strides, so transposes need no copy or device-side
-# wrapper construction. K is supplied by the host.
+# The strided kernel covers small or ragged products and Float64/complex output.
+# Operands are dense bases plus strides, so transposes need no copy.
 function strided_gemm_kernel!(C, A, B, ::Val{K},
                                       co, cr, cc, ao, ar, ac, bo, br, bc,
                                       α, β, M, ntot) where {K}
     # Flat launch: an N-D `ndrange` is partitioned into N-D workgroups, so
-    # consecutive lanes stop walking consecutive memory. Worth 2.3 ms of a
-    # 31.7 ms inference step when applied to the convolution's im2col and
-    # epilogue.
+    # consecutive lanes would stop walking consecutive memory.
     lin = KI.get_global_id().x
     if lin <= ntot
     i = (Int32(lin) - Int32(1)) % Int32(M) + Int32(1)
@@ -1013,18 +998,18 @@ function splitscratch(backend, C, M::Int, N::Int, splitk::Int)
 end
 
 
-# Cooperative-matrix extents must already be tile-aligned; callers own padding.
 """    coopmat_gemm_launches(C, A, B, M, N, K; ...) -> Vector{ArrayLaunch}
 
-Select GEMM without submitting. Return one launch, or partial products followed
-by reduction for split K. The caller owns explicit partials; otherwise splitscratch
-provides storage. Bias and nonlinear epilogues require splitk=1."""
+Select GEMM without submitting: one launch, or partial products followed by a
+reduction for split K. Extents must already be tile-aligned; callers own padding.
+The caller owns explicit partials, otherwise splitscratch provides them. Bias and
+nonlinear epilogues require splitk=1."""
 function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
                        nbatch::Int = 1,
                        blk_split = coopmat_gemm_shape(M, N, K; nbatch),
                        partials = nothing, reduce::Bool = true, bias = nothing,
                        epilogue = identity,
-                       # Per-call selection overrides retain process-independent policy.
+                       # Per-call overrides of the selection defaults.
                        staged::Bool = GEMM_STAGED_DEFAULT,
                        vec2::Bool   = true,
                        narrow_ok::Bool = GEMM_NARROW_DEFAULT,
@@ -1035,21 +1020,18 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
                        tiling = nothing,
                        # Only gathering kernels interpret aload; other kernels require a plain A matrix.
                        aload = nothing)
-    # A bias goes into the accumulator's initial value, so it must land exactly
-    # once — with `splitk > 1` every plane would carry its own copy and the
-    # reduction would sum them. The caller keeps its own epilogue there.
+    # A bias initialises the accumulator, so with `splitk > 1` every plane would
+    # carry a copy and the reduction would sum them.
     bias === nothing || blk_split[2] == 1 ||
         throw(ArgumentError("coopmat_gemm!: bias needs splitk == 1, got $(blk_split[2])"))
     blk, splitk = blk_split
-    # rocBLAS's kernel takes every product it accepts; see `gemm_tensile.jl`. A
-    # forced tiling, a loader or `staged = false` asks for another kernel by name.
+    # The Tensile kernel takes every product it accepts; a forced tiling, a loader
+    # or `staged = false` asks for another kernel.
     tensile && staged && tiling === nothing && aload === nothing &&
         tensile_gemm_ok(C, A, B, M, N, K, nbatch, splitk) &&
         return [tensile_gemm_launch(C, A, B, bias, epilogue, M, N, K)]
-    # The staged kernel masks nothing and does not split K, so it takes only the
-    # shapes it divides exactly and only where the plan wants a single plane —
-    # which includes all four of SAM 2's dominant `addmm` shapes, i.e. 72.7% of
-    # the encoder's arithmetic.
+    # The staged kernel masks nothing and does not split K, so it takes only
+    # shapes it divides exactly, with a single plane.
     c = aload === nothing ? staged_gemm_tiling(M, N, K, nbatch, splitk; staged, tiling) :
                             gather_gemm_tiling(M, N, K, nbatch, splitk; staged, tiling)
     # A loader requires a supported staged tiling; falling through would misread A.
@@ -1061,10 +1043,8 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
         # Narrow staging is legal only while all matrix indices fit Int32.
         narrow = narrow_ok && gemm_fits32(M, N, K)
         if aload !== nothing
-            # `B` and `C` are the only matrices a gathering call has; `A` is the
-            # loader's own addressing of whatever it reads. `M*K` is the size of
-            # an im2col matrix that is never formed, and at `288 -> 288` over
-            # 1024x1024 it is 2.7e9, which the plain check refused.
+            # `B` and `C` are the only matrices a gathering call has; `M*K` is
+            # the size of an im2col matrix never formed and may exceed Int32.
             (narrow_ok && widemul(K, N) < typemax(Int32) && widemul(M, N) < typemax(Int32)) ||
                 throw(ArgumentError("coopmat_gemm!: a loader needs 32-bit indexing \
                                      of B and C, got M=$M N=$N K=$K"))
@@ -1098,9 +1078,8 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
     ntiles = (M ÷ span) * (N ÷ span)
     dst = splitk == 1 ? C :
           (partials === nothing ? splitscratch(C, M, N, splitk * nbatch) : partials)
-    # A split-K plane is a PARTIAL sum, so an activation on it would be applied
-    # to a fraction of the dot product and then summed — wrong, and silently so.
-    # The epilogue belongs to whoever reduces the planes.
+    # A split-K plane is a partial sum, so an activation on it would be silently
+    # wrong; the epilogue belongs to whoever reduces the planes.
     epilogue === identity || splitk == 1 ||
         throw(ArgumentError("coopmat_gemm!: an epilogue needs splitk == 1, got $splitk"))
     block = ArrayLaunch(blocked_gemm_kernel(blk),
@@ -1108,10 +1087,9 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
                         Val((K ÷ GEMM_TILE) ÷ splitk)),
                        ntiles * splitk * 32 * nbatch, GEMM_WORKGROUP)
     splitk == 1 && return [block]
-    # `reduce=false` hands the partial planes back untouched, for a caller whose
-    # own epilogue can sum them — a convolution already reads every element of
-    # the result to add bias and scatter it, so folding the sum in there saves a
-    # dispatch and a full write-plus-read of `M*N*splitk` floats per convolution.
+    # `reduce=false` returns the partial planes for a caller whose epilogue sums
+    # them (a convolution's bias-and-scatter pass), saving a dispatch and a
+    # write-plus-read of `M*N*splitk` floats.
     reduce || return [block]
     return [block, ArrayLaunch(splitk_reduce_kernel!,
                               (C, dst, Val(splitk), M * N),
@@ -1138,12 +1116,10 @@ function coopmat_gemm_dispatch!(g, C, A, B, M::Int, N::Int, K::Int;
 end
 
 
-# Tile count bounds insufficient parallelism; padding ratio bounds wasted work.
-# These are measured heuristics, not universal device thresholds. Boundary cases
-# are covered by test_gemm_staged_scalar.jl.
-"""Whether Float32 output with Float16/Float32 inputs has enough scalar GEMM
-tiles and acceptable padding waste. Float64/complex retain the strided kernel;
-its Float32 shared buffers cannot preserve their precision."""
+"""Whether Float32 output with Float16/Float32 inputs has enough scalar GEMM tiles
+and acceptable padding waste (measured heuristics, not device thresholds).
+Float64/complex keep the strided kernel; Float32 shared buffers would lose their
+precision."""
 @inline function staged_gemm_ok(C, A, B, M, N)
     eltype(C) === Float32 || return false
     (eltype(A) === Float32 || eltype(A) === Float16) || return false
@@ -1194,10 +1170,9 @@ function gemv_splitk_kernel!(P, A, B,
         @inbounds begin
             k1 = min(s * KC + KC, K)
             ai = ao + (i - Int32(1)) * ar
-            # FOUR INDEPENDENT ACCUMULATORS, not one. `acc = muladd(_, _, acc)`
-            # serialises on the FMA latency and a GEMV has no other arithmetic to
-            # hide it behind; the unroll in `strided_gemm_kernel!` shortens the
-            # loop but keeps the chain. Summed pairwise at the end.
+            # Four independent accumulators: one chain serialises on FMA
+            # latency, which a GEMV has no other arithmetic to hide. Summed
+            # pairwise at the end.
             a0 = 0f0; a1 = 0f0; a2 = 0f0; a3 = 0f0
             k = s * KC
             while k + Int32(4) <= k1
@@ -1250,8 +1225,7 @@ function scalar_gemm_launches(C, A, B, M, N, K, α, β; partials = nothing)
         "scalar_gemm_launches: an operand is not dense, and making it dense is " *
         "an allocation a declaration cannot make. Materialise it into a " *
         "transient first — `densify` is what the immediate path calls here."))
-    # Before `staged_gemm_ok`, which declines `N == 1` anyway — this is the
-    # decode path and it wants a kernel of its own.
+    # The decode path (`N == 1`) has its own kernel; `staged_gemm_ok` declines it.
     if N == 1
         S = gemv_split(C, A, B, M, K)
         if S > 1

@@ -59,11 +59,9 @@ end
 # `KernelInterface.caps`. Zero means the file is portable as far as this measure
 # goes.
 const VULKAN_BUDGET = Dict(
-    # What is left of `gemm.jl` in the Vulkan tree after the kernels moved: the
-    # `mul!` entry points, `coopmat_gemm_available` (the probe that fills
-    # `DeviceCaps.coopmat`), and `splitscratch`, which caches a scratch buffer on
-    # `ctx.caches` and is genuine runtime state. 4 lines, 2 of them comments.
-    "gemm.jl" => 4,
+    # `gemm.jl` keeps the `mul!` entry points and `coopmat_gemm_available`, the
+    # probe behind `DeviceCaps.coopmat`.
+    "gemm.jl" => 1,
 )
 
 # The moved files are not in this table: a file that has left the backend cannot

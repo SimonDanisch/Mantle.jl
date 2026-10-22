@@ -1,6 +1,6 @@
-# One registration/mutation algorithm for incremental hardware TLASes. Native
-# backends implement buildgeometry!, instancearray and updatebatch!, and may
-# select a table index instead of a native object with geometryref.
+# Registration and mutation for every `BatchedTLAS`. Backends implement
+# `buildgeometry!`, `instancearray` and `updatebatch!`, and may override
+# `geometryref` to store a table index instead of the native object.
 
 function buildgeometry! end
 function instancearray end
@@ -37,12 +37,11 @@ function addbatch!(t::BatchedTLAS, i::Int, records, n::Int, triangles, sbt::UInt
 end
 
 """
-    push!(t::BatchedTLAS, geometry, records; n=length(records), triangles, sbt_offset)
+    push!(t::BatchedTLAS, geometry, records; n=length(records), triangles, sbt_offset) -> handle
 
-Register one batch of device-resident instance records, retaining their ids and
-masks. Only `records[1:n]` are instances. A mesh builds its native BLAS; a
-pre-built BLAS is registered once by identity. Invalid counts are refused before
-building geometry. Native arrays are retained, while host records are uploaded.
+Register one batch of instance records; only `records[1:n]` are instances. A mesh
+builds its BLAS, a pre-built BLAS is registered once by identity. An invalid `n`
+is refused before any geometry is built. Native device arrays are kept, others uploaded.
 """
 function Base.push!(t::BatchedTLAS{Tri}, geometry,
                     records::AbstractVector{Raycore.InstanceRecord};
@@ -75,8 +74,8 @@ function requirebatch(t::BatchedTLAS, handle::Raycore.TLASHandle, operation)
     return batch
 end
 
-# Native Mat3x4 buffers pass through instancearray without a host transfer.
-# Other arrays follow the existing host boundary, including device Mat4 arrays.
+# `Mat3x4f` arrays pass to `instancearray` as they are; anything else, device
+# `Mat4f` arrays included, is converted on the host.
 transformbuffer(t::BatchedTLAS, transforms::AbstractVector) =
     instancearray(t, Mat3x4f[m isa Mat3x4f ? m : mat4_to_vk_transform(m)
                             for m in Array(transforms)])

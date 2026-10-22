@@ -1,8 +1,8 @@
-"""Host/device traversal data shared by hardware backends. Host hwtlas retains the
-native owner; device adaptation drops it. Triangles and per-instance offsets feed
-hittriangle, empty is its miss sentinel, scene is an optional in-band native
-binding, procedural supplies non-triangle intersection data, and instances carry
-world transforms. Offsets and instances follow native build order."""
+"""Traversal data shared by hardware backends. `hwtlas` is the native owner on the
+host and `nothing` after device adaptation. `triangles` and per-instance `offsets`
+feed [`hittriangle`](@ref), `empty` is its miss value, `scene` an optional in-band
+native binding, `procedural` the non-triangle intersection payload, and `instances`
+the world transforms. Offsets and instances follow native build order."""
 struct AdaptedAccel{H, T, O, Tri, S, P, I} <: Raycore.AbstractAdaptedAccel
     hwtlas::H
     triangles::T
@@ -10,13 +10,13 @@ struct AdaptedAccel{H, T, O, Tri, S, P, I} <: Raycore.AbstractAdaptedAccel
     empty::Tri
     # In-band traversal binding (Metal); Vulkan binds the TLAS separately.
     scene::S
-    # Non-triangle intersection data; nothing removes the procedural branch.
+    # `nothing` removes the procedural branch from the traversal.
     procedural::P
     instances::I
 end
 
-"""Project traversal fields to device values. The backend supplies sceneconvert;
-invoke it in field order and never adapt the cyclic native hwtlas owner."""
+"""Project traversal fields to device values, `scene` through the backend's
+`sceneconvert`, in field order. The cyclic native `hwtlas` owner is dropped, never adapted."""
 @inline function adaptaccel(to, accel::AdaptedAccel, sceneconvert)
     return AdaptedAccel(nothing,
         Adapt.adapt(to, accel.triangles), Adapt.adapt(to, accel.offsets),
@@ -32,7 +32,7 @@ AdaptedAccel(hwtlas, triangles, offsets, empty, scene) =
 AdaptedAccel(hwtlas, triangles, offsets, empty, scene, procedural) =
     AdaptedAccel(hwtlas, triangles, offsets, empty, scene, procedural, nothing)
 
-# Hold exposed resource leaves; the cached native owner forms a cycle via static_tlas.
+# Holds the exposed leaves, not `hwtlas`: the native owner is cyclic through `static_tlas`.
 @inline function holdleaves!(holder, a::AdaptedAccel)
     holdleaves!(holder, a.triangles)
     holdleaves!(holder, a.offsets)
@@ -43,24 +43,19 @@ AdaptedAccel(hwtlas, triangles, offsets, empty, scene, procedural) =
 end
 
 """
-The per-instance triangle offset of an instance whose batch has no triangles: a
-pre-built bottom-level structure pushed without them. Its hits have nothing to
-look up, and [`hittriangle`](@ref) answers the miss sentinel for them instead of
-reading another batch's triangle (or past the end of the array).
+Triangle offset of an instance whose batch has no triangles (a pre-built BLAS
+pushed without them). [`hittriangle`](@ref) answers the miss value for it instead
+of reading another batch's triangle or past the end of the array.
 """
 const NOTRIANGLES = typemax(UInt32)
 
 """
     hittriangle(accel::AdaptedAccel, inst_id, prim_idx) -> triangle
 
-The triangle a hit landed on, in world space: looked up in the flat triangle
-array by instance and primitive index, then moved by its instance's transform.
-The BLAS stores triangles in object space, and everything downstream (normals,
-tangents, the side a shadow ray starts on) is computed against world-space rays.
-
-`accel.empty` for an instance of a batch with no triangles ([`NOTRIANGLES`](@ref)):
-the hit's distance, barycentrics and custom index are still right, there is just
-no triangle record to hand back.
+The hit triangle in world space, looked up by 0-based instance and primitive index
+and moved by its instance transform: the BLAS holds object-space triangles, and
+shading works on world-space rays. `accel.empty` for a [`NOTRIANGLES`](@ref)
+instance; the hit's `t`, barycentrics and custom index are still valid.
 """
 @inline function hittriangle(accel::AdaptedAccel, inst_id::UInt32, prim_idx::UInt32)
     @inbounds off = accel.offsets[inst_id + UInt32(1)]
@@ -75,46 +70,24 @@ end
 
 
 """
-    AccelBuildContext(queue)
+    AccelBuildContext(bq, into[, preserves])
 
-Scratch state reused across acceleration-structure builds: the queue the builds
-are submitted on, and the objects that must outlive the build.
-
-Was `ASBuildContext` in the Vulkan backend and then an abstract type here. It is
-one shared struct: both fields are portable, the second trivially and the first
-once the submission channel stopped being per-backend. Building is the expensive
-part of ray tracing and every backend wants to amortise it, so the context is
-API rather than an implementation detail one of them happens to have.
+What a `build_accel!` callback records builds into: the submit channel `bq`, the
+backend's emitter `into` over the build command buffer, and `preserves`, objects
+that must outlive the build submission.
 """
 mutable struct AccelBuildContext{Q,E}
     bq::Q
-    # Where the builds are written: the backend's emitter over the closed
-    # command buffer `build_accel!` opened for them, submitted on the way out.
     into::E
     preserves::Vector{Any}
 end
 AccelBuildContext(bq, into) = AccelBuildContext(bq, into, Any[])
 
-# ── Procedural geometry ─────────────────────────────────────────────────────
-#
-# An acceleration structure can hold boxes as well as triangles, and a box is
-# only an assertion that something is inside it. What that something IS, and
-# where a ray meets it, is the shader's answer — given once here so that both
-# the traversal and the geometry that comes out of it stay one code path.
-#
-# A procedural payload implements three methods. `Nothing` implements them as
-# the identity, which is what makes a triangles-only scene compile to exactly
-# the traversal that was here before:
-#
-#   procedural_miss(p)                 the "no hit yet" value the loop carries
-#   procedural_candidate(p, best)      answer ONE box the traversal offers
-#   procedural_commit(p, best, ...)    turn the winning answer into a primitive
-#
-# Why the loop carries `best` itself rather than reading it back from the
-# query: an inline ray query carries no hit attributes for a GENERATED
-# intersection — `get_barycentrics` is triangles only. The shader keeps its own
-# best hit, and only ever generating an IMPROVING `t` is what makes that local
-# best the one traversal finally commits.
+# Procedural geometry. A payload implements `procedural_miss`, `procedural_candidate`
+# and `procedural_commit`; `Nothing` implements them as identities, so a
+# triangles-only scene compiles to the plain traversal. The shader keeps its own
+# best hit because an inline ray query carries no hit attributes for a generated
+# intersection.
 
 """
     procedural_miss(payload)
@@ -124,42 +97,28 @@ The initial value of the traversal's running best hit.
 @inline procedural_miss(::Nothing) = nothing
 
 """
-    procedural_candidate(payload, best)
+    procedural_candidate(payload, best) -> best
 
-Answer the AABB candidate the ray query is currently offering, and return the
-running best. Solve in OBJECT space and ask the QUERY for the ray
-(`lava_ray_query_get_object_ray_origin` / `…_direction`) rather than
-transforming one — the query already has it, and an instance transform applied
-twice is a bug with no symptom until something is instanced.
-
-Call `lava_ray_query_generate_intersection(t)` only when `t` improves on
-`best`; that is what makes the shader's local best the committed one.
+Answer the AABB candidate the traversal offers and return the running best. Solve
+in object space with [`candidate_object_ray`](@ref), and call
+[`commit_intersection!`](@ref) only when `t` improves on `best`, so the shader's
+best is the one traversal commits.
 """
 @inline procedural_candidate(::Nothing, best) = best
 
 """
     procedural_commit(payload, best, prim_idx, t, empty) -> primitive
 
-The primitive for a committed generated intersection, built from the best hit
-the loop kept.
-
-**It must return the same type as `empty`.** `closest_hit` is called from every
-integrator in the renderer, and a payload that returns a type of its own makes
-its return a `Union` — including for scenes that have no procedural geometry at
-all, since the compiler cannot know the generated branch is unreachable. One
-concrete type is what keeps that from leaking into every consumer.
-
-That is not a restriction in practice: a triangle record carries vertices,
-normals, tangents and uv, which is enough to describe the exact local tangent
-plane of any parametric surface. See Hikari's `fem.jl` for what that looks like.
+The primitive for a committed generated intersection, built from `best`. Must
+return the type of `empty`: anything else makes `closest_hit` return a `Union` in
+every integrator, also for scenes without procedural geometry. A triangle record
+(vertices, normals, tangents, uv) can describe the local tangent plane of any
+parametric surface.
 """
 @inline procedural_commit(::Nothing, best, prim_idx, t, empty) = empty
 
-# The three things answering a candidate needs, spelled portably. A payload
-# calls these; a BACKEND implements them. Without them Hikari would have to name
-# `lava_ray_query_*` to write an intersection, which is Vulkan leaking through
-# two layers and would make Metal a second implementation of the same idea
-# rather than a second answer to the same three questions.
+# Candidate verbs: a payload calls them, a backend implements them, so a payload
+# never names a backend's ray-query intrinsics.
 
 """
     candidate_primitive_index() -> Int
@@ -171,30 +130,24 @@ function candidate_primitive_index end
 """
     candidate_object_ray() -> (o::Vec3f, d::Vec3f)
 
-The candidate's ray in OBJECT space.
-
-Ask for it rather than transforming the world-space ray: the traversal already
-has it, and applying the instance transform a second time is a bug with no
-symptom at all until something is instanced.
+The candidate's ray in object space, as traversal has it. Transforming the
+world-space ray instead applies the instance transform twice.
 """
 function candidate_object_ray end
 
 """
     commit_intersection!(t)
 
-Report a hit at `t` on the current candidate.
-
-Only ever call this for a `t` that IMPROVES on the best so far — that is what
-makes the shader's own running best the one the traversal finally commits.
+Report a hit at `t` on the current candidate. Call it only for a `t` that improves
+on the running best.
 """
 function commit_intersection! end
 
 """
     procedural_bary(payload, best) -> SVector{3,Float32}
 
-The barycentric coordinate of the hit ON the primitive `procedural_commit`
-returned. A primitive built to put the hit at its first vertex reports
-`(1, 0, 0)`; the surface's own parameter travels in the primitive's `uv`, which
-is where every other primitive reports it too.
+Barycentrics of the hit on the primitive `procedural_commit` returned: `(1, 0, 0)`
+for one built with the hit at its first vertex. The surface parameter travels in
+the primitive's `uv`.
 """
 @inline procedural_bary(::Nothing, best) = SVector{3,Float32}(1f0, 0f0, 0f0)

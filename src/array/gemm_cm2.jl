@@ -1,91 +1,24 @@
 # A GEMM with no shared memory: workgroup-scope cooperative matrices and
-# tensor-addressed loads — `mul_mm_cm2.comp`'s structure.
+# tensor-addressed loads, after llama.cpp's `mul_mm_cm2.comp`. Not routed to: it
+# loses to `gemm.jl`'s staged kernel by 22-30% at its best tiling. The cause is
+# register allocation: every route to more work per lane (bigger tile, deeper
+# `BK`, more invocations) makes the driver allocate two to four times the
+# registers the matrices need, up to 255, where the staged kernel sits at 128; the
+# tensor-addressed load itself costs that even into subgroup-scope tiles
+# (`gemm_cm2_sg!`). Clamped loads are the fast path on the measured driver: the
+# reference's unclamped layout ran 2.8x slower without more register pressure.
 #
-# `gemm.jl`'s staged kernel is what ships. This is the coopmat2 form, and it is
-# **not routed to**: it loses by 22-30% at its best tiling on every shape
-# (`tools/gemm_cm2_ab.jl`, 2026-08-11), and — the part that took the work —
-# WHY is measured rather than argued (`tools/gemm_cm2_why.jl`).
-#
-# The first version differed from `mul_mm_cm2.comp` in three ways. Ablating them
-# one at a time, with the driver's own register count beside each
-# (2304x4096x576; staged = 37.3 TFLOP/s at 128 registers):
-#
-#     variant                       TFLOP/s   regs
-#     64x64/32  clamp,roll             25.0     60   <- best coopmat2 config
-#     64x64/32  clamp,unroll           25.4     62
-#     64x64/32  UNCLAMPED               8.9     74   <- the reference's own fast path
-#     128x128/32                       14.8    196
-#     256x128/32                       20.7    255
-#     64x64/64 @128, no unroll         13.8    144
-#     128x128/64 @256 (m_warptile)     14.8    255
-#     128x256/64 @256 (l_warptile)     12.6    255
-#     subgroup 4x4 block, 2 subgroups  18.7    230   <- `gemm_cm2_sg!`
-#     subgroup 4x4 block, 4 subgroups  18.7    230
-#
-# **One of the three was a real porting error.** The first unroll issued all four
-# A-fragments and all four B-fragments before any product, holding eight live at
-# once; the reference consumes each pair inside the unrolled body. Fixing it was
-# worth +65% at `128x128/64` and +118% on the K-heavy shape — and still lost.
-#
-# **One was not an error at all, and inverts the reference.** `mul_mm_cm2` keeps
-# a second, UNCLAMPED layout and a whole separate pipeline to use it whenever the
-# tile is in bounds. On this driver that is **2.8x SLOWER** — 25.4 against 8.9 —
-# and it is not register pressure (74 against 62). Clamped loads are the fast
-# path here. Do not "optimise" this kernel by removing the clamp.
-#
-# **The third is the answer, and it is about the driver, not the loop.** Every
-# route to more work per lane — a bigger tile, a deeper `BK`, either invocation
-# count — makes the allocator want two to four times the registers the matrices
-# themselves need, and it saturates at 255. `128x128/32` needs ~90 by hand and
-# gets 196. `64x64/64` without any unrolling gets 144. The staged kernel sits at
-# exactly 128, which is the count the driver targets for two resident workgroups,
-# because its accumulators are per-subgroup `16x16` tiles it can place one at a
-# time. A workgroup-scope matrix is placed as a unit, so the one configuration
-# that stays lean (62 registers) is also the one with the least reuse — and 25-30
-# against 36-40 TFLOP/s is what that costs.
-#
-# **And the obvious escape was tried and is worse.** `gemm_cm2_sg!` below is the
-# other combination — tensor-addressed loads into SUBGROUP-scope `16x16` tiles,
-# keeping the staged kernel's 4x4 register block and dropping only the shared
-# memory. Same sixteen accumulators the staged kernel holds in 128 registers; it
-# gets **230, and 18.7 TFLOP/s**. So the cost is not the scope of the matrix and
-# not the blocking: it is the tensor-addressed load itself, which is worth 1.5x
-# to 4x the registers of the equivalent staged code in every structure tried.
-#
-# Four kernel structures, one answer. Shared-memory staging is not overhead this
-# device wants removed — it is how the addressing state stays out of the register
-# file. That is a fact about this driver rather than about the algorithm, so it is
-# worth re-testing on a newer one; the harness is `tools/gemm_cm2_why.jl` and it
-# prints the register count next to every number.
-#
-# **No transposing views, and that is not a simplification of the reference.**
-# `mul_mm_cm2` loads B through one because ggml's arrays are row-major. Ours are
-# column-major, so a Julia `(r, c)` array IS the tensor `(c, r)`, and the natural
-# product is the transposed one:
-#
-#     C = A*B  with Julia (M,K) x (K,N)   is   C̃ = B̃·Ã  in tensor terms
-#
-# B therefore supplies the A-operand and A the B-operand, every load is plain,
-# and so is the store. The mapping is the one `mwe_tensor_gemm_nonsquare.jl`
-# pinned; this is the first kernel to lean on it for both operands at once.
-#
-# What it buys beyond speed: the clamping layout pads every load with zeros,
-# which contribute nothing to a sum, so this kernel takes extents that divide
-# NOTHING — where the staged kernel needs `M`, `N` and `K` on the tile and hands
-# everything else to a slower path. Verified at `100 x 130 x 70`.
+# No transposing views: a column-major Julia `(r, c)` array is the tensor `(c, r)`,
+# so `C = A*B` is `C̃ = B̃·Ã` and B supplies the A-operand, A the B-operand. Clamped
+# loads pad with zeros, so extents need not divide the tile.
 
 """
     gemm_cm2_fits(dev, BM, BN, BK, NT) -> Bool
 
-Whether a `(BM, BN, BK, NT)` tiling is one this DEVICE can run: `NT` has to be a
-workgroup size it reports workgroup-scope matrices for, and every extent a
-multiple of that size's granularity.
-
-Every extent appears in some product and is checked against that product's axis —
-`BN` as the M of the accumulator and of the A-operand (the kernel computes the
-transposed product, so `BN` leads), `BM` as their N, `BK` as the K of both.
-Without this a mistyped tiling reaches `vkCreateComputePipelines` and fails there,
-which names neither the tiling nor the rule it broke.
+Whether this device can run a `(BM, BN, BK, NT)` tiling: `NT` must be a workgroup
+size it reports workgroup-scope matrices for, and each extent a multiple of that
+size's granularity on its axis. The kernel computes the transposed product, so
+`BN` is checked as M, `BM` as N, `BK` as K.
 """
 function gemm_cm2_fits(dev, BM::Int, BN::Int, BK::Int, NT::Int)
     NT <= dev.workgrouplimit || return false
@@ -99,22 +32,17 @@ end
     gemm_cm2_tiling(dev) -> (BM, BN, BK, NT) | nothing
 
 The tiling to run, or `nothing` where the device has no workgroup-scope matrices.
-
-**Derived from the device's own table, not hardcoded.** `64x64/32 @256` is what
-wins here (see the ablation at the top of this file), but the numbers that make
-it legal are the granularities the device reports for that workgroup size — on
-another card the same literals may be illegal, and a tiling nothing can run is
-the one thing a chooser must not return. So it asks `gemm_cm2_fits` for the
-measured preference first and walks the reported workgroup sizes if that does not
-apply, largest first.
+Tries the measured winner `64x64/32 @256`, then the smallest legal tile at each
+reported workgroup size, largest first, since fixed literals may be illegal on
+another device.
 """
 function gemm_cm2_tiling(dev::DeviceCaps)
     isempty(dev.wggran) && return nothing
     # The measured winner, if this device admits it.
     gemm_cm2_fits(dev, 64, 64, 32, 256) && return (64, 64, 32, 256)
     for (nt, mg, ng, kg) in Iterators.reverse(dev.wggran)
-        # The smallest legal square tile at this size, which is the shape the
-        # ablation found stays inside the register file.
+        # The smallest legal tile at this size: small tiles stay inside the
+        # register file.
         BM, BN, BK = max(64, ng), max(64, mg), max(32, kg)
         gemm_cm2_fits(dev, BM, BN, BK, nt) && return (BM, BN, BK, nt)
     end
@@ -124,12 +52,10 @@ end
 """
     gemm_cm2!(C, A, B, M, N, K, ::Val{BM}, ::Val{BN}, ::Val{BK})
 
-`C = A*B` for column-major `A (M,K)`, `B (K,N)`, `C (M,N)`, with `C` either
-`Float16` or `Float32` and both operands `Float16`.
-
-One workgroup owns a `BM x BN` tile of `C` and walks `K` in steps of `BK`. There
-is no shared memory, no staging loop and no barrier: each step is two tensor
-loads and one `coopmat_muladd` over matrices that span all `NT` invocations.
+`C = A*B` for column-major fp16 `A (M,K)` and `B (K,N)`, `C (M,N)` fp16 or fp32.
+One workgroup owns a `BM x BN` tile of `C` and walks `K` in steps of `BK`, each
+step two tensor loads and one `coopmat_muladd` over matrices spanning all
+invocations, with no shared memory or barrier.
 """
 function gemm_cm2!(
         C, A, B, M::Int32, N::Int32, K::Int32,
@@ -140,26 +66,12 @@ function gemm_cm2!(
     m0 = Int32((grp.x - 1) * BM)
     n0 = Int32((grp.y - 1) * BN)
 
-    # A 2-D layout over a column-major Julia `(r, c)` array, whose tensor is
-    # `(c, r)` with strides `(r, 1)`.
-    #
-    # The clamp mode is the type parameter itself, NOT a `Bool` turned into one
-    # here: `Val(x)` for an `x` computed from a local is not a compile-time
-    # constant, and the kernel fails to compile with an `InvalidIRError` three
-    # layers down. Same family as the `@localmem` whose size comes from a local.
-    #
-    # The reference keeps two layouts for exactly this and picks the unclamped
-    # one whenever the whole tile is in bounds — a bounds check on every element
-    # of every load is not free, and it is one of the three things this port did
-    # differently from `mul_mm_cm2.comp`.
-    # Dimension and stride are loop-INVARIANT; only the slice moves with `k`.
-    # Building the whole layout inside each load — which is what this did — puts
-    # `tensor_layout`/`setdim`/`setstride` in the loop body, and with `UNROLL`
-    # that is EIGHT full constructions per iteration against the reference's two
-    # hoisted layouts and eight slices. `mul_mm_cm2.comp` creates `tensorLayoutA`
-    # and `tensorLayoutB` before the loop and only calls `sliceTensorLayoutNV`
-    # inside, and matching that is worth 177 -> 128 registers at `128x128/32`,
-    # which is the difference between one resident workgroup and two.
+    # A 2-D layout over a column-major Julia `(r, c)` array: the tensor `(c, r)`
+    # with strides `(r, 1)`. The clamp mode is the type parameter itself: `Val(x)`
+    # of a local is not a compile-time constant and fails with `InvalidIRError`.
+    # Dimension and stride are built once outside the loop, as the reference does,
+    # and only the slice moves with `k`; building them per load cost 177 against
+    # 128 registers at `128x128/32`, one resident workgroup instead of two.
     base(r, c) = tensor_setstride(
         tensor_setdim(tensor_layout(Val(2), Val(CM)), (c, r)), (r, Int32(1)))
     @inline slice(l, o0, o1, n0, n1) = tensor_slice(l, (o0, o1), (Int32(n0), Int32(n1)))
@@ -167,12 +79,10 @@ function gemm_cm2!(
     baseA = base(K, N)
     baseB = base(M, K)
 
-    # `coopmat_undef`, not `coopmat_zero`: under a CONSTANT clamp mode the
-    # out-of-range elements come from the layout's clamp value, so the
-    # destination is never read and a zeroed fragment is a value the allocator
-    # holds until the load overwrites it. GLSL declares `coopmat mat_a;` and
-    # assigns nothing, which is what this matches. With `TENSOR_CLAMP_UNDEFINED`
-    # the destination DOES survive out of range, so the zero has to stay.
+    # Under a constant clamp, out-of-range elements come from the clamp value, so
+    # the destination is never read and a zeroed one only occupies registers.
+    # Under `TENSOR_CLAMP_UNDEFINED` the destination survives out of range and
+    # must be zero.
     @inline dest(::Type{MT}) where {MT} =
         CM === TENSOR_CLAMP_CONSTANT ? coopmat_undef(MT) : coopmat_zero(MT)
     @inline loadA(k) = tensor_load(dest(WM{Float16,BN,BK,MatrixA}),
@@ -182,17 +92,9 @@ function gemm_cm2!(
 
     acc = coopmat_zero(WM{Float32,BN,BM,Accumulator})
     k0 = Int32(0)
-    # Four k-steps per iteration, each pair consumed by its own product —
-    # `[[unroll]] for (j) { load; load; mulAdd; }`, which is the reference's
-    # shape.
-    #
-    # **Not all four loads first.** That was the first version, and it holds
-    # eight fragments live at once: at `128x128/64` the driver came back with
-    # **255 registers**, its ceiling, and the kernel ran at 8.9 TFLOP/s against
-    # the staged kernel's 37.8 at 128 registers. Batching the loads looks like
-    # it hides latency and instead prices the tile out of the register file —
-    # the scheduler can overlap the loads by itself, but it cannot un-extend a
-    # live range the source insists on.
+    # Four k-steps per iteration, each pair of loads consumed by its own product
+    # as in the reference. Issuing all eight loads first keeps eight fragments
+    # live and hits the 255-register ceiling; the scheduler overlaps loads anyway.
     if UNROLL
         while k0 + Int32(4 * BK) <= K
             Base.Cartesian.@nexprs 4 j -> begin
@@ -206,11 +108,8 @@ function gemm_cm2!(
         acc = coopmat_muladd(loadA(k0), loadB(k0), acc)
         k0 += Int32(BK)
     end
-    # The destination decides the component type — a tensor store writes the
-    # matrix's own bytes, so an fp32 accumulator into an fp16 slot is corruption
-    # and not a conversion. `eltype` is a compile-time property, so only one
-    # store survives. (This is the bug that took SAM 2's encoder to NaN when the
-    # flash kernel assumed its destination; it is not repeated here.)
+    # A tensor store writes the matrix's own bytes, so an fp16 destination needs
+    # the accumulator converted; `eltype` is static, so one store survives.
     olay = slice(base(M, N), n0, m0, BN, BM)
     if eltype(C) === Float16
         tensor_store(coopmat_convert(WM{Float16,BN,BM,Accumulator}, acc),
@@ -224,30 +123,10 @@ end
 """
     gemm_cm2_sg!(C, A, B, M, N, K, ::Val{NW})
 
-The other combination: tensor-addressed loads into **subgroup-scope** tiles,
-keeping the staged kernel's register blocking and dropping only the shared
-memory.
-
-This is the one hypothesis the ablation above leaves open. What it measured is
-that a *workgroup-scope* matrix is placed as a unit and the allocator wants two
-to four times the registers its elements need, saturating at 255 — while the
-staged kernel holds sixteen `16x16` subgroup accumulators in exactly 128. So the
-question is whether the tensor loads are worth anything when the tiles they feed
-are the ones the driver is demonstrably good at placing.
-
-Each subgroup owns a `4x4` block of `16x16` accumulators — 128 fp32 a lane, the
-same as the staged kernel — and loads four A-fragments and four B-fragments per
-k-step to feed sixteen products. That ratio is the whole point of register
-blocking, and it is unchanged; what changes is that the fragments come from
-global memory through a tensor layout instead of from workgroup memory after a staging
-pass and two barriers.
-
-**What it gives up** is the sharing that shared memory buys: with `NW` subgroups
-each reading its own fragments, an A-block is fetched `NW` times instead of once.
-The bet is that L2 covers it, which is exactly the bet a measurement settles.
-
-Clamped, unconditionally, because that is the fast path on this driver — see
-the ablation above, where the unclamped layout cost 2.8x.
+Tensor-addressed loads into subgroup-scope `16x16` tiles: the staged kernel's
+`4x4` register block per subgroup (four A and four B fragments per k-step feed
+sixteen products) without its shared memory, so each of the `NW` subgroups
+fetches its own A-block. Always clamped, the fast path (see the top of the file).
 """
 function gemm_cm2_sg!(
         C, A, B, M::Int32, N::Int32, K::Int32,
@@ -259,7 +138,7 @@ function gemm_cm2_sg!(
     w = Int32(tid ÷ 32)                 # this invocation's subgroup
     grp = KI.get_group_id()
     # The workgroup covers `RB*T` of M and `NW*RB*T` of N; subgroup `w` takes the
-    # w-th slice of the N axis.
+    # w-th slice of N.
     m0 = Int32((grp.x - 1) * (RB * T))
     n0 = Int32((grp.y - 1) * (NW * RB * T)) + w * Int32(RB * T)
 
@@ -309,11 +188,9 @@ Launch [`gemm_cm2_sg!`](@ref). `nw` subgroups per workgroup, so the workgroup is
 function coopmat_gemm_cm2_sg!(C, A, B, M::Int, N::Int, K::Int; nw::Int = 2)
     backend = KernelAbstractions.get_backend(C)
     dev = caps(backend)
-    # Asked by name: this kernel's matrices are subgroup-scope, so it is the tensor
-    # addressing it needs, not a workgroup-scope shape.
+    # Subgroup-scope tiles: needs tensor addressing and the subgroup shape table,
+    # not a workgroup-scope shape.
     KI.supports_tensor_addressing(backend) || return nothing
-    # The tiles are `GEMM_TILE` squares at subgroup scope, so the device's own
-    # shape table is the authority rather than the workgroup-scope one.
     KI.supports(backend, MatrixShape(Float16, Float32, GEMM_TILE, GEMM_TILE, GEMM_TILE,
                                      SubgroupScope())) || return nothing
     nw * 32 <= dev.workgrouplimit ||
@@ -327,42 +204,32 @@ function coopmat_gemm_cm2_sg!(C, A, B, M::Int, N::Int, K::Int; nw::Int = 2)
 end
 
 """
-    coopmat_gemm_cm2!(C, A, B, M, N, K) -> C
+    coopmat_gemm_cm2!(C, A, B, M, N, K; tiling = nothing, unroll = true, clamp = nothing) -> C
 
 Launch [`gemm_cm2!`](@ref) for dense column-major operands. Returns `nothing`
-instead of `C` when this device cannot run it, so a caller can fall back.
-
-Deliberately narrow while it is unrouted: no batching, no split-K, no bias and no
-epilogue. Each of those is a real feature of `coopmat_gemm!` and each would be
-added only after this kernel earns its place on the plain shape.
+instead of `C` when this device cannot run it, so a caller can fall back. No
+batching, split-K, bias or epilogue while it is unrouted.
 """
 function coopmat_gemm_cm2!(C, A, B, M::Int, N::Int, K::Int; tiling = nothing,
                            unroll::Bool = true, clamp::Union{Nothing,Bool} = nothing)
-    # `KA.get_backend(C)`, not `LavaBackend()`: an unpinned backend resolves its
-    # queue through the global context, so on a second device the work lands on
-    # the wrong GPU. Same reason `coopmat_gemm!` derives it from the array.
+    # From the array: an unpinned backend resolves its queue through the global
+    # context and would put the work on the wrong GPU.
     backend = KernelAbstractions.get_backend(C)
     dev = caps(backend)
     KI.supports_tensor_addressing(backend) || return nothing
     tiling = something(tiling, gemm_cm2_tiling(dev))
     tiling === nothing && return nothing
     BM, BN, BK, NT = tiling
-    # A tiling named by the caller is still the device's to allow. Refusing here
-    # says which rule broke; letting it through says `vkCreateComputePipelines`
-    # failed, three layers from the call that chose it.
+    # A caller's tiling must still fit; refused here rather than in
+    # `vkCreateComputePipelines`, which names neither tiling nor rule.
     gemm_cm2_fits(dev, BM, BN, BK, NT) ||
         throw(ArgumentError("tiling BM=$BM BN=$BN BK=$BK NT=$NT is not a legal " *
                             "workgroup-scope shape on this device; it reports " *
                             "(invocations, M, N, K) granularities $(dev.wggran)"))
-    # Clamping is only needed where a tile can hang off an edge. Deciding it from
-    # the shape rather than always paying for it is what the reference's "fast
-    # path" is; `clamp = true` forces it, which is what the A/B measures against.
+    # Clamp by default only where a tile can hang off an edge, as the reference
+    # does; `clamp = true` forces it.
     cl = something(clamp, !(M % BM == 0 && N % BN == 0 && K % BK == 0))
     cmode = cl ? TENSOR_CLAMP_CONSTANT : TENSOR_CLAMP_UNDEFINED
-    # A plain kernel since e9ecae9, so it launches through KernelInterface. This
-    # call still spelled the `@kernel` form `gemm_cm2!(backend, NT)(…)` and threw a
-    # MethodError on every coopmat2 device; nothing else has the extension, so no
-    # suite run on RADV reached it.
     KI.Kernel(backend, gemm_cm2!)(C, A, B, Int32(M), Int32(N), Int32(K),
                                   Val(BM), Val(BN), Val(BK), Val(unroll), Val(cmode);
                                   numgroups = (cld(M, BM), cld(N, BN)),

@@ -3,10 +3,9 @@ using StaticArrays: SMatrix
 
 """Mat3x4f
 
-Row-major Float32 3×4 affine, stored as SMatrix{4,3,Float32,12} so linear
-indices expose rows. Byte-identical to VkTransformMatrixKHR; Metal repacks
-to its different column-major descriptor layout. Device geometry tables use
-this core row-major layout."""
+Row-major Float32 3×4 affine, stored as `SMatrix{4,3,Float32,12}` so linear
+indices run along rows. Byte-identical to `VkTransformMatrixKHR`; Metal repacks
+it into its column-major descriptor layout."""
 const Mat3x4f = SMatrix{4, 3, Float32, 12}
 
 """identity_transform() -> Mat3x4f
@@ -16,13 +15,11 @@ identity_transform() = Mat3x4f(1.0f0, 0.0f0, 0.0f0, 0.0f0,
                                0.0f0, 1.0f0, 0.0f0, 0.0f0,
                                0.0f0, 0.0f0, 1.0f0, 0.0f0)
 
-# The layout claim above is load-bearing for every backend that hands these
-# bytes to a driver, so it is asserted rather than trusted.
+# Backends hand these bytes to drivers, so the layout is asserted.
 @assert sizeof(Mat3x4f) == 48   "Mat3x4f must be 48 bytes (12 × Float32)"
 @assert isbitstype(Mat3x4f)     "Mat3x4f must be plain bits for kernel use"
 
 
-# Compose core transforms from rotation, scale and translation.
 """
     quat_to_rot3x3(q::Vec4f) -> NTuple{9, Float32}
 
@@ -58,7 +55,6 @@ Scale rotation row i by sc[i], then append translation in core affine layout."""
 end
 
 
-# Historical function name; the result is the core row-major affine layout.
 """Convert an indexable 4×4 matrix to the core row-major Mat3x4f layout."""
 function mat4_to_vk_transform(m)::Mat3x4f
     # SMatrix columns hold the affine rows in linear storage order.

@@ -1,10 +1,7 @@
-# Hardware H.264/H.265 decode: Annex-B input, GPU-resident NV12 output.
-# Shared session/stream state lives in video_common.jl; codecs pack their own
-# picture/reference structures and apply their own reference-marking rules.
+# Hardware H.264/H.265 decode from Annex-B to GPU-resident NV12. Session and
+# stream state are shared (video_common.jl); each codec builds its own picture
+# and reference structures and applies its own reference marking.
 
-# ============================================================================
-# VideoImage — a decoded video frame resident in a GPU image
-# ============================================================================
 """NV12 GPU image with coded/display extents. `size` is the cropped display size;
 `copyto!(::LavaArray{UInt8}, img)` and `Array(img)` read its luma plane."""
 mutable struct VideoImage
@@ -15,17 +12,16 @@ mutable struct VideoImage
     width::Int      # display (cropped) width
     height::Int     # display (cropped) height
     format::VK.Format
-    # Current VkImageLayout as a raw UInt32 so the decode loop's in-place
-    # barriers and the high-level copy path share one source of truth.
+    # Current `VkImageLayout` as raw `UInt32`, shared by the raw decode barriers
+    # and the VK.jl copy path.
     layout::Base.RefValue{UInt32}
 end
 Base.size(img::VideoImage) = (img.width, img.height)
 Base.eltype(::VideoImage) = UInt8
 Base.show(io::IO, img::VideoImage) = print(io, "VideoImage($(img.width)×$(img.height), NV12)")
 
-# Record a luma (Y-plane) image→buffer copy of `img` (display size, top-left,
-# tightly packed) into `buffer` at byte `offset`, on high-level command buffer
-# `cb`. `img` must already be TRANSFER_SRC_OPTIMAL.
+# Record a copy of `img`'s luma plane (display size, tightly packed) to byte
+# `offset` of `buffer`. `img` must be TRANSFER_SRC_OPTIMAL when `cb` executes.
 function record_luma_copy!(cb, img::VideoImage, buffer::VK.Buffer, offset::Integer)
     VK.cmd_copy_image_to_buffer(cb, img.image,
         VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer,
@@ -35,9 +31,8 @@ function record_luma_copy!(cb, img::VideoImage, buffer::VK.Buffer, offset::Integ
     return cb
 end
 
-# Record the chroma (interleaved U/V) plane of an NV12 frame into `buffer`: a
-# (width÷2 × height÷2) region of 2-byte (U,V) pixels, tightly packed, so the
-# destination is a `width × (height÷2)` UInt8 buffer of interleaved U,V samples.
+# Record a copy of `img`'s interleaved U/V plane to byte `offset` of `buffer`:
+# `width × (height ÷ 2)` bytes, tightly packed. Same layout requirement as luma.
 function record_chroma_copy!(cb, img::VideoImage, buffer::VK.Buffer, offset::Integer)
     VK.cmd_copy_image_to_buffer(cb, img.image,
         VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer,
@@ -47,7 +42,7 @@ function record_chroma_copy!(cb, img::VideoImage, buffer::VK.Buffer, offset::Int
     return cb
 end
 
-# Transition `img` to TRANSFER_SRC_OPTIMAL on `cb` if it isn't already there.
+# `img.layout` is updated when the barrier is recorded, not when it executes.
 function transition_transfer_src!(cb, img::VideoImage)
     img.layout[] == UInt32(VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) && return cb
     VK.cmd_pipeline_barrier(cb, [], [],
@@ -65,10 +60,9 @@ end
 """
     copyto!(dst::LavaArray{UInt8}, img::VideoImage) -> dst
 
-Copy the decoded frame's luma (Y) plane into the device-local array `dst`
-(image→buffer, entirely on the GPU). `dst` must hold at least `prod(size(img))`
-bytes and be allocated with a TRANSFER_DST usage flag. Runs one command buffer
-on the video-decode queue and blocks until it lands.
+Copy the frame's luma plane into `dst`, which must hold at least
+`prod(size(img))` bytes and have TRANSFER_DST usage. Submits on the video-decode
+queue and waits for it to go idle.
 """
 function Base.copyto!(dst::LavaArray{UInt8}, img::VideoImage)
     need = img.width * img.height
@@ -91,12 +85,11 @@ end
 """
     Array(img::VideoImage) -> Matrix{UInt8}
 
-Download the decoded frame's luma (Y) plane to the host as a `width × height`
-`Matrix{UInt8}` (grayscale = the NV12 Y plane).
+Download the frame's luma plane as a `width × height` `Matrix{UInt8}`.
 """
 function Base.Array(img::VideoImage)
-    # Video decode is single-context (one hardware video queue), and `VideoImage`
-    # carries no device, so this download uses the process default. ambient-allocation-ok
+    # `VideoImage` carries no device; assumes it was decoded on the default
+    # context. ambient-allocation-ok
     dst = LavaArray{UInt8,2}(undef, (img.width, img.height);
                              extra_usage = UInt32(VK.BUFFER_USAGE_TRANSFER_DST_BIT))
     copyto!(dst, img)
@@ -115,16 +108,15 @@ import ..VideoImage, ..LavaArray, ..pool_offset,
 
 import ..feed!, ..decodemore!, ..remaining
 
-# Image allocation is defined later in the parent include order.
+# Parent names defined after this include, such as `alloc_image_memory`.
 const MANTLE = parentmodule(@__MODULE__)
 
-"""Throw on a non-success result from a native video call."""
+"""Throw unless `r` is `VK_SUCCESS`."""
 @inline function vkchk(r::Int32, what::AbstractString)
     r == Int32(0) && return r
     error("video decode: $what returned VkResult $r")
 end
 
-# ---------- bitstream ----------
 mutable struct BR; d::Vector{UInt8}; p::Int; end
 rb1(b)=(byte=b.d[(b.p>>3)+1]; v=(byte>>(7-(b.p&7)))&0x01; b.p+=1; Int(v))
 rbn(b,n)=(v=0; for _ in 1:n; v=(v<<1)|rb1(b); end; v)
@@ -188,7 +180,7 @@ function parse_pps(nal)
     if b.p < 8*length(b.d)-8; t8=rb1(b); ps=rb1(b); ps==1 && error("pic scaling not handled"); cqp2=se(b); end
     (;pps_id,sps_id,entropy,bottom,nl0,nl1,wp,wbi,qp,qs,cqp,dbf,cintra,redun,t8,cqp2)
 end
-# slice header (enough for POC/DPB): frame_mbs_only assumed
+# Slice header fields needed for POC and the DPB; assumes frame_mbs_only.
 function parse_slice(nal, sps)
     nrid=Int((nal[1]>>5)&3); idr=(nal[1]&0x1f)==5
     b=BR(unescape(nal[2:end]),0)
@@ -269,7 +261,6 @@ function std_pps(p)
         Int8(p.qp),Int8(p.qs),Int8(p.cqp),Int8(p.cqp2), Ptr{C.StdVideoH264ScalingLists}(C_NULL))
 end
 
-# ---------- Vulkan helpers ----------
 dfp(ctx,n) = Vk.function_pointer(ctx.device,n)
 rp(x) = Base.unsafe_convert(Ptr{eltype(x)},x)
 pc(x) = Ptr{Cvoid}(rp(x))
@@ -277,7 +268,7 @@ pc(x) = Ptr{Cvoid}(rp(x))
 abstract type VideoDecoder end
 include("video_common.jl")
 
-"""H.264 DPB/output layouts: `0x1` allows one image; `0x2` requires separate images."""
+"""H.264 decode capability flags: `0x1` DPB_AND_OUTPUT_COINCIDE, `0x2` DPB_AND_OUTPUT_DISTINCT."""
 decode_capability_flags(ctx) =
     videocaps(ctx, decoderprofile(H264Decoder), codeccapabilities(H264Decoder)).flags
 
@@ -334,7 +325,8 @@ end
 videoslices(dec::H264Decoder, data) =
     ((parse_slice(n[3],dec.sps).first_mb==0, n[3]) for n in split_nals(data) if n[1] in (1,5))
 
-"""Persistent H.264 session. Feed Annex-B chunks beginning at an IDR; close when done."""
+"""Open a persistent H.264 session from the SPS/PPS in `data`. Feed Annex-B chunks
+beginning at an IDR; close when done."""
 H264Decoder(ctx, data::AbstractVector{UInt8}; chroma::Bool=false) =
     videodecoder(H264Decoder, ctx, data; chroma)
 
@@ -350,8 +342,9 @@ function codecparameters(dec::H264Decoder)
         C_NULL, UInt32(1), UInt32(1), rp(add))))
 end
 
-"""Record one AU and its output copy, append its display-order entry, and return
-the aligned bitstream range. The caller submits and waits for the chunk."""
+"""Record the decode of one AU at `bufbase` in the bitstream buffer and its output
+copy (queued under DISTINCT), and append its display-order entry. Return the
+aligned bytes used. The caller submits and waits."""
 function decodeau!(dec::H264Decoder, au, bufbase::Integer, slot::Integer=1)
     w=dec.ctx; sps=dec.sps; pps=dec.pps
     SESSION=dec.SESSION; PARAMS=dec.PARAMS; PIN=dec.PIN; imgs=dec.imgs
@@ -375,7 +368,7 @@ function decodeau!(dec::H264Decoder, au, bufbase::Integer, slot::Integer=1)
             poc=pmsb+sh.poclsb
             if sh.nrid!=0; dec.prevmsb=pmsb; dec.prevlsb=sh.poclsb; end
         elseif sps.poct==2
-            # H.264 8.2.1.3: derive POC from frame_num and its wrap offset, not the AU count.
+            # H.264 8.2.1.3: POC from frame_num and its wrap offset.
             maxfn = 1 << (sps.log2fn + 4)
             fnoff = sh.idr ? 0 :
                     (dec.codec.frame > sh.fnum ? dec.codec.offset + maxfn : dec.codec.offset)
@@ -388,19 +381,17 @@ function decodeau!(dec::H264Decoder, au, bufbase::Integer, slot::Integer=1)
         end
         isref = sh.nrid!=0
         outslot=popfirst!(freeslots)
-        outvimg,outviewhl=imgs[outslot]     # DPB slot — the setup reference picture
+        outvimg,outviewhl=imgs[outslot]     # DPB slot of the setup reference picture
         outimg=outvimg.image.vks; outview=outviewhl.vks; outlay=outvimg.layout
-        # Decode target. Under COINCIDE this IS the DPB slot, so every value derived
-        # from it below stays bit-identical to the single-image path.
+        # Decode target; under COINCIDE the DPB slot itself.
         distinct = dec.mkoutimg !== nothing
         if distinct
             while length(dec.outimgs) < slot; push!(dec.outimgs, dec.mkoutimg()); end
         end
         dstvimg,dstviewhl = distinct ? dec.outimgs[slot] : (outvimg,outviewhl)
         dstimg=dstvimg.image.vks; dstview=dstviewhl.vks; dstlay=dstvimg.layout
-        # upload AU to its chunk-batched region of the bitstream buffer
         sliceoffs, bitrange = uploadbitstream!(bmap+bufbase, au, dec.bsalign)
-        # reference slots (active DPB)
+        # Reference slots of the active DPB.
         refpr=Ref{C.VkVideoPictureResourceInfoKHR}[]; refri=Ref{C.StdVideoDecodeH264ReferenceInfo}[]; refds=Ref{C.VkVideoDecodeH264DpbSlotInfoKHR}[]
         decref=C.VkVideoReferenceSlotInfoKHR[]; begref=C.VkVideoReferenceSlotInfoKHR[]
         for (slot,fn,pc0) in dpb
@@ -428,7 +419,6 @@ function decodeau!(dec::H264Decoder, au, bufbase::Integer, slot::Integer=1)
         ctl=Ref(C.VkVideoCodingControlInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR,C_NULL,UInt32(C.VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR)))
         endinfo=Ref(C.VkVideoEndCodingInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR,C_NULL,UInt32(0)))
         isfirst=dec.isfirst
-        # Cropped output planes are device-local arrays.
         dst=LavaArray{UInt8,2}(undef,(DW,DH); bq=dec.ctx.default_bq, extra_usage=UInt32(Vk.BUFFER_USAGE_TRANSFER_DST_BIT))
         dstbuf=dst.buf[]
         duv = chroma ? LavaArray{UInt8,2}(undef,(DW,DH÷2); bq=dec.ctx.default_bq, extra_usage=UInt32(Vk.BUFFER_USAGE_TRANSFER_DST_BIT)) : nothing
@@ -443,10 +433,10 @@ function decodeau!(dec::H264Decoder, au, bufbase::Integer, slot::Integer=1)
             isfirst && ccall(dfp(w,"vkCmdControlVideoCodingKHR"),Cvoid,(C.VkCommandBuffer,Ptr{Cvoid}),CB,pc(ctl))
             ccall(dfp(w,"vkCmdDecodeVideoKHR"),Cvoid,(C.VkCommandBuffer,Ptr{Cvoid}),CB,pc(decinfo))
             ccall(dfp(w,"vkCmdEndVideoCodingKHR"),Cvoid,(C.VkCommandBuffer,Ptr{Cvoid}),CB,pc(endinfo))
-            videobarrier!(w,CB;memory=mb)   # this decode's DPB writes → the next decode's reference reads
-            videobarrier!(w,CB;image=videolayoutbarrier(dstimg,dstlay[],TSRC)); dstlay[]=TSRC   # decode target now TRANSFER_SRC
+            videobarrier!(w,CB;memory=mb)   # DPB writes before the next decode's reads
+            videobarrier!(w,CB;image=videolayoutbarrier(dstimg,dstlay[],TSRC)); dstlay[]=TSRC
             if distinct
-                # Video-only queues cannot copy to buffers; defer DISTINCT copies to the main queue.
+                # A video-only queue cannot copy to buffers; DISTINCT copies run on the main queue.
                 push!(dec.copyq, (dstvimg, dst, duv))
             else
                 record_luma_copy!(cbh, dstvimg, dstbuf.buffer, pool_offset(dstbuf) + dst.offset)
@@ -471,7 +461,7 @@ function decodeau!(dec::H264Decoder, au, bufbase::Integer, slot::Integer=1)
                     elseif op==5                          # unmark all references
                         for e in dpb; push!(freeslots, e[1]); end; empty!(dpb)
                     end
-                    # ops 2/3/4/6 (long-term refs) unused by the encoders we target
+                    # Long-term ops 2/3/4/6 are ignored; target encoders do not emit them.
                 end
                 push!(dpb,(outslot,sh.fnum,poc))
             else
@@ -485,8 +475,8 @@ function decodeau!(dec::H264Decoder, au, bufbase::Integer, slot::Integer=1)
     return bitrange
 end
 
-"""Decode H.264 in display order, returning `(width, height, ys, uvs)`. Output planes
-stay on the GPU; `uvs` is empty unless `chroma=true`. Close the session on exit."""
+"""Decode H.264 in display order, returning `(width, height, ys, uvs)` of GPU arrays;
+`uvs` is empty unless `chroma=true`. Closes the session on return."""
 decode_h264(ctx, annexb::Vector{UInt8}; kw...) = decodevideo(H264Decoder,ctx,annexb;kw...)
 
 include("video_h265.jl")

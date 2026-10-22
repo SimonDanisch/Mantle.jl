@@ -1,44 +1,23 @@
-# The ray-tracing pipeline: which Julia functions serve as raygen,
-# closest-hit, miss and any-hit, and what payload they exchange.
-#
-# ONE struct, shared by every backend — not an abstract type with a copy per
-# backend. Nothing in it is a driver object: the fields are functions, a tuple,
-# a symbol and a flag, which is exactly what `GraphicsPipeline` next door is.
-#
-# It did not look that way at first, because it carried a `PIPELINE_CACHE` field
-# holding compiled Vulkan pipelines. That field was the anomaly, not a reason to
-# split the type: the graphics side has always cached in `DeviceCaches`, and a
-# compiled pipeline is a device object — it must not outlive a `reset_device!`,
-# and two identical pipelines should not compile twice. The cache moved to
-# `DeviceCaches.rt_pipelines` and the description became portable by itself.
-#
-# So a caller describes a pipeline and the runtime owns compiling it. There is
-# nothing here for a user to manage.
+# The portable ray-tracing pipeline description: the Julia functions serving as
+# raygen, closest-hit, miss and any-hit, and the payload they exchange. Compiled
+# pipelines are device objects, cached in `DeviceCaches.rt_pipelines`.
 
 mutable struct RayTracingPipeline
-    # User-provided Julia functions
     raygen_func::Any
-    # Tuple of one-or-more closest-hit functions.  When the tuple has length
-    # N > 1 the SBT is built with N hit groups; each HWTLAS instance picks a
-    # group via `instanceShaderBindingTableRecordOffset`.  Per-material chit
-    # shaders + SER live on this path.
+    # One or more closest-hit functions. N > 1 builds N hit groups; an instance
+    # picks one with its SBT record offset.
     closesthit_funcs::Tuple
     miss_func::Any
     anyhit_func::Any          # nothing = no any-hit shader
     payload_type::Symbol
-    # When true, the closest-hit and miss shaders are compiled with the same
-    # BDA argument signature as the raygen — they receive the raygen's args
-    # as function parameters and can read every buffer/queue the raygen sees.
-    # Required for the pbrt-v4 OptiX pattern (shading happens in closesthit,
-    # raygen just calls traceRay).  Default `false` keeps the legacy contract
-    # where chit/miss take no args (the `hw_closesthit` / `hw_miss` pattern
-    # used by `trace_closest_hits!`).
+    # true: closest-hit and miss are compiled with the raygen's argument signature
+    # and see every buffer it sees (shading in closest-hit). false: they take no
+    # arguments, as `hw_closesthit` / `hw_miss` do.
     chit_miss_take_args::Bool
 end
 
-# Normalise `closest_hit` to a Tuple: accept a single function or a
-# tuple/vector of functions. Stored as a Tuple so each chit's identity
-# participates in the dispatch caches and pin walks.
+# A function, tuple or vector of closest-hits, stored as a Tuple so each one's
+# identity is part of the cache key.
 _normalise_chit(f) = (f,)
 _normalise_chit(t::Tuple) = t
 _normalise_chit(v::AbstractVector) = tuple(v...)
@@ -52,9 +31,8 @@ function RayTracingPipeline(; raygen, closest_hit, miss, any_hit=nothing,
                        chit_miss_take_args)
 end
 
-# Every shader the pipeline runs, flattened. The order is the SBT's — raygen,
-# the hit groups, miss, any-hit — which is also the order `shadertouches`
-# answers in and the order `packtrace!` pins them in.
+# Order: raygen, closest-hits, miss, any-hit; `shadertouches` answers in the same
+# order. This is not the SBT group order (raygen, miss, hit groups).
 shaders(p::RayTracingPipeline) =
     (p.raygen_func, p.closesthit_funcs..., p.miss_func,
      (p.anyhit_func === nothing ? () : (p.anyhit_func,))...)

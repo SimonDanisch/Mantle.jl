@@ -1,39 +1,24 @@
-# LavaArray{T,N} — GPU array backed by Vulkan buffer
-#
-# Full GPUArrays.jl compatible implementation with DataRef, offset, derive.
+# `LavaArray{T,N}`: the GPUArrays array type over a Vulkan buffer.
 
 import GPUArraysCore: AbstractGPUArray, AbstractGPUVector, AbstractGPUMatrix
 
-# Exported, as `LavaBackend` is: the host array type of a backend is part of its
-# surface, and defined-but-unexported means an `UndefVarError` at whatever line
-# first names it rather than at load.
 export LavaArray
 
 """
     LavaArray{T,N} <: AbstractGPUArray{T,N}
 
-GPU array backed by a Vulkan device-local buffer with BDA (Buffer Device Address).
+GPU array over a `VkManagedBuffer`; kernels receive its buffer device address.
 """
 mutable struct LavaArray{T,N} <: AbstractGPUArray{T,N}
     buf::GPUArrays.DataRef{VkManagedBuffer}
     dims::NTuple{N,Int}
-    # Byte offset from the start of the backing VkManagedBuffer to the first
-    # element of this view. Stored in bytes (not elements) so that a
-    # reinterpret that changes `sizeof(eltype)` doesn't have to round-trip
-    # through element counts — e.g. `reinterpret(Int64, view(a::LavaArray{Int32}, 2:7))`
-    # creates a LavaArray{Int64} with `offset = 4`, which is a legal byte
-    # offset even though it isn't a whole Int64 element.
+    # Byte offset of the first element in the buffer. Bytes, not elements: a
+    # reinterpret of an Int32 view can start mid-Int64 (offset 4).
     offset::Int
 
-    # Register `unsafe_free!` as a GC finalizer so LavaArrays that fall out
-    # of scope without an explicit `unsafe_free!` call actually release their
-    # GPU memory. `GPUArrays.DataRef` is refcount-based — its `release`
-    # callback only fires on explicit `unsafe_free!`, NOT via Julia GC — so
-    # WITHOUT this finalizer every scratch LavaArray leaks until the process
-    # exits. Matches AMDGPU.ROCArray's pattern (`finalizer(unsafe_free!, xs)`
-    # at `AMDGPU/src/array.jl:13,19`). Idempotency is guaranteed by the
-    # `DataRef.freed` flag + `VkManagedBuffer.state` atomic CAS, so a second
-    # `unsafe_free!` (e.g. explicit user call before GC) is a no-op.
+    # `DataRef` releases only on `unsafe_free!`, never through GC, so without
+    # the finalizer unreferenced arrays leak. `DataRef.freed` and the buffer's
+    # atomic state make a second `unsafe_free!` a no-op.
     function LavaArray{T,N}(buf::GPUArrays.DataRef{VkManagedBuffer}, dims::NTuple{N,Int};
                             offset::Integer=0) where {T,N}
         xs = new{T,N}(buf, dims, offset)
@@ -42,36 +27,26 @@ mutable struct LavaArray{T,N} <: AbstractGPUArray{T,N}
     end
 end
 
-# `bq` defaults to the process default device. This is the ONE allocation
-# convenience that reads the default (`LavaArray(data)`, `LavaArray{T}(undef, n)`,
-# the family every array package has); every path inside the backend that holds
-# a device passes its queue, and `test_no_ambient_device.jl` holds it to that.
+# `bq` defaults to the process default device. Backend code that has a device
+# must pass its queue (`test_no_ambient_allocation.jl`).
 function LavaArray{T,N}(::UndefInitializer, dims::NTuple{N,Int};
                         bq::SubmitChannel{<:VulkanQueue}=vk_context().default_bq,
                         extra_usage::UInt32=UInt32(0),
                         scratch::Bool=false,
                         unified::Bool=false) where {T,N}
-    # An isbits union is refused, as `MtlArray` refuses it, and before anything is
-    # allocated. Julia stores such an array as the values followed by one
-    # type-selector byte per element; nothing here allocates, copies or indexes the
-    # selectors, so `Array(LavaArray(Union{Missing,Bool}[true]))` read back
-    # `[missing]` and `any` over it answered `false`, with no error.
+    # Otherwise the selector bytes are silently dropped and values read back wrong.
     Base.isbitsunion(T) &&
         throw(ArgumentError("LavaArray does not support isbits-union element types like $T: their type-selector bytes are not stored"))
     ctx = ctxof(bq)
     nbytes = checkedbytes(T,dims)
 
-    # AS-build scratch buffers need a specific BDA alignment
-    # (`ctx.as_scratch_align`).  Other buffers default to 1.  We over-allocate
-    # by (align - 1) bytes and shift the LavaArray's element offset so
-    # `bda_address(arr)` lands on the right boundary.  For T=UInt8 the offset
-    # is always valid; otherwise we assert divisibility.
+    # Acceleration-structure scratch needs `ctx.as_scratch_align`: over-allocate
+    # by `align - 1` bytes and offset the array onto the boundary.
     align = bda_alignment_for(ctx, scratch)
     slack = align > 1 ? Int(align) - 1 : 0
 
-    # Non-default usage (index buffer, AS input/storage, scratch, etc.) or
-    # BAR-mapped (unified) memory bypasses the pool since those buffers need
-    # specific flags at VkBuffer/DeviceMemory creation time.
+    # Extra usage flags, scratch and host-mapped memory need their own
+    # VkBuffer/VkDeviceMemory flags, so they bypass the pool.
     use_pool = extra_usage == UInt32(0) && !scratch && !unified
     allocation_bytes = max(Base.checked_add(nbytes,slack),16)
     managed_buf = use_pool ?
@@ -92,20 +67,17 @@ function LavaArray{T,N}(::UndefInitializer, dims::NTuple{N,Int};
     LavaArray{T,N}(ref, dims; offset=byte_offset)
 end
 
-# Varargs constructor for LavaArray{T,N}(undef, d1, d2, ...)
 LavaArray{T,N}(::UndefInitializer, dims::Int...; kw...) where {T,N} = LavaArray{T,N}(undef, dims; kw...)
 LavaArray{T,N}(::UndefInitializer, dims::Integer...; kw...) where {T,N} = LavaArray{T,N}(undef, Int.(dims); kw...)
 LavaArray{T,N}(::UndefInitializer, dims::NTuple{N,Integer}; kw...) where {T,N} = LavaArray{T,N}(undef, Int.(dims); kw...)
 
-# Empty vector constructor (matches Array{T,1}() behavior)
 LavaArray{T,1}() where {T} = LavaArray{T,1}(undef, (0,))
 
 LavaArray{T}(::UndefInitializer, dims::NTuple{N,Int}; kw...) where {T,N} = LavaArray{T,N}(undef, dims; kw...)
 LavaArray{T}(::UndefInitializer, dims::NTuple{N,Integer}; kw...) where {T,N} = LavaArray{T,N}(undef, Int.(dims); kw...)
 LavaArray{T}(::UndefInitializer, dims::Integer...; kw...) where {T} = LavaArray{T}(undef, Int.(dims); kw...)
 
-# Construct from host data.  Forwards alloc kwargs (bq/extra_usage/unified)
-# so callers don't need a separate "alloc-then-upload" helper for each usage.
+# Upload host data; allocation keywords (`bq`, `extra_usage`, `unified`) pass through.
 function LavaArray{T,N}(data::AbstractArray{T,N}; kw...) where {T,N}
     arr = LavaArray{T,N}(undef, size(data); kw...)
     GC.@preserve arr upload!(arr, data)
@@ -118,11 +90,10 @@ LavaArray{T}(data::AbstractArray{S,N}; kw...) where {T,S,N} =
 LavaArray{T,N}(data::AbstractArray{S,N}; kw...) where {T,S,N} =
     LavaArray{T,N}(convert(AbstractArray{T}, data); kw...)
 
-# UniformScaling constructor (resolve ambiguity with GPUArrays inner constructor)
+# UniformScaling constructors resolve an ambiguity with GPUArrays'.
 import LinearAlgebra: UniformScaling
 
-# Top level, not inside the constructor below: a kernel is compiled by its
-# function, and a closure minted per call is a new function every time.
+# Top level: a closure per call would be a new function, compiled every time.
 function identity_kernel!(res, stride, val)
     i = KI.get_global_id().x
     ilin = (stride * (i - 1)) + i
@@ -136,11 +107,8 @@ function (::Type{LavaArray{T,N}})(s::UniformScaling, dims::Tuple{Int,Int}) where
     res = similar(LavaArray{T,N}, dims)
     fill!(res, zero(T))
     isempty(res) && return res
-    # `KA.get_backend(res)`, NOT `LavaBackend()`. An unpinned backend resolves
-    # its queue through `vk_context()`, so on a second device this dispatches on
-    # whichever context happens to be global — the work lands on the wrong GPU
-    # and the buffer's own device never sees it. `get_backend` derives the
-    # context from the array's buffer, which has always carried it.
+    # The array's backend, not `LavaBackend()`: an unpinned backend dispatches
+    # on the global `vk_context()`, which may be another GPU.
     KI.Kernel(KernelAbstractions.get_backend(res), identity_kernel!)(
         res, size(res, 1), T(s.λ); ndrange=minimum(dims))
     return res
@@ -148,16 +116,7 @@ end
 (::Type{LavaArray{T}})(s::UniformScaling, dims::Tuple{Int,Int}) where {T} =
     LavaArray{T,2}(s, dims)
 
-# ── GPUArrays interface: storage & derive ──
-
 GPUArrays.storage(a::LavaArray) = a.buf
-
-# `usagekey(a::LavaArray) = a.buf[]` was here, deleted 2026-09-15 with the
-# capture path. It mapped a derived window back to the buffer it shared, so an
-# INTERCEPTED launch's hazard landed on the storage rather than on a view object
-# with no stable identity. A declared graph names the parent outright — a view
-# handed to a dispatch declares the slice of its parent it covers — so there is
-# nothing to recover.
 
 function GPUArrays.derive(::Type{T}, a::LavaArray, dims::Dims{N}, offset::Int) where {T,N}
     ref = copy(a.buf)
@@ -169,14 +128,10 @@ end
 """
     GPUArrays.memory_location(a::LavaArray) -> (base, offset)
 
-Where `a`'s elements are: the backing buffer's device address, and the byte offset of
-the first element from it. GPUArrays derives `mightalias`, `dataids` and the check that
-two `SubArray`s view the same memory from this, so two arrays alias exactly where their
-byte ranges meet: two `Buffer`s the pool placed in one block do not, an empty view
-aliases nothing, and two strided views of the same bytes are compared index by index.
-
-A buffer without a device address is named by its allocation instead, which only ever
-costs a false positive against a buffer with one.
+The buffer's device address and the byte offset of `a`'s first element.
+GPUArrays derives `mightalias`, `dataids` and Base's `_parentsmatch` from it,
+so arrays alias exactly where their byte ranges overlap. A buffer without a
+device address is keyed by its allocation instead.
 """
 function GPUArrays.memory_location(a::LavaArray)
     m = a.buf[]
@@ -184,25 +139,18 @@ function GPUArrays.memory_location(a::LavaArray)
     return (base, a.offset)
 end
 
-# ── copy ──
-
 function Base.copy(a::LavaArray{T,N}) where {T,N}
     b = similar(a)
     copyto!(b, 1, a, 1, length(a))
     return b
 end
 
-# ── similar ──
-
-# On the array's own device: allocating on the process default instead puts
-# every broadcast result, `copy` and `map` over a second-device array on the
-# first device.
+# Allocate on the array's own device, not the process default, so broadcast,
+# `copy` and `map` results stay on it.
 queueof(a::LavaArray) = (a.buf[].ctx::VkContext).default_bq
 Base.similar(a::LavaArray{T,N}) where {T,N} = LavaArray{T,N}(undef, a.dims; bq = queueof(a))
 Base.similar(a::LavaArray{T}, dims::Base.Dims{N}) where {T,N} = LavaArray{T,N}(undef, dims; bq = queueof(a))
 Base.similar(a::LavaArray, ::Type{T}, dims::Base.Dims{N}) where {T,N} = LavaArray{T,N}(undef, dims; bq = queueof(a))
-
-# ── Base interface ──
 
 Base.size(a::LavaArray) = a.dims
 Base.length(a::LavaArray) = prod(a.dims)
@@ -212,99 +160,60 @@ Base.ndims(::LavaArray{T,N}) where {T,N} = N
 Base.IndexStyle(::Type{<:LavaArray}) = IndexLinear()
 Base.elsize(::Type{<:LavaArray{T}}) where T = sizeof(T)
 
-# BDA address for kernel argument passing (includes offset, already in bytes)
+# Device address of the first element, view offset included.
 function bda_address(a::LavaArray{T}) where T
     a.buf[].address + a.offset
 end
 
-# From the address itself, view offset included: the one representation whose
-# alignment is a fact rather than a rule.
+# Alignment of the actual address, view offset included.
 basealignment(a::LavaArray) = powalign(bda_address(a))
 
-# `hold!(owner, a)` holds the LavaArray WRAPPER, not just its VkManagedBuffer.
-# The wrapper is what Julia's GC traces: holding the raw buffer would not keep
-# the array alive, so its finalizer could fire mid-recording, release the
-# DataRef and leave the commands naming a DEFERRED buffer. The generic
-# `hold!(::Closed, obj)` in `runtime/command.jl` does exactly that, so no method
-# is needed here — only the two questions core asks about the leaf.
+# The generic `hold!(::Closed, obj)` holds the `LavaArray` wrapper, not just its
+# buffer: the wrapper's finalizer would otherwise release the buffer
+# mid-recording.
 
-# Where the lifetime stamp lives for an array: on its buffer.
-#
-# `a.buf.rc.obj` and not `a.buf[]`, deliberately. `getindex` throws on a DataRef
-# whose owner has already called `unsafe_free!`, and that is precisely the
-# window this is asked in: a hold list being dropped after the array it names
-# was explicitly freed. The buffer object is still there — the refcount is what
-# reached zero — and asking about ITS lifetime is the whole point.
+# The array's lifetime stamp is its buffer's. Through `a.buf.rc.obj`, not
+# `a.buf[]`, which throws after `unsafe_free!`: a hold list can be dropped
+# after the array it names was freed.
 @inline stampof(a::LavaArray) = stampof(a.buf.rc.obj::VkManagedBuffer)
 
-# The buffer these commands name, for ordering between channels. Through
-# `buf[]`, because a command that names a released array is a use-after-free
-# and the throw is the report.
+# Through `buf[]`, so naming a freed array in a command throws.
 @inline syncbuf!(owner::Closed, a::LavaArray) = syncbuf!(owner, a.buf[])
 
-# Pure device-value conversion; callers retain originals with holdleaves!.
-# Carry a concrete owner type for packers that also receive this adaptor;
-# nothing denotes compilation without a recording owner.
+# Adapt.jl adaptor converting to device values; it holds nothing, callers
+# hold the originals with `holdleaves!`. `batch === nothing` means compiling
+# without a recording owner.
 struct LavaAdaptor{P<:Union{Nothing,Closed}}
     batch::P
 end
 
-# ── Transfers ──
-
-"""Upload host data to GPU array (must have matching length)."""
+"""Upload host `data` into `dst`; lengths must match."""
 function upload!(dst::LavaArray{T}, data::AbstractArray{T}) where T
     @assert length(data) == length(dst) "Size mismatch: $(length(data)) vs $(length(dst))"
     GC.@preserve dst upload_typed!(dst.buf[], data; offset=dst.offset)
 end
 
-# `update!` is deleted — use `Base.resize!(arr, length(new)) + Base.copyto!(arr, new)`.
-# `Base.resize!(::LavaArray)` is capacity-aware (see array/gpuarrays.jl); `copyto!` is
-# the standard GPUArrays upload path.  That pair is the full "make dst match src"
-# operation and composes with Base semantics across CuArray / ROCArray / LavaArray
-# without a Lava-specific hook.
-
-"""Download GPU array to host."""
+"""Download `src` to a new host `Array`."""
 function Base.Array(src::LavaArray{T,N}) where {T,N}
     result = Array{T}(undef, src.dims...)
     download_typed!(vec(result), src.buf[]; offset=src.offset)
     return result
 end
 
-"""Convenience: collect downloads to host."""
 Base.collect(a::LavaArray) = Array(a)
 
-# ── Memory management ──
-#
-# No `unsafe_free!(::LavaArray)`: GPUArrays' generic method is
-# `unsafe_free!(storage(x))`, and `storage(a::LavaArray)` is `a.buf` above.
+# `unsafe_free!` is GPUArrays' generic `unsafe_free!(storage(x))`.
 
-# ── Aliasing ──
-#
-# `GPUArrays.memory_location` above is the whole of it: GPUArrays answers
-# `mightalias`, `dataids` and Base's `_parentsmatch` (whether two views' parents are
-# the same memory, so their index ranges are compared) from it. A method of our own
-# here compared the `DataRef`s by identity, and every view `derive` builds has a
-# fresh one, so two strided views of the same bytes through different parents were
-# taken to overlap.
+"""
+    LavaDeviceArray(a::LavaArray)
 
-# ── Device-side array ──
-#
-# `LavaDeviceArray` itself is in `device/devicearray.jl`, with the rest of the
-# code a kernel is compiled against: it is a `(pointer, dims)` pair and knows
-# nothing about buffers, pools or lifetimes. Only the conversion is here, because
-# only the host handle knows its own buffer address.
-
-"""Convert a host `LavaArray` to the form a kernel receives."""
-# Qualified. `using Lava: LavaDeviceArray` makes the name visible but does not
-# make this an extension of Lava's constructor — 1.12 assumes it is one and
-# deprecates the assumption, so it is said outright. `import`ing the name
-# instead would work equally well and read as though Mantle owned the type.
+The `(pointer, dims)` value a kernel receives for `a`. Qualified as
+`Lava.LavaDeviceArray` because extending an imported-by-`using` name is
+deprecated in Julia 1.12.
+"""
 function Lava.LavaDeviceArray(a::LavaArray{T,N}) where {T,N}
     LavaDeviceArray{T,N}(Ptr{T}(bda_address(a)), a.dims)
 end
 
-
-# The address IS the identity a recorded draw baked — see `argidentity` in
-# `graphics/commands.jl`. It changes exactly when `resize!` had to reallocate,
-# which is the case a cached plan cannot otherwise notice.
+# A recorded draw bakes the address; it changes exactly when `resize!` reallocates.
 Mantle.argidentity(a::LavaArray) = bda_address(a)

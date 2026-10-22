@@ -17,7 +17,7 @@ abstract type Resource end
 """todevice(x) -> Device
 
 Return a Device unchanged, or resolve a KernelAbstractions.Backend to its cached
-device. Other argument types are rejected by dispatch."""
+device."""
 todevice(d::Device) = d
 todevice(b::KernelAbstractions.Backend) = Device(b)
 
@@ -140,8 +140,8 @@ function npipelines end
 
 """free!(plan)
 
-Release a plan's pool regions and deregister its arena tenancy. Explicit cleanup
-is required; dropping a plan does not release its regions through a finalizer."""
+Release a plan's pool regions and arena tenancy now. Optional: a dropped plan's
+finalizer queues it, and the next reclaim! frees it on the owning thread."""
 function free! end
 
 """Per-pass host recording time and GPU execution time. These overlap across
@@ -179,20 +179,18 @@ function timings end
 
 """importhost(backend, A::DenseArray) -> device array
 
-Import A's host allocation for direct device access without a device copy.
-Keep A alive and unmoved while used. Query canimporthost first; unsupported
-backends throw. Vulkan requires imported-pointer alignment at both ends; the RADV
-import path was qualified with private anonymous memory. Use importablehost there.
-Discrete devices read imported memory across the bus."""
+Map A's host allocation for device access without a copy; keep A alive and
+unmoved while used. Throws unless canimporthost. Vulkan needs the pointer
+aligned at both ends, which importablehost provides. Discrete devices read
+imported memory across the bus."""
 importhost(backend, A::DenseArray) = throw(ArgumentError(
     "importhost: $(nameof(typeof(backend))) cannot read host memory in place " *
     "(canimporthost(backend) is false); upload it instead"))
 
 """importablehost(T, n) -> Vector{T}
 
-Allocate private anonymous, page-aligned host storage suitable for importhost.
-On Linux request transparent huge pages to reduce GPU address-translation cost.
-Suitability and bandwidth still depend on the backend and working set."""
+Private anonymous, page-aligned host storage for importhost. On Linux it requests
+transparent huge pages to reduce GPU address-translation cost."""
 function importablehost(::Type{T}, n::Integer) where {T}
     a = Mmap.mmap(Vector{T}, n; shared = false)
     @static if Sys.islinux()

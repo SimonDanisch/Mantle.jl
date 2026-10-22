@@ -46,7 +46,7 @@ end
 """DeviceArray{T,N}(region, dims)
 
 A typed, non-owning view of a pool region. The pool owns its memory; retire the
-region explicitly after use. storage supplies the backend-native array view."""
+region explicitly after use. deviceview supplies the backend-native array."""
 struct DeviceArray{T,N}
     region::Region
     dims::NTuple{N,Int}
@@ -99,8 +99,6 @@ function allocate(pool::Pool, dev, kind, ::Type{T}, dims::NTuple{N,Int};
 end
 allocate(pool::Pool, dev, kind, ::Type{T}, dims::Integer...; kw...) where {T} =
     allocate(pool, dev, kind, T, Int.(dims); kw...)
-
-# ── Backend-generic device queries ────────────────────────────────────────────
 
 """Maximum workgroup invocations for the backend of x."""
 workgrouplimit(x) = caps(KernelAbstractions.get_backend(x)).workgrouplimit

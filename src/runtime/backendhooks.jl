@@ -8,8 +8,8 @@ function staged_gemm_tile end
 
 """videodecodes(dev) -> Bool
 
-Whether this device/backend exposes a hardware video-decode session. Currently
-only video-enabled Vulkan devices implement it; other devices return false."""
+Whether this device exposes a hardware video-decode session. Video-enabled Vulkan
+devices implement it; the default is false."""
 videodecodes(dev) = false
 
 """decode_h264_gpu(annexb::AbstractVector{UInt8}; maxframes) -> (width, height, frames)

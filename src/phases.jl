@@ -1,41 +1,21 @@
-# Compilation is a list of phases, not a function.
-#
-# RPS splits the same work six ways (`src/runtime/common/phases/`), and the
-# reason is not tidiness: each analysis becomes testable on its own. Ours grew
-# four interacting analyses inside one function, and fuzzing found three bugs
-# that all lived in the interaction rather than in any one of them.
-#
-# A phase reads and writes named fields on a shared context. The backend adds the
-# concrete phases; the core defines the protocol and the order.
+# Compilation is a fixed list of phases over a shared context. Each phase runs on
+# a context holding only what earlier phases produced, so each is testable alone.
 
 abstract type Phase end
 
 """
     run!(phase, ctx)
 
-Advance the compilation by one phase. Every phase is expected to be callable on
-its own against a context carrying only what earlier phases produced, which is
-what makes each one testable without running the others.
+Advance compilation by one phase.
 """
 function run!(phase::Phase, ctx)
     throw(MethodError(run!, (phase, ctx)))
 end
 
-# ── what a backend's compilation context has to answer ────────────────────────
-#
-# Five of the seven phases are graph analyses and contain nothing backend-shaped;
-# only Barriers and Pipelines do. In a backend extension they would mean a second
-# backend copying a scheduler, and two copies of a scheduler drift in exactly the
-# places fuzzing finds bugs. They live here,
-# and a backend supplies the five methods below.
+# The context protocol. All phases live in core so no backend copies the scheduler.
 
-"""
-Everything the backend-independent phases compute.
-
-One struct rather than a field-per-phase interface: a context holds one of these
-and answers [`analysis`](@ref) with it, so adding a phase output does not add an
-accessor pair to every backend.
-"""
+"""Everything the backend-independent phases compute. Returned by [`analysis`](@ref),
+so a new phase output adds no per-backend accessor."""
 mutable struct Analysis
     deps::Vector{Vector{Int}}                   # Dag
     order::Vector{Int}                          # Schedule
@@ -43,18 +23,14 @@ mutable struct Analysis
     peak::Int                                   # Place
     naive::Int
     offsets::Vector{Int}
-    # Aliasing: pass index => the (new, old) transient pairs whose bytes change
-    # hands there. The old index is kept because the barrier is derived from what
-    # that transient was last doing, not assumed to be everything.
+    # Aliasing: pass index => (new, old) transient pairs whose bytes change hands
+    # there. The barrier waits on the old transient's last usages.
     alias_begins::Dict{Int,Vector{Tuple{Int,Int}}}
-    # Place: the SHARED region of each arena this plan was placed into, and which
-    # arena that was. Not owned — every tenant of an arena holds the same region —
-    # so teardown deregisters rather than releasing, and the last tenant out is
-    # what actually gives the bytes back.
+    # Place: the shared region of each arena this plan was placed into, and its key.
+    # Not owned: teardown untenants and the last tenant releases the bytes.
     regions::Vector{Any}
     arenas::Vector{Any}
-    # Place: per transient, the arena key it went into — its kind, or an
-    # `ArenaPart` of it when the kind's placement needed more than one allocation.
+    # Place: per transient, its arena key (its kind, or an `ArenaPart` of it).
     parts::Vector{Any}
 end
 Analysis() = Analysis(Vector{Int}[], Int[], Item[], 0, 0, Int[],
@@ -63,29 +39,11 @@ Analysis() = Analysis(Vector{Int}[], Int[], Item[], 0, 0, Int[],
 """
     Compilation
 
-The state a compilation carries between phases, as far as the phases are
-concerned. A backend subtypes this for its own context.
-
-**Six of the accessors below then come for free**, because they were the same
-line in every backend. Both extensions had written, verbatim:
-
-    analysis(c)      = c.analysis
-    passes(c)        = c.graph.passes
-    policy(c)        = c.policy
-    alias(c)         = c.alias
-    transients(c)    = c.graph.transients
-    transientbyid(c) = c.graph.transient_by_id
-    device(c)        = c.graph.dev
-
-Field access rather than a method per backend, and that is a real contract rather
-than a convenience: a `Compilation` **must** have `analysis`, `alias` and
-`policy` fields and a `graph` field whose value has `passes`, `transients`,
-`transient_by_id` and `dev`. A backend whose context is shaped differently
-overrides the accessor, which is ordinary dispatch and costs it nothing.
-
-What stays per backend is what actually differs: `pool` (where the memory comes
-from), `overlapping` (whether this backend has slices), and `usages` (how a pass
-records them).
+Supertype of a backend's compilation context. The default accessors read fields:
+a subtype has `analysis`, `alias`, `policy` and `graph` fields, and the graph has
+`passes`, `transients`, `transient_by_id` and `dev`; a differently shaped context
+overrides the accessor. A backend always supplies `usages`, `overlapping`,
+`overlapgroup` and `pool`.
 """
 abstract type Compilation end
 
@@ -93,7 +51,7 @@ abstract type Compilation end
 function analysis end
 analysis(c::Compilation) = c.analysis
 
-"""The passes a context is compiling, in DECLARATION order."""
+"""The passes a context is compiling, in declaration order."""
 function passes end
 passes(c::Compilation) = c.graph.passes
 
@@ -103,22 +61,18 @@ function usages end
 """
     overlapping(ctx, a::Int, b::Int) -> Bool
 
-Whether two resource ids can name the same bytes.
-
-Equal ids do, and so does any slicing relationship a backend supports — a slice
-against its own parent, two intersecting slices of one parent. A scheduler told
-that two such ids are unrelated is free to reorder two passes that write the same
-memory, so a backend with no slices still has to answer `a == b`.
+Whether two resource ids can name the same bytes: equal ids, a slice and its
+parent, two intersecting slices of one parent. A wrong `false` lets the scheduler
+reorder two writes to the same memory; a backend without slices answers `a == b`.
 """
 function overlapping end
 
 """
     overlapgroup(ctx, id::Int) -> Int
 
-A key shared by every id that can overlap `id`: two ids in different groups never
-name the same bytes, and [`overlapping`](@ref) decides within a group. For a slice
-it is its parent's id. What lets the `Dag` phase compare a pass only with the
-passes that touched the same memory, instead of with every pass before it.
+A key shared by every id that can overlap `id` (a slice's parent id). Ids in
+different groups never overlap, so `Dag` compares a pass only with earlier passes
+of the same group; [`overlapping`](@ref) decides within a group.
 """
 function overlapgroup end
 
@@ -126,29 +80,24 @@ function overlapgroup end
 function policy end
 policy(c::Compilation) = c.policy
 
-"""The device a context compiles for. Where its [`Pool`](@ref) lives."""
+"""The device a context compiles for, which owns its [`Pool`](@ref)."""
 function device end
 device(c::Compilation) = c.graph.dev
 
-"""
-The device's [`Pool`](@ref) — one per memory kind, owned by the device and never
-by the caller. `Place` suballocates from it instead of allocating per compile.
-"""
+"""The device's [`Pool`](@ref), owned by the device, never by the caller. `Place`
+suballocates from it instead of allocating per compile."""
 function pool end
 
 """
-Smallest block the pool takes from this device.
+    blocksize(dev) -> Int
 
-A device property rather than a Mantle constant: 64 MiB is right for discrete
-VRAM, where an allocation is expensive and a driver has a limit on how many you
-may hold, and wrong for host memory, where over-allocating just faults in pages
-nobody asked for.
+Smallest block the pool takes from `dev`. 64 MiB suits discrete VRAM, where
+allocations are expensive and count-limited; for host memory it over-allocates.
 """
 blocksize(dev) = 64 << 20
 
-"""Whether transients may share bytes. `false` gives every one the whole
-timeline, which is a bisection tool rather than a tuning knob — it is how the
-aliasing hazard was isolated."""
+"""Whether transients may share bytes. `false` gives every transient the whole
+timeline, which isolates aliasing hazards when bisecting."""
 function alias end
 alias(c::Compilation) = c.alias
 
@@ -160,8 +109,7 @@ transients(c::Compilation) = c.graph.transients
 function transientbyid end
 transientbyid(c::Compilation) = c.graph.transient_by_id
 
-# Transient accessors. A backend answers these for whatever it uses to represent
-# one; the phases never look inside.
+# Transient accessors, answered per backend transient type; phases never look inside.
 """Bytes a transient occupies."""
 function nbytes end
 """Alignment a transient's offset must satisfy."""
@@ -175,48 +123,37 @@ function describe end
 """
     materialize!(device, transient, slab, offset)
 
-Give a placed transient its storage, at `offset` in `slab`. The device is the
-graph's — a transient's driver storage belongs to the device that made it, and
-on more than one device the process default is not necessarily that device.
+Give a placed transient its storage at `offset` in `slab`. `device` is the
+graph's, which owns the transient's storage; with several devices the process
+default may be a different one.
 """
 function materialize! end
 
 """
     deviceslice(device, T, dims, memory, offset) -> array
 
-`memory` at `offset` as a `dims`-shaped array of `T`, borrowed: the memory
-belongs to the pool and this never frees it.
-
-The whole of what [`materialize!`](@ref) asks a KernelAbstractions backend, and
-deliberately the whole: the extents, the element type, the offset and which
-region to carve are core's decisions, so what is left is the array type. A
-backend that keeps the block instead — because its barriers need the buffer
-identity — implements no method here.
+`memory` at `offset` as a `dims`-shaped array of `T`. Borrowed: the pool owns the
+memory and this never frees it. All [`materialize!`](@ref) asks of a
+KernelAbstractions backend; a backend that keeps the block because its barriers
+need the buffer identity implements no method.
 """
 function deviceslice end
 
-"""Passes in execution order — the scheduled order once Schedule has run,
-declaration order before that."""
+"""Passes in execution order: the scheduled order once `Schedule` has run,
+declaration order before."""
 ordered(c) = (o = analysis(c).order; isempty(o) ? passes(c) : passes(c)[o])
 
-"""
-Which pass depends on which, from the resources they share.
-
-Pass j depends on pass i when they touch a common resource and at least one of
-them writes it. Read-after-read is not an edge, which is what leaves independent
-work free to be reordered.
-"""
+"""Which pass depends on which: pass j depends on an earlier pass i when they touch
+overlapping resources and at least one writes. Read-after-read is no edge."""
 struct Dag <: Phase end
 
 function run!(::Dag, c)
     ps = passes(c)
     a = analysis(c)
     a.deps = [Int[] for _ in ps]
-    # The earlier passes by what they touched, keyed by `overlapgroup`: every pass
-    # that touched a group, and the ones that wrote it. A read depends on the
-    # earlier writers and a write on every earlier pass, of an overlapping id —
-    # the same relation as comparing every pair of passes, found without
-    # comparing the ones that share nothing. 5944 passes took 2.2 s that way.
+    # Earlier passes per `overlapgroup`: all that touched it, and those that
+    # wrote it. A read depends on earlier writers, a write on every earlier pass,
+    # of an overlapping id; this avoids comparing every pair of passes.
     touched = Dict{Int,Vector{Tuple{Int,Int}}}()
     written = Dict{Int,Vector{Tuple{Int,Int}}}()
     # `stamp[i] == j` once pass `i` is among `j`'s dependencies.
@@ -242,47 +179,32 @@ function run!(::Dag, c)
     return c
 end
 
-"""
-Choose an execution order consistent with the DAG.
-
-RPS spends its largest phase here (1171 lines) and encodes the whole policy as
-bit *positions* in one 32-bit score, so competing objectives compare with a
-single integer and retuning means moving a bit rather than rewriting a
-comparator. The policy types below pick those positions.
-"""
+"""Choose an execution order consistent with the DAG. A [`Policy`](@ref) sets the
+bit position of each objective in the packed score."""
 struct Schedule <: Phase end
 
 abstract type Policy end
 
 """Prefer passes that free more bytes than they allocate: smaller peak, more
-ordering between passes, which is RPS's `RPS_SCHEDULE_PREFER_MEMORY_SAVING_BIT`."""
+ordering between passes."""
 struct Compact <: Policy end
 
 """Prefer declaration order and leave lifetimes long: larger peak, fewer
-dependencies forced by shared memory. RPS's default."""
+dependencies forced by shared memory. The default."""
 struct Overlap <: Policy end
 
-"""Which bit range each objective occupies. Moving these is how the policy is
-tuned, exactly as in `rps_dag_schedule.hpp:180-208`."""
+"""Bit offset of each objective in the packed score; a policy is a choice of offsets."""
 memory_shift(::Compact) = 16
 memory_shift(::Overlap) = 0
 order_shift(::Compact) = 0
 order_shift(::Overlap) = 16
 
-"""Width of each memory term in the packed score; two of them share the range."""
+"""Maximum of each of the two memory terms, so their sum fits a 16-bit field."""
 const SCORE_MAX = 0x1fff
 
-"""
-Greedy list scheduling under a packed priority score.
-
-Objectives live in disjoint bit ranges of one integer and are OR'd, so comparing
-candidates is one integer compare and the policy is chosen by moving a bit range
-rather than by writing a different comparator. That trick is the best single idea
-in RPS (`rps_dag_schedule.hpp:180-208`).
-
-The memory term prefers a candidate that frees more bytes than it allocates,
-counting a transient's first touch as an allocation and its last as a free.
-"""
+"""Greedy list scheduling. Objectives occupy disjoint bit ranges of one integer score,
+so candidates compare with one integer compare. The memory term counts a transient's
+first touch as an allocation and its last as a free."""
 function run!(::Schedule, c)
     ps = passes(c)
     n = length(ps)
@@ -295,10 +217,8 @@ function run!(::Schedule, c)
         push!(dependents[i], j)
     end
 
-    # How many *passes* touch each transient, so "last use" is known. Counting
-    # usages instead would double-count a pass that binds the same resource
-    # twice, which makes every candidate tie and the schedule collapse to
-    # declaration order.
+    # Passes touching each resource, so its last use is known. Counting usages
+    # would double-count a pass that binds a resource twice and hide the last use.
     ids(p) = unique(first(u) for u in usages(p))
     touches = Dict{Int,Int}()
     for p in ps, id in ids(p)
@@ -317,9 +237,8 @@ function run!(::Schedule, c)
     oshift = order_shift(policy(c))
     order = Int[]
     ready = [i for i in 1:n if remaining[i] == 0]
-    # A loop's body is scheduled as one run of passes: once its first pass is
-    # taken, only its own passes are candidates until the last one is. `left`
-    # counts what is still to come of each loop.
+    # A loop body is scheduled contiguously: once its first pass is taken, only
+    # its passes are candidates until the last. `left` counts each loop's remainder.
     left = IdDict{Any,Int}()
     for p in ps
         p.loop === nothing || (left[p.loop] = get(left, p.loop, 0) + 1)
@@ -339,20 +258,13 @@ function run!(::Schedule, c)
                 get(seen, id, 0) == 0 && (alloc += b)
                 get(seen, id, 0) + 1 == touches[id] && (freed += b)
             end
-            # Two non-negative terms, not their difference. A difference has to
-            # be clamped at zero to fit the bit range, and that clamp throws away
-            # exactly the distinction being measured: a pass that breaks even and
-            # one that allocates two buffers both come out at zero.
-            #
-            # Scaled by the largest per-pass allocation rather than by a fixed
-            # shift. RPS shifts by 16 (`rps_dag_schedule.hpp:351`) because its
-            # buffers are megabytes; ours can be any size, and a fixed shift sends
-            # every 16 kB buffer to zero and collapses the schedule back to
-            # declaration order.
+            # Two terms, not a difference clamped at zero, which would score break-even
+            # and net-allocating passes alike. Scaled by the largest per-pass
+            # allocation, not a fixed shift, so small buffers do not round to zero.
             mem = clamp((SCORE_MAX * (maxalloc - alloc)) ÷ maxalloc, 0, SCORE_MAX) +
                   clamp((SCORE_MAX * freed) ÷ maxalloc, 0, SCORE_MAX)
-            # Clamped because the fields are OR'd, not added: a term that spills
-            # its 16 bits would silently corrupt the one above it.
+            # Clamped because the fields are OR'd: a term spilling its 16 bits
+            # corrupts the one above it.
             ord = clamp(n - i, 0, 0xffff)                # earlier declaration scores higher
             score = (mem << mshift) | (ord << oshift)
             if score > bestscore
@@ -387,10 +299,9 @@ end
 """
     loopdeps(passes, deps) -> deps
 
-The Dag with every [`repeat!`](@ref) body made enterable only as a whole: each pass
-of a body depends on everything outside the loop that ANY pass of the body depends
-on. The scheduler keeps a body contiguous once it enters it, and this is what
-guarantees that, once in, every pass of the body can be reached without leaving it.
+The Dag with every [`repeat!`](@ref) body enterable only as a whole: each body
+pass depends on everything outside the loop that any body pass depends on. The
+scheduler keeps a body contiguous once entered, which needs this guarantee.
 """
 function loopdeps(ps, deps)
     any(p -> p.loop !== nothing, ps) || return deps
@@ -415,6 +326,7 @@ end
     loopspans(passes) -> Vector{Tuple{UnitRange{Int},Loop}}
 
 The loops among scheduled `passes`, as the contiguous range each body occupies.
+Throws if a body is not contiguous.
 """
 function loopspans(ps)
     out = Tuple{UnitRange{Int},Loop}[]
@@ -440,20 +352,9 @@ end
 """Which passes a resource is live across. Inputs to placement."""
 struct Liveness <: Phase end
 
-"""
-The transient a usage id belongs to, through a slice or a view if that is what
-the pass named.
-
-A usage recorded with `range` — or through a [`ResourceView`](@ref), which is a
-range plus a shape — is interned as the `BufferRange`, not as the buffer, because
-that is what gives disjoint slices disjoint ids and the hazard set for free. The
-interval, though, belongs to the PARENT: the bytes the placer hands out are the
-whole transient's, and a pass touching any part of it keeps all of it live.
-
-Without this the parent gets no interval at all and `Liveness` throws "never
-used by any pass" for a transient two passes are writing. Only a placed resource
-can see it, so a `range` over a persistent buffer never does.
-"""
+"""The transient usage `id` belongs to, through a slice or view, or `nothing`. A
+`range` usage or [`ResourceView`](@ref) is interned as a `BufferRange` with its own
+id, but the interval belongs to the parent: touching any part keeps all of it live."""
 function transientfor(c, byid, id)
     t = get(byid, id, nothing)
     t === nothing || return t
@@ -462,21 +363,13 @@ function transientfor(c, byid, id)
     return get(byid, get(c.graph.ids.ids, r.parent, 0), nothing)
 end
 
-"""
-Intervals come from which passes touched a resource, recorded as the graph was
-built. Liveness is therefore never a second statement that could disagree with
-use.
-
-With `alias = false` every transient claims the whole timeline, so none can share
-bytes. That is not a tuning knob so much as a bisection tool: it is how the
-aliasing hazard was isolated.
-"""
+"""Intervals come from the passes that use each transient, in scheduled order. With
+`alias = false` every transient spans the whole timeline. Throws for an unused transient."""
 function run!(::Liveness, c)
     ts = transients(c)
     isempty(ts) && return c
     byid = transientbyid(c)
-    # Recomputed from the scheduled order, not from declaration order: reordering
-    # passes is exactly what changes a transient's interval.
+    # From the scheduled order: reordering passes changes the intervals.
     for t in ts
         t.first, t.last = typemax(Int), 0
     end
@@ -487,11 +380,10 @@ function run!(::Liveness, c)
         t.first = min(t.first, pos)
         t.last = max(t.last, pos)
     end
-    # A loop body runs again behind itself. A transient it shares with the
-    # passes around it, or one whose first use in the body READS (so it carries
-    # the previous iteration's value), is live across the whole body; one the
-    # body writes before it reads is scoped to its iteration, and the full
-    # barrier at each iteration's head orders its reuse.
+    # A loop body runs again after itself. A transient shared with passes outside
+    # the body, or first read in it (carrying the previous iteration's value), is
+    # live across the whole body. One written before it is read is per iteration;
+    # the full barrier at each iteration's head orders its reuse.
     for (r, _) in loopspans(ord)
         seen = Base.IdSet{Any}()
         carried = Base.IdSet{Any}()
@@ -512,9 +404,7 @@ function run!(::Liveness, c)
             end
         end
     end
-    # A transient nothing touched has no interval, and the placer's `Span` reports
-    # that as an inverted range with `typemax(Int)` in it — a message about the
-    # allocator for a mistake in the graph.
+    # Otherwise the placer reports the missing interval as an inverted `Span`.
     for (i, t) in enumerate(ts)
         t.last == 0 && throw(ArgumentError(
             "transient $i ($(describe(t))) is never used by any pass. A transient's " *
@@ -529,17 +419,12 @@ function run!(::Liveness, c)
     return c
 end
 
-"""Offsets for every transient, from the liveness intervals.
-
-Named `Place` because `Placement` is already the *result* of `place`."""
+"""Offsets for every transient, from the liveness intervals. Not `Placement`,
+which is the result of `place`."""
 struct Place <: Phase end
 
-"""
-Assign offsets, one placement per arena.
-
-Peak is summed over arenas because they are separate allocations; the alternative
-would be to report the larger and pretend the other is free.
-"""
+"""Assign offsets, one placement per arena. Peak sums over arenas, which are
+separate allocations."""
 function run!(::Place, c)
     a = analysis(c)
     isempty(a.items) && return c
@@ -549,59 +434,36 @@ function run!(::Place, c)
     a.peak = 0
     a.naive = sum(nbytes, ts)
     for ar in unique(map(arena, ts))
-        # One allocation per part, as many parts as it takes. The first placement
-        # is the whole kind; what it put entirely inside the room stays there, at
-        # the offsets it was given — a subset of a valid placement is one — and
-        # the rest is placed again as the next part. Each part asks `arenaroom`
-        # anew AFTER the previous one reserved, so the parts together are still
-        # bounded by the device's budget, not only each by `maxalloc`. A plan that
-        # fits in one allocation is one part, placed exactly as before.
+        # One allocation per part. Items placed entirely inside the room keep their
+        # offsets (a subset of a valid placement is valid); the rest is placed again
+        # as the next part. Each part asks `arenaroom` after the previous one
+        # reserved, so all parts together stay within the device budget.
         rest = findall(t -> arena(t) == ar, ts)
         part = 0
         while !isempty(rest)
             part += 1
             key = arenapart(ar, part)
-            # Bounded by what the part's arena has or the device can still give
-            # (see `arenaroom`), and checked here rather than at `rawalloc`: this
-            # is the only point that still knows the ITEMS, and "over budget by
-            # 40 MB" is answerable by dropping one buffer and unanswerable without
-            # knowing which. Finding out at allocation time instead attributes the
-            # failure to whatever allocated next.
+            # Checked here, not at `rawalloc`: only here are the items known, so
+            # the error can name them instead of blaming the next allocation.
             prob = Problem(a.items[rest], arenaroom(pool(c), device(c), key))
             pl = place(prob)
             if pl.height > prob.capacity
-                # The headroom counts every block the pool holds as spent, used or
-                # not: a finished stage's arena, an upload's staging not yet swept
-                # and the buffers the collector has not yet finalized. Allocation
-                # recovers from exactly this before it gives up (see `acquire!`
-                # and the Lava allocator); the bound has to as well, or it spills
-                # or refuses what allocation would have found.
+                # The headroom counts every pool block as spent, including finished
+                # arenas, unswept staging and unfinalized buffers. Allocation
+                # recovers these before failing (`acquire!`), so the bound must too.
                 makeroom!(pool(c), device(c))
                 prob = Problem(a.items[rest], arenaroom(pool(c), device(c), key))
                 pl = place(prob)
             end
             ends(i) = pl.offsets[string(i)] + a.items[i].size
             idx = pl.height <= prob.capacity ? rest : filter(i -> ends(i) <= prob.capacity, rest)
-            # Nothing ended inside the room: an item is larger than one
-            # allocation, or the budget is spent. No further part can help, and
-            # this throws with the items that say which.
+            # Nothing fits: an item exceeds one allocation or the budget is spent.
             isempty(idx) && checkcapacity(prob, pl, "arena $key")
             height = maximum(ends, idx)
-            # `reserve!`, not `acquire!`: every plan placed in an arena gets the
-            # SAME region, so the arena costs the largest of them instead of their
-            # total. A private slice per plan cannot share bytes however well
-            # either one is placed, which is the property a device-owned arena
-            # exists to have. The same holds part by part.
-            # The REGION has to be at least as aligned as anything placed in it.
-            # The placer aligns each tenant WITHIN the region, so a region that
-            # starts at a weaker boundary shifts every one of those offsets off
-            # theirs — and the sum is what the backend is handed.
-            #
-            # It defaulted to `reserve!`'s 256, which held only because nothing
-            # had ever asked for more. A Metal render target wants 2048, and the
-            # second one in an arena landed 128 bytes short of its boundary: the
-            # driver refuses to place a texture there, which is at least loud. The
-            # Vulkan side would have bound the image to a misaligned offset.
+            # `reserve!`, not `acquire!`: every plan in an arena gets the same
+            # region, so the arena costs the largest plan, not the sum. The region
+            # must be aligned as strictly as any item, since item offsets are
+            # relative to it (a Metal render target needs 2048, above the 256 default).
             want_align = maximum(i -> a.items[i].alignment, idx; init = REGION_ALIGN)
             want_align = max(want_align, REGION_ALIGN)
             reg = reserve!(pool(c), device(c), key, ts[idx], height;
@@ -612,9 +474,7 @@ function run!(::Place, c)
             for i in idx
                 a.offsets[i] = pl.offsets[string(i)]
                 a.parts[i] = key
-                # The transient's offset is relative to the REGION; the region's
-                # is relative to the block. Adding them is where a suballocated
-                # plan differs from one that owns its allocation outright.
+                # Item offsets are relative to the region, the region's to the block.
                 materialize!(device(c), ts[i], memoryof(reg), offset(reg) + a.offsets[i])
             end
             rest = setdiff(rest, idx)
@@ -626,18 +486,10 @@ end
 """
     giveup!(pool, dev, regions, arenas, x)
 
-Give up `x`'s claim on the arenas it was placed into.
-
-Explicit, and never a finalizer — see [`trim!`](@ref). Deregistering rather than
-releasing, because the region is SHARED: the bytes go back when the last tenant
-does, and a plan that released them itself would pull them out from under
-whichever other plan is still placed there. A plan dropped without this holds an
-arena at its size until the pool is trimmed — a leak rather than a crash, and the
-right way round.
-
-Takes the two vectors rather than an `Analysis`, because a compiled plan keeps
-them and has thrown the analysis away. Both backends' `free!` were this, spelled
-out.
+Untenant `x` from the arenas it was placed into and empty both vectors. Explicit,
+never a finalizer (see [`trim!`](@ref)). Regions are shared, so the last tenant
+out releases the bytes; a plan dropped without this keeps its arena at size until
+the pool is trimmed. Takes the vectors because a compiled plan keeps no `Analysis`.
 """
 function giveup!(pool, dev, regions, arenas, x)
     for ar in arenas
@@ -648,34 +500,18 @@ function giveup!(pool, dev, regions, arenas, x)
     return nothing
 end
 
-"""
-Which passes begin using memory another transient just finished with.
-
-Separate from placement because it is a *consequence* of placement that the
-barrier phase needs, and because it is the one hazard per-resource tracking
-cannot see: two aliased transients look unrelated to it.
-"""
+"""Which passes begin using memory another transient just finished with. Per-resource
+tracking cannot see this hazard because two aliased transients look unrelated."""
 struct Aliasing <: Phase end
 
-"""
-Which passes begin a transient that took over another's bytes.
-
-Aliasing creates a hazard between two resources the usage tracker sees as
-unrelated: Y's first write lands on memory X was still reading. Nothing in the
-per-resource state can know that, so placement has to say so. RPS carries the
-same thing as ResourceAliasingInfo with srcDeactivating / dstActivating.
-
-Found by fuzzing: with aliasing on, derived barriers gave a different answer run
-to run; with aliasing off, every seed was stable.
-"""
+"""Fill `alias_begins`: each pass where a transient starts on bytes of a dead earlier
+one, whose first write would otherwise race the old tenant's last access."""
 function run!(::Aliasing, c)
     a = analysis(c)
     ts = transients(c)
-    # Per allocation, by offset: sorted by where they start, a transient's bytes
-    # are met only by the ones that start inside it, so each is compared with
-    # those and not with every other. 6507 transients took 5.1 s pairwise.
-    # Offsets in different allocations -- another arena, or another part of one
-    # that `Place` spilled -- never overlap.
+    # Per allocation, sorted by offset: a transient's bytes meet only those that
+    # start inside it. Offsets in different allocations (another arena, or another
+    # part `Place` spilled) never overlap.
     byarena = Dict{Any,Vector{Int}}()
     for i in eachindex(ts)
         push!(get!(Vector{Int}, byarena, a.parts[i]), i)
@@ -692,8 +528,7 @@ function run!(::Aliasing, c)
             end
         end
     end
-    # In the order the pairwise walk produced them, which is what the barriers
-    # are emitted in.
+    # Sorted: barriers are emitted in this order, which must not follow Dict order.
     foreach(sort!, values(a.alias_begins))
     return c
 end
@@ -714,59 +549,28 @@ struct Barriers <: Phase end
 """Resolve and build every pipeline a draw needs, once."""
 struct Pipelines <: Phase end
 
-"""
-The order phases run in.
-
-Schedule must precede Liveness, because reordering passes changes the intervals.
-Place must precede Aliasing, which produces the offsets it needs. Aliasing must
-precede Barriers, which has to emit for the hazard it finds.
-"""
+"""The order phases run in. `Schedule` precedes `Liveness` (reordering changes
+intervals), `Place` precedes `Aliasing` (which needs offsets), and `Aliasing`
+precedes `Barriers` (which emits for the hazards it finds)."""
 const PHASES = (Dag(), Schedule(), Liveness(), Place(), Aliasing(), Barriers(), Pipelines())
 
-"""Run the whole pipeline, or a prefix of it when testing one phase in isolation."""
 const EMPTY_HANDOVER = Tuple{Int,Int}[]
 
-"""
-Walk the passes in order carrying per-resource state. What a pass needs before it
-runs is what `transition!` appends while its usages are replayed, so a pass
-touching only resources nobody else touched needs nothing and can overlap
-whatever ran before it.
-
-Nothing is coalesced across resources: a scoped barrier orders one resource's
-memory and nothing else, so a barrier emitted for A never stands in for a hazard
-on B however wide its masks. What a pass needs IS its local hazard set, and the
-backend lowers it (`passbarriers`) — this phase is the same on every backend,
-asking `needs_transition` of the device's [`syncbackend`](@ref).
-"""
+"""Walk the passes in scheduled order carrying per-resource state; a pass needs the
+transitions `transition!` appends while its usages replay. Shared by every backend
+through the device's [`syncbackend`](@ref); `passbarriers` lowers the result."""
 function run!(::Barriers, c)
     g = c.graph
     be = syncbackend(g.dev)
     states = Dict{Int,ResourceState}()
 
-    # A resource's state at the start of a replay is not "unknown" for anything
-    # that outlives the frame: the window comes back from present, an offscreen
-    # target from whatever last read it, and every other resource from whatever
-    # this same plan did to it last time round.
+    # A resource starts in the state of its last usage in this schedule: frame
+    # N+1's first use follows frame N's last and may overlap it in flight. Seeding
+    # `Undefined` gives the first barrier no source scope, a write-after-write race.
     #
-    # That last one has to be seeded from the *end* of the schedule, because a
-    # plan is replayed: frame N+1's first use of a resource follows frame N's last
-    # use of it, and with frames in flight the two overlap on the GPU. Seeding
-    # `Undefined` instead left the first barrier of a frame with no source scope —
-    # nothing to wait for — which synchronization validation reports as a
-    # write-after-write against the previous frame's store op, and which is a race
-    # the moment the frame loop stops flushing.
-    #
-    # The layout is unaffected: a discarding destination still transitions from
-    # UNDEFINED (see `ImageBarrier`). This is only about what the barrier waits on.
-    # Atomic segments, so a partial overlap is tracked rather than refused.
-    #
-    # This is what VVL's `AccessMap` does incrementally (`layers/sync/sync_access_map.h`:
-    # `Split` at each range bound, then `InfillGaps`), done once instead: by the
-    # time a plan compiles, every range that will ever be declared is known, so
-    # the cuts can be taken up front and the walk left alone. Each usage then
-    # stands for the segments its range covers, and a whole-resource usage stands
-    # for all of them — after which two usages either name the same segment or do
-    # not, which is the only question the per-resource walk knows how to answer.
+    # Ranged buffers are cut into segments at every declared range bound, so
+    # partial overlaps are tracked. A usage stands for the segments its range
+    # covers, a whole-resource usage for all of them.
     slices = sliceindex(g)
     segs = Dict{Int,Vector{Int}}()
     let byparent = Dict{Int,Vector{UnitRange{Int}}}()
@@ -811,37 +615,13 @@ function run!(::Barriers, c)
             transition!(pre, be, sid, state(sid), U)
         end
 
-        # A layout change is per image, so no barrier on another resource can have
-        # performed it however wide its masks were. Only the memory dependency is
-        # coalescable; an image transition dropped here never becomes an
-        # `ImageBarrier` below, and the copy after a second colour attachment then
-        # reads it in COLOR_ATTACHMENT_OPTIMAL.
-        # Coalescing across resources is what a global barrier bought, and it is
-        # exactly what a scoped one cannot: a buffer barrier orders that buffer's
-        # memory and nothing else, so a barrier emitted for resource A never
-        # stands in for a hazard on B however wide its masks are. Dropping one on
-        # that reasoning is a race — it is how the showcase's `sun cull` lost the
-        # barrier between the clear of its counter and the atomic that reads it.
-        #
-        # Nothing is left to remove per resource either: `transition!` emits only
-        # where a resource's own state actually changes, so the walk is already
-        # minimal and `pre` *is* the local hazard set. Kept as a flag so
-        # `bench/` can compile both ways and measure the difference.
+        # Nothing is coalesced across resources: a buffer barrier orders only its
+        # buffer and a layout change is per image. `pre` is already minimal.
         needed = copy(pre)
 
-        # The barrier where bytes change hands, derived like every other one.
-        #
-        # It is the one transition not produced by `transition!`, because the
-        # hazard is between two resources that never mention each other: no
-        # per-resource sequence can see that a different transient was living in
-        # this memory. What the compiler *does* know is which ones vacated it —
-        # the placer worked that out — and what each was last doing, which is the
-        # state the walk above is carrying right now. So it waits for exactly
-        # those usages, at exactly the new tenant's first one.
-        #
-        # Naming every stage and both access directions instead is correct and
-        # says nothing: a barrier that waits for everything cannot be wrong, and
-        # cannot be checked either.
+        # The aliasing handover, which `transition!` cannot see because the two
+        # transients never name each other. It waits for the last usages of the
+        # transients that vacated the memory, at the new tenant's first usage.
         handovers = get(analysis(c).alias_begins, i, EMPTY_HANDOVER)
         for newi in unique(first(h) for h in handovers)
             to = usage_of(p, resourceid(g, c.graph.transients[newi]), g)
@@ -863,6 +643,11 @@ function run!(::Barriers, c)
     c
 end
 
+"""
+    compile!(ctx, phases = PHASES) -> ctx
+
+Run `phases` in order on `ctx`; a prefix of [`PHASES`](@ref) tests one phase in isolation.
+"""
 function compile!(ctx, phases = PHASES)
     for p in phases
         run!(p, ctx)

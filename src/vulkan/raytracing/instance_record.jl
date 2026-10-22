@@ -1,27 +1,15 @@
-# VulkanInstanceRecord — a 64-byte plain-bits mirror of VkAccelerationStructureInstanceKHR.
-#
-# Field layout (matches Vulkan exactly):
-#   bytes  0-47   transform: 12 × Float32 (row-major 3×4) — see `Mat3x4f`
-#   bytes 48-50   instanceCustomIndex (24 bits)
-#   byte  51      mask (8 bits)
-#   bytes 52-54   instanceShaderBindingTableRecordOffset (24 bits)
-#   byte  55      flags (8 bits)
-#   bytes 56-63   accelerationStructureReference: UInt64 (BLAS device address)
-#
-# Plain-bits means LavaArray{VulkanInstanceRecord, 1} is a clean GPU buffer.
-# The two packed UInt32 fields combine the (24 + 8)-bit pairs Vulkan defines.
-#
-# Nothing outside this backend sees one: callers and kernels write portable
-# `Raycore.InstanceRecord`s, and `vkinstances_kernel!` (`hwtlas.jl`) writes these
-# from them at every build and refit.
+# VulkanInstanceRecord: a 64-byte plain-bits mirror of VkAccelerationStructureInstanceKHR.
+#   bytes  0-47   transform, 12 Float32, row-major 3x4 (`Mat3x4f`)
+#   bytes 48-51   instanceCustomIndex (low 24 bits) | mask (high 8)
+#   bytes 52-55   instanceShaderBindingTableRecordOffset (low 24) | flags (high 8)
+#   bytes 56-63   accelerationStructureReference (BLAS device address)
+# Only this backend sees one: `vkinstances_kernel!` (`hwtlas.jl`) writes them from
+# the portable `Raycore.InstanceRecord`s at every build and refit.
 
 using StaticArrays: SMatrix
 
-# `Mat3x4f` and `identity_transform` are Mantle's, in `geometry/transform.jl`:
-# the 3×4 affine is common to every backend's instance descriptor, while the
-# record below is a byte-exact mirror of one API's. Construct the transform from
-# a `Mat4f` via [`mat4_to_vk_transform`](@ref), which repacks the upper 3×4 into
-# the row-major Vulkan layout.
+# `Mat3x4f` is core's (`geometry/transform.jl`); `mat4_to_vk_transform` makes one
+# from a `Mat4f`.
 
 struct VulkanInstanceRecord
     transform::Mat3x4f
@@ -35,9 +23,8 @@ end
                        custom_index=UInt32(0), mask=UInt8(0xff),
                        sbt_offset=UInt32(0), flags=UInt8(0)) -> VulkanInstanceRecord
 
-Construct a HWTLAS instance record. `transform` is a `Mat3x4f` (Vulkan-layout
-row-major 3×4). `mask` is the cull mask the driver tests against `cullMask`
-at trace time.
+`transform` is a row-major 3x4 `Mat3x4f`; `mask` is tested against the ray's cull
+mask. `custom_index` and `sbt_offset` keep their low 24 bits.
 """
 function VulkanInstanceRecord(transform::Mat3x4f, blas_address::UInt64;
                              custom_index::UInt32 = UInt32(0),
@@ -49,8 +36,6 @@ function VulkanInstanceRecord(transform::Mat3x4f, blas_address::UInt64;
     return VulkanInstanceRecord(transform, cim, sof, blas_address)
 end
 
-# Sanity checks at module load time. The `Mat3x4f` half of these lives beside
-# the type in `geometry/transform.jl`; what is asserted here is the part this
-# file is responsible for, which is the Vulkan record's own layout.
+# Layout checks; those for `Mat3x4f` live in `geometry/transform.jl`.
 @assert sizeof(VulkanInstanceRecord) == 64   "VulkanInstanceRecord must be exactly 64 bytes (Vulkan layout); got $(sizeof(VulkanInstanceRecord))"
 @assert isbitstype(VulkanInstanceRecord)     "VulkanInstanceRecord must be plain bits for LavaArray storage"

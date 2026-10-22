@@ -1,35 +1,19 @@
-# The description of a mesh pipeline.
-#
-# Beside `pipeline.jl` and for the same reason that file gives: this holds Julia
-# functions and the fixed-function state from `graphics/state.jl`, and names
-# nothing a driver owns. A backend turns it into a compiled pipeline.
-#
-# The stage vocabulary it describes is `KernelInterface`'s — `MeshConfig`,
-# `ObjectConfig`, `MeshEmitter`, `set_mesh_vertex!` and the rest — because a
-# COMPILER reads it: `max_vertices` and `max_primitives` are part of the output
-# object's type in MSL and of the execution mode in SPIR-V, so they have to be
-# reachable from below Mantle. See the header of `KernelInterface/src/mesh.jl`
-# for why a mesh pipeline is portable vocabulary rather than a Metal workaround.
+# The description of a mesh pipeline: Julia functions and fixed-function state,
+# nothing a driver owns. The stage vocabulary (`MeshConfig`, `MeshEmitter`, ...)
+# is `KernelInterface`'s because the compiler reads `max_vertices` and
+# `max_primitives`: they are part of the output type in MSL and of the execution
+# mode in SPIR-V.
 
 """
     MeshPipeline(; mesh, fragment, object = nothing,
                    blend = Opaque(), cull = CullBack(), depth = DepthLess())
 
 A pipeline whose primitives are written by a mesh stage rather than assembled
-from a vertex stream.
-
-`mesh` is a [`MeshShader`](@ref) and `fragment` a [`FragmentShader`](@ref);
-`object` is an [`ObjectShader`](@ref) or nothing, in which case the host
-dispatches the mesh threadgroups.
-
-There is no `topology` field. In a `GraphicsPipeline` the topology describes the
-INPUT vertex stream that the fixed-function assembler groups into primitives; a
-mesh stage has no input stream and states what it EMITS, which its
-`MeshShader`'s does. A second one here would be a field with nothing to mean.
-
-Ask [`supports_mesh_pipeline`](@ref) before building one. A backend that answers
-`false` cannot run it, and finding that out from a shader compile is the wrong
-place and the wrong time.
+from a vertex stream. `mesh` is a [`MeshShader`](@ref), `fragment` a
+[`FragmentShader`](@ref), `object` an [`ObjectShader`](@ref) or `nothing`, in
+which case the host dispatches the mesh threadgroups. There is no `topology`:
+the `MeshShader` states what it emits. Ask [`supports_mesh_pipeline`](@ref)
+before building one.
 """
 struct MeshPipeline{O, M<:MeshShader, F<:FragmentShader,
                     B<:BlendMode, C<:CullFace, D<:DepthMode}

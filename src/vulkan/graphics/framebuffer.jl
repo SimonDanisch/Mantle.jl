@@ -1,28 +1,23 @@
-# Offscreen framebuffer and render targets for Lava.jl
-#
-# Uses VK_KHR_dynamic_rendering — no VkRenderPass/VkFramebuffer needed.
-# Just images + views as render targets.
+# Offscreen render targets: images and views for dynamic rendering, no
+# VkRenderPass or VkFramebuffer.
 
 """
     VulkanFramebuffer
 
-Offscreen render target with color and optional depth images.
-Used for render-to-texture or offscreen rendering.
+Offscreen render target with a color and an optional depth image.
 """
 mutable struct VulkanFramebuffer <: Framebuffer
     width::Int
     height::Int
-    # Color attachment
     color_image::VK.Image
     color_memory::VK.DeviceMemory
     color_view::VK.ImageView
     color_format::VK.Format
-    # Depth attachment (optional)
+    # Depth attachment, or nothing.
     depth_image::Union{Nothing, VK.Image}
     depth_memory::Union{Nothing, VK.DeviceMemory}
     depth_view::Union{Nothing, VK.ImageView}
     depth_format::VK.Format
-    # Owning context — used for readback / ownership decisions.
     ctx::VkContext
 end
 
@@ -62,14 +57,12 @@ image_view(ctx::VkContext, image::VK.Image, format::VK.Format,
     )
 
 """
-    VulkanFramebuffer(width, height; depth=true, color_format=VK.FORMAT_B8G8R8A8_SRGB)
+    VulkanFramebuffer(width, height; ctx, depth=true, color_format=VK.FORMAT_B8G8R8A8_SRGB, srgb=false)
 
-Create an offscreen framebuffer with color and optional depth attachments.
+An offscreen framebuffer with a color and an optional `D32_SFLOAT` depth attachment.
+`color_format` may also be a Julia element type (`BGRA{N0f8}`, `RGBA{Float32}`),
+lowered by `vkformat` as for transient images.
 """
-# `color_format` is also accepted as a Julia element type — `BGRA{N0f8}`,
-# `RGBA{Float32}` — which is Mantle's portable spelling for a pixel format and
-# the only one a caller outside this backend can write. `vkformat` is the same
-# lowering the graph uses for transient images, so the two cannot disagree.
 function VulkanFramebuffer(width::Integer, height::Integer;
                           ctx::VkContext,
                           depth::Bool=true,
@@ -87,7 +80,6 @@ function _vulkan_framebuffer(width::Integer, height::Integer, ctx::VkContext,
     color_memory = alloc_image_memory(ctx, color_image)
     color_view = image_view(ctx, color_image, color_format)
 
-    # Create depth image (optional)
     depth_format = VK.FORMAT_D32_SFLOAT
     depth_img = nothing
     depth_mem = nothing
@@ -108,9 +100,8 @@ end
 """
     image_requirements(ctx, image) -> (; size, alignment, type_bits)
 
-What an image needs from an allocation. Split out from `alloc_image_memory` so a
-caller that wants to place several images in one allocation can ask before
-committing to an offset.
+What an image needs from an allocation, for choosing offsets when several
+resources share one.
 """
 function image_requirements(ctx::VkContext, image::VK.Image)
     r = VK.get_image_memory_requirements(ctx.device, image)
@@ -126,32 +117,15 @@ Device-local memory that can back any image whose requirements include
 function device_memory(ctx::VkContext, bytes::Integer, type_bits::Integer)
     type_bits == 0 && error("no memory type satisfies every resource in this allocation")
     idx = find_memory_type(ctx, UInt32(type_bits), VK.MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-    # `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`, always, because this backs graph
-    # ARENAS as well as images: `rawalloc(dev, ::Buffers, …)` creates its buffer
-    # with `BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT` — kernels reach a
-    # suballocated transient as `address + offset`, which is the whole bridge —
-    # and the spec requires the memory it binds to have been allocated with the
-    # matching flag.
-    #
-    # Without the flag NVIDIA returns a working address anyway, so every graph
-    # on that driver runs. RADV does not, and the failure is not an error at
-    # bind: it is a SIGSEGV inside the driver much later, in
-    # `vkCreateRayTracingPipelinesKHR`, with nothing pointing back here. Only
-    # `DebugConfig(validation = true)` names it.
-    #
-    # Unconditional rather than only for buffers: the flag is legal on any
-    # allocation once `bufferDeviceAddress` is enabled, which this device
-    # requires, and one allocation path with two behaviours is how this was
-    # missed in the first place — the pool and the acceleration structures both
-    # pass it, and this third site did not.
+    # Always `MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`: this also backs graph arenas,
+    # whose buffers kernels address by device address, and the spec requires the
+    # flag for that. Without it RADV segfaults much later, in
+    # `vkCreateRayTracingPipelinesKHR` (NVIDIA tolerates it).
     flags = VK.MemoryAllocateFlagsInfo(UInt32(0);
         flags = VK.MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)
-    # Past the driver's budget is out of memory, also where the driver would
-    # accept it (see `overbudget`). Refused with the exception the driver's own
-    # refusal is, because that is what the callers handle: the pool grows
-    # through here (`rawalloc`), and `acquire_or_reclaim!` collects, drains and
-    # retries on a `VulkanError` with an out-of-memory code and rethrows
-    # anything else. A `LavaError` here skipped that escalation.
+    # Over the driver's budget is out of memory (`overbudget`). Thrown as the
+    # driver's `VulkanError`, because `acquire_or_reclaim!` retries only on an
+    # out-of-memory `VulkanError`.
     overbudget(ctx, idx, bytes) && throw(VK.VulkanError(
         format_oom_error(ctx, AllocFailure(VK.ERROR_OUT_OF_DEVICE_MEMORY, :budget, Int(bytes), Int(idx))),
         VK.ERROR_OUT_OF_DEVICE_MEMORY))
@@ -171,13 +145,8 @@ bind_image!(ctx::VkContext, image::VK.Image, memory::VK.DeviceMemory, offset::In
 """
     unbound_buffer(ctx, bytes, usage) -> Buffer
 
-A `VkBuffer` with no memory behind it yet, for binding into an allocation
-somebody else owns.
-
-Every other buffer path here allocates memory per buffer and binds at offset 0,
-which is right when the buffer owns its bytes and useless when a suballocator
-does. This is the half that lets a caller place buffers the way `bind_image!`
-already lets it place images.
+A `VkBuffer` with no memory bound, for placing into an allocation someone else
+owns with [`bind_buffer!`](@ref).
 """
 unbound_buffer(ctx::VkContext, bytes::Integer, usage::VK.BufferUsageFlag) =
     VK.Buffer(ctx.device, UInt64(max(bytes, 1)), usage,
@@ -192,15 +161,9 @@ end
 """
     bind_buffer!(ctx, buffer, memory, offset)
 
-Bind a buffer to a byte offset in an existing allocation — [`bind_image!`](@ref)
-for buffers, and subject to the same rule: two resources may share bytes only if
-their contents never have to survive each other, and the caller owns that.
-
-It did not exist because nothing needed it: every `bind_buffer_memory` call in
-this package passes 0, since each buffer allocated its own memory. A suballocator
-above Lava has nowhere to put a buffer without it, which is how one ended up
-suballocating a `LavaArray` instead — i.e. stacked on top of Lava's own pool
-rather than on the device.
+Bind a buffer to a byte offset in an existing allocation, under the rule of
+[`bind_image!`](@ref): resources may share bytes only if their contents never have
+to survive each other, which the caller guarantees.
 """
 bind_buffer!(ctx::VkContext, buf::VK.Buffer, memory::VK.DeviceMemory, offset::Integer) =
     throw_if_error(ctx, "vkBindBufferMemory",
@@ -216,32 +179,12 @@ end
 
 Base.size(fb::VulkanFramebuffer) = (fb.width, fb.height)
 
-# `format_pixel_size` and `format_element_type` were HERE, and they were a third
-# and fourth format table over the same seven formats.
-#
-# `format_element_type` answered `NTuple{4, UInt8}` where `eltypeof`
-# (`graphics/record.jl`) answers `RGBA{N0f8}` for the same
-# `FORMAT_R8G8B8A8_UNORM` — two functions in one backend disagreeing about what
-# a format stores, with `eltypeof` matching the table core documents in
-# `runtime/format.jl` and this one not. A caller that compared element types was
-# wrong and one that reinterpreted was right by accident, and readback handed
-# back `NTuple` here while Metal handed back a colorant for the same call.
-#
-# `format_pixel_size` is `pixelbytes(eltypeof(fmt))`, which is `sizeof` of the
-# element type — the identity `runtime/format.jl` exists to state. The seven
-# entries agreed with `sizeof` in every case, so nothing was gained by writing
-# them out.
-
 """
     readback_framebuffer(fb::VulkanFramebuffer) -> Matrix
 
-Read back the color attachment pixels to CPU memory, as a `(width, height)`
-matrix of `eltypeof(fb.color_format)` — a ColorTypes colorant, so `p.r` and
-`p.b` name the channels and the Metal backend answers the same call with the
-same element type.
-
-`(width, height)`, not `(height, width)`: the first index is x, so a Julia image
-indexed `(row, column)` wants `permutedims` before it is saved or shown.
+The color attachment as a `(width, height)` host matrix of
+`eltypeof(fb.color_format)`, a ColorTypes colorant as on Metal. The first index is
+x, so an image indexed `(row, column)` needs `permutedims`.
 """
 function readback_framebuffer(fb::VulkanFramebuffer)
     ctx = fb.ctx
@@ -250,9 +193,8 @@ function readback_framebuffer(fb::VulkanFramebuffer)
     T = eltypeof(fb.color_format)
     bpp = pixelbytes(T)
     nbytes = fb.width * fb.height * bpp
-    # The caller's region: acquired here, read after the copy has passed, and
-    # released here. `Readback`, host-cached: the host reads these bytes, and a
-    # read from the BAR-backed `Unified` arena runs at write-combined speed.
+    # `Readback` is host-cached; reading the BAR-backed `Unified` arena runs at
+    # write-combined speed.
     dev = lavadevice(ctx)
     r = acquire!(pool(dev), dev, Readback(), nothing, max(Int(nbytes), 16);
                  align = ARG_ALIGN, blocksize = READBACK_BLOCK_SIZE)
@@ -274,9 +216,7 @@ function readback_framebuffer(fb::VulkanFramebuffer)
         )
         VK.cmd_copy_image_to_buffer(cmd, fb.color_image,
             VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mb.buffer, [region])
-        # The readback region and the framebuffer are named by this copy: the
-        # host reads the bytes after the wait below, and neither may be given
-        # back before then.
+        # Both are named by the copy until the wait below.
         hold!(e, mb)
         hold!(e, fb)
     end
@@ -291,18 +231,11 @@ end
 """
     copy_framebuffer!(dst::LavaArray{UInt8, 1}, fb::VulkanFramebuffer) -> dst
 
-Copy `fb`'s colour attachment into a DEVICE-LOCAL buffer — the same image copy
-[`readback_framebuffer`](@ref) does, without the host round trip.
-
-`readback_framebuffer` targets host-visible staging and returns a `Matrix`, which
-is what a screenshot wants and exactly what a second GPU pass does not: a
-postprocessing pass that reads its input back through the CPU pays a full
-download and upload per frame. This writes straight into a buffer a kernel (or
-[`blit!`](@ref)) can read.
-
-`dst` must hold `width * height * pixelbytes(eltypeof(fb.color_format))` bytes; the
-pixels land tightly packed in row order, so element `(x, y)` of a
-`(width, height)` view is at linear index `(y - 1) * width + x`.
+Copy `fb`'s colour attachment into a device buffer for a kernel or
+[`blit!`](@ref): [`readback_framebuffer`](@ref) without the host round trip. `dst`
+must hold `width * height * pixelbytes(eltypeof(fb.color_format))` bytes; pixels
+are tightly packed rows, so `(x, y)` of a `(width, height)` view is at linear
+index `(y - 1) * width + x`.
 """
 function copy_framebuffer!(dst::LavaArray{UInt8, 1}, fb::VulkanFramebuffer)
     ctx = fb.ctx
@@ -336,26 +269,18 @@ function copy_framebuffer!(dst::LavaArray{UInt8, 1}, fb::VulkanFramebuffer)
 end
 
 """
-    copy_image_to_buffer!(bq, dst, image, width, height, format; aspect)
+    copy_image_to_buffer!(e, dst, image, width, height, format; aspect, region = nothing)
 
-Record an image-to-buffer copy and nothing else. The image must already be in
-`TRANSFER_SRC_OPTIMAL`, and what layout it is left in is the caller's business.
-
-`aspect` is the caller's because the format does not settle it: `D32_SFLOAT` has
-only a depth aspect, and a combined depth-stencil format has two that cannot be
-copied in one region.
-
-`copy_framebuffer!` is the same copy with the two transitions built in. That is
-convenient standalone and wrong under a graph, which knows what the image was
-doing before and what it will do next and can often need no barrier at all.
+Record an image-to-buffer copy and no transitions, so a graph places its own
+barriers: the image must be in `TRANSFER_SRC_OPTIMAL`. `aspect` is the caller's
+because a depth-stencil format has two aspects that cannot share a region.
+`region` is `(x, y, w, h)`, default the whole image.
 """
 function copy_image_to_buffer!(e::Emitter, dst::LavaArray{T, 1}, image::VK.Image,
                                width::Integer, height::Integer, format::VK.Format;
                                aspect::VK.ImageAspectFlag=VK.IMAGE_ASPECT_COLOR_BIT,
                                region = nothing) where {T}
-    # Any element type, because the copy moves bytes and the destination's is the
-    # caller's way of saying what the pixels mean: `UInt8` for a BGRA target read
-    # back as bytes, `Float32` for a depth target read back as depth.
+    # Any element type: the copy moves bytes, `T` says what they mean.
     x, y, w, h = region === nothing ? (0, 0, width, height) : region
     nbytes = w * h * pixelbytes(eltypeof(format))
     sizeof(T) * length(dst) >= nbytes ||
@@ -377,37 +302,23 @@ end
 """
     readback_window(win::VulkanWindow) -> Matrix{BGRA{N0f8}}
 
-Read back an image of the window that a frame drew, BETWEEN frames (see the
-generic [`readback_window`](@ref)).
-
-A `(width, height)` matrix of `eltypeof(win.format)`, which for every swapchain
-format this backend picks is `BGRA{N0f8}` — the same element type the Metal
-backend returns, so a caller reading `p.r` is portable.
+Read back a window image a frame drew, between frames (see the generic
+[`readback_window`](@ref)). A `(width, height)` matrix of `eltypeof(win.format)`,
+`BGRA{N0f8}` for every swapchain format this backend picks, as on Metal.
 """
 function readback_window(win::VulkanWindow)
     checkopen(win)
     ctx = win.ctx
     bq = ctx.default_bq
 
-    # A presentable image may only be touched between acquire and present.
-    # Transitioning one this call does not own is three separate errors from
-    # synchronization validation, and a thing the driver happens to tolerate:
-    # the pixels come back looking right for as long as nobody turns validation
-    # on.
-    #
-    # So an image is acquired here, and note that it then holds an EARLIER
-    # frame's contents, since acquire returns whichever image the presentation
-    # engine has freed. A caller mid-frame — an image acquired and not yet
-    # presented — has no command buffer to add a copy to: the frame's one-shot
-    # is `run!`'s and goes out with the present. Read back after the frame is
-    # presented.
+    # A presentable image may only be touched between acquire and present, so
+    # this acquires one; it holds an earlier frame. Mid-frame there is no command
+    # buffer to add the copy to: read back after the frame is presented.
     checkreadable(win.acquirer)
     i = acquireframe!(win)
     image = win.images[i]
-    # An image a frame drew was left in `PRESENT_SRC` by `presentready!`. The
-    # other case is a window no frame has drawn since its swapchain was built,
-    # whose image is in whatever layout it was created in, and `UNDEFINED` is
-    # the one transition valid from any of them.
+    # A drawn image is in `PRESENT_SRC` (`presentready!`); an undrawn one is in
+    # its creation layout, from which `UNDEFINED` is valid.
     from = win.holdsframe[i] ? VK.IMAGE_LAYOUT_PRESENT_SRC_KHR : VK.IMAGE_LAYOUT_UNDEFINED
 
     # Read after `acquireframe!`, which may have rebuilt the swapchain.
@@ -415,9 +326,7 @@ function readback_window(win::VulkanWindow)
     T = eltypeof(win.format)
     nbytes = w * h * pixelbytes(T)
 
-    # The caller's region: acquired here, read after the copy has passed, and
-    # released here. `Readback`, host-cached: the host reads these bytes, and a
-    # read from the BAR-backed `Unified` arena runs at write-combined speed.
+    # `Readback` is host-cached; see `readback_framebuffer`.
     dev = lavadevice(ctx)
     r = acquire!(pool(dev), dev, Readback(), nothing, max(Int(nbytes), 16);
                  align = ARG_ALIGN, blocksize = READBACK_BLOCK_SIZE)
@@ -425,12 +334,8 @@ function readback_window(win::VulkanWindow)
 
     frame = oneshot(bq) do e
         cmd = e.cmd
-        # A freshly acquired image is still being read by the presentation engine
-        # until its acquire semaphore signals, so the submit that transitions it
-        # has to wait on that semaphore, at COLOR_ATTACHMENT_OUTPUT to match what
-        # the acquire signals — `present_frame!` adds exactly that wait. srcStage
-        # is COLOR_ATTACHMENT_OUTPUT, never TOP_OF_PIPE: a barrier from
-        # TOP_OF_PIPE would create no dependency with it.
+        # srcStage COLOR_ATTACHMENT_OUTPUT matches the acquire-semaphore wait
+        # `submit_and_present!` adds; TOP_OF_PIPE would not depend on it.
         transition_image!(cmd, image,
             from, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
@@ -446,25 +351,17 @@ function readback_window(win::VulkanWindow)
         VK.cmd_copy_image_to_buffer(cmd, image,
             VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mb.buffer, [region])
 
-        # Straight back to `PRESENT_SRC`, not through `presentready!`: reading an
-        # image does not draw it, so whether it holds a frame stays as it was.
+        # Not `presentready!`: a read does not draw, so `holdsframe` stays.
         transition_image!(cmd, image,
             VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
             VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
             VK.ACCESS_TRANSFER_READ_BIT, VK.AccessFlag(0))
         hold!(e, win)
     end
-    # An acquire this function made is an acquire this function returns. Leaving
-    # it outstanding is invisible once — the program usually closes the window
-    # next — and a deadlock in a loop: a swapchain has two or three images, so
-    # the fourth readback with no frame in flight waits forever inside
-    # vkAcquireNextImageKHR for an image that is never handed back.
-    #
-    # The present has to be the submit that carries this copy, not one after it:
-    # it waits on the acquire semaphore, which is binary, and a wait here would
-    # consume that wait first and leave the present waiting on a semaphore
-    # nothing will signal again. So submit through `submit_and_present!` and wait on
-    # the token it answers with.
+    # The acquired image must be presented back, or a few readbacks without a
+    # frame block forever in vkAcquireNextImageKHR. The copy rides in the submit
+    # that presents: it waits on the binary acquire semaphore, which a separate
+    # submit would consume.
     tok = submit_and_present!(bq, win, frame)
     waitfor!(bq, tok)
 
@@ -477,19 +374,11 @@ end
 """
     acquireframe!(win; attempts = 4 * length(win.images)) -> Int
 
-Acquire an image a frame drew, for a readback, and return its 1-based index.
-
-Which image an acquire returns is the presentation engine's choice, and after a
-resize some of the new swapchain's images hold nothing until a frame lands in
-them. How many frames that takes is the driver's: three images in turn on X11,
-while Mesa's headless surface (GLFW's null platform) keeps five and hands them
-out as 0, 1, 0, 2, 0, 1, 0, 3, so six frames after a resize never touch image 3
-and a readback that took it returned only the clear colour. Such an image goes
-back to the presentation engine untouched and the next one is asked for.
-
-A window no frame has drawn since its swapchain was built has no such image, and
-takes the first one. `attempts` bounds the loop, because an engine that keeps
-returning images no frame drew is an error to report, not a wait.
+Acquire an image a frame drew, for a readback, and return its 1-based index. After
+a resize some images hold nothing yet (Mesa's headless surface hands out
+0, 1, 0, 2, 0, 1, 0, 3); those are presented back untouched and the next is
+requested. A window no frame has drawn since its swapchain was built takes the
+first image. Throws after `attempts` acquires.
 """
 function acquireframe!(win::VulkanWindow; attempts::Int = 4 * length(win.images))
     bq = win.ctx.default_bq
@@ -506,9 +395,3 @@ function acquireframe!(win::VulkanWindow; attempts::Int = 4 * length(win.images)
     error("readback_window: $attempts acquires returned no image a frame has drawn " *
           "since the swapchain was built")
 end
-
-# ── Render Target Subtypes ──
-
-# `WindowTarget` and `OffscreenTarget` are Mantle's for the same reason
-# `SampledTexture` is: they wrap a `Window` and a `Framebuffer`, and both of
-# those are the API's abstract types now.

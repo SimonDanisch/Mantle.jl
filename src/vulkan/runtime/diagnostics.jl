@@ -1,23 +1,15 @@
-# Runtime diagnostics: what is on the device, and what it is holding.
-#
-# Every one of them reads a `VkContext` — live buffers, deferred frees, argument
-# slabs, the pipeline and kernel caches — so none of them can live with the
-# compiler, which names no Vulkan type at all.
-#
-# `allowscalar(false)` came too: it is a statement about the ARRAY type, and the
-# array type is here.
+# Runtime diagnostics over the default `VkContext`.
 
 GPUArraysCore.allowscalar(false)
 
-# ---- Default settings ----
-# Disable scalar indexing by default (GPU arrays should not be accessed element-by-element)
 GPUArraysCore.allowscalar(false)
 
 
 """
     gpu_memory_usage() -> NamedTuple
 
-Return current GPU memory usage statistics.
+Live bytes and buffers, objects awaiting a deferred destroy, unified arena
+blocks and cache sizes of the default context. All zeros when no device exists.
 """
 function gpu_memory_usage()
     ctx = VK_CONTEXT_REF[]
@@ -26,14 +18,8 @@ function gpu_memory_usage()
         bq = ctx.default_bq
         bq_deferred = length(bq.pending) + length(bq.retiring)
     end
-    # Both counts come off the context now, so both are guarded by the same
-    # `ctx !== nothing` as the queue fields above — a caller with no device gets
-    # zeros rather than an error.
     n_pipelines = ctx === nothing ? 0 : length(ctx.caches.pipelines)
     n_kernels   = ctx === nothing ? 0 : length(ctx.caches.linked)
-    # `ARG_SLABS` was here, the count of the queue's argument slab ring. There is
-    # no ring: a recording's arguments are blocks of the unified arena, which the
-    # pool reports like any other memory it holds.
     (live_bytes = ctx === nothing ? 0 : gpu_live_bytes(ctx),
      live_buffers = ctx === nothing ? 0 : live_buffer_count(ctx),
      retired = bq_deferred,
@@ -45,7 +31,7 @@ end
 """
     dump_state(; io::IO=stdout)
 
-Print a comprehensive summary of Lava.jl runtime state for debugging.
+Print the default context's device, memory, cache, queue and dispatch counters.
 """
 function dump_state(; io::IO=stdout)
     ctx = VK_CONTEXT_REF[]

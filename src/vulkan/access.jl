@@ -1,14 +1,10 @@
-# The signature a dispatch is inferred at, on this backend.
-#
-# Core walks the IR (`graph/access.jl`); what is here is the three things only a
-# Vulkan/Lava dispatch knows: that arguments are `Adapt`ed on their way to the
-# shader, that a `KernelAbstractions` kernel takes its iteration context as a
-# leading argument, and that the method table the kernel will be compiled
-# against is Lava's.
+# The signature a dispatch's accesses are inferred at, on this backend. Core
+# walks the IR (`graph/access.jl`); this adds what only a Lava dispatch knows:
+# arguments are `Adapt`ed, a KA kernel takes its iteration context first, and
+# the method table is Lava's.
 
-# `Core.Typeof`, for the reason core's default gives: a type-valued argument is
-# `Type{Float32}` in the signature the kernel is compiled at and `DataType` under
-# `typeof`, and the latter is not a dispatch tuple element.
+# `Core.Typeof`: a type-valued argument is `Type{Float32}` in the compiled
+# signature but `DataType` under `typeof`.
 argtype(dev::LavaDevice, @nospecialize(y)) =
     Core.Typeof(Adapt.adapt(adaptor(dev.bq), y))
 
@@ -16,23 +12,12 @@ accesscache(dev::LavaDevice) = dev.ctx.caches.accesses::AccessCache
 
 devicebuffertype(::LavaDevice, ::Type{T}, N::Int) where {T} = LavaDeviceArray{T,N}
 
-"""
-What the kernel does to each dispatch argument, inferred through Lava's method
-table.
-
-Two leading entries are dropped on the way out: `accessof` reports the function
-itself at 1, and a KA kernel is compiled at `(ctx, args...)` — the iteration
-context is the kernel's, not the caller's, so neither is an argument the caller
-declared. A compute kernel may not close over a device array at all (`dispatch!`
-refuses one), so nothing is lost with the first.
-
-`group` is threaded through because the iteration context's TYPE depends on it:
-a two-dimensional ndrange and a one-dimensional one give different
-`CompilerMetadata` parameters, and inferring the kernel at the wrong one infers
-different code.
-"""
+"""Lava's interpreter, the one a macro-free kernel is compiled through."""
 kernelinterpreter(::LavaDevice, kernel, tt) = Lava.kernelinterpreter(kernel, tt)
 
+# The iteration context comes from the cached `IterPlan`. Its type depends on
+# `group` (a 1-D and a 2-D ndrange give different `CompilerMetadata`), and the
+# kernel is inferred at the plan's workgroup size.
 function kakernelaccesssignature(dev::LavaDevice, kernel, argT::Tuple, ndrange, group)
     obj  = kernelfor(kernel, group, backend(dev))
     iter = get_or_build_iter_plan(obj, dispatchrange(ndrange), callgroup(obj, group), dev.ctx)
@@ -44,13 +29,9 @@ end
 isdevicearray(::LavaArray) = true
 
 """
-The union over a trace's shaders.
-
-`chit_miss_take_args` decides who sees the arguments at all: with it set, the
-closest-hit and miss shaders are compiled against the raygen's own signature and
-read the same queues, which is the pbrt-v4 pattern Hikari is on; without it they
-take none and only the raygen's accesses are the pass's. The any-hit always
-takes them — `rt_stages` compiles it at `raygen_tt` either way.
+The union of what a trace's shaders do to `args`. The raygen and any-hit
+shaders always take the arguments (`rt_stages` compiles any-hit at
+`raygen_tt`); closest-hit and miss only with `chit_miss_take_args`.
 """
 function kerneltouches(dev::LavaDevice, pipe::RayTracingPipeline, args::Tuple, ndrange, group)
     argT = map(a -> devicetype(dev, a), args)
@@ -83,14 +64,9 @@ shaderargs(p::RayTracingPipeline) =
      (p.miss_func, p.chit_miss_take_args),
      (p.anyhit_func === nothing ? () : ((p.anyhit_func, true),))...)
 
-# ── draws ─────────────────────────────────────────────────────────────────────
-#
-# `resolve_shader_pair` is what the compile calls, and it is called here for the
-# same reason `kernelfor` is above: the thing compiled is a WRAPPER around the
-# user's function — it supplies the varyings a fragment stage reads and the
-# output plumbing a vertex stage writes — so the wrapper is what the arguments
-# line up against, and the raw function's arity does not even match.
-
+# Draw stages are compiled as wrappers (`resolve_shader_pair`) that add the
+# varyings and outputs, so accesses are inferred on the wrapper; the user
+# function's arity does not match the arguments.
 function vertextouches(dev::LavaDevice, shader, args::Tuple)
     argT = map(a -> devicetype(dev, a), args)
     tt = Tuple{argT...}
@@ -105,38 +81,11 @@ function fragmenttouches(dev::LavaDevice, shader, args::Tuple)
     return accessof(Lava.kernelinterpreter(ffn, tt), ffn, argT; cache = accesscache(dev))[2:end]
 end
 
-# ── What Lava's device intrinsics do, declared ────────────────────────────────
-#
-# A cooperative-matrix load is a read of the buffer its pointer names, and the
-# only thing that knows so is the generator that emitted
-# `declare i32 @_lava_coopmat_load_f16_16x16_a(i64, i32)`. There is nothing for
-# the walk to read: the `@generated` wrapper is inlined by the time it sees the
-# IR, so the Julia callee is gone, and the module holds a `call` to an external
-# symbol and no memory instruction.
-#
-# Classifying it by looking for `"load "` in the LLVM text misses that name by a
-# space, so it falls through to read+write. Measured on `gemm_cm2!`: A and B come
-# out `Touch(true, true, false)` with `@Const` on both in the source, so every
-# pass sharing a weight matrix with another gets a barrier it does not need.
-#
-# These belong in Lava, next to the generators, and cannot go there: Mantle
-# depends on Lava and not the other way round, so `Mantle.intrinsic_usage` is not
-# a name Lava can extend. This file is where the Vulkan backend already states
-# what only it knows about a Lava dispatch.
-#
-# Keyed on the OP, which is what both naming schemes put first and what Lava's
-# own emitter parses them back out as (`spirv/coopmat.jl`):
-#
-#     _lava_coopmat_<op>_<dtype>_<MxN>_<use><scope>[_row]
-#     _lava_tensor_<op>_<dim>_<clamp>[_<rest>]
-#
-# `load`, `loadw`, `loadw2`, `loadw4`, `loadv` are the loads and `store`,
-# `storew`, `storev` the stores, which a prefix covers exactly. Every other op --
-# `create`, `setdim`, `setstride`, `setclampvalue`, `slice`, `view`, `muladd` --
-# takes no pointer, so the walk short-circuits before asking. One that took a
-# pointer and was not named for what it does would answer `nothing` here, and
-# `nothing` is a refusal rather than a guess.
-
+# Lava's `_lava_coopmat_<op>_...` / `_lava_tensor_<op>_...` intrinsics are
+# external calls the IR walk cannot classify, and unclassified means read+write
+# (needless barriers on `@Const` weights). Declared here because Lava cannot
+# extend `Mantle.intrinsic_usage`. `load*` ops read, `store*` ops write, other
+# ops take no pointer; any other name is `nothing`, a refusal, not a guess.
 function intrinsic_usage(::VulkanAPI, name::Symbol)
     s = String(name)
     op = if startswith(s, "_lava_coopmat_")

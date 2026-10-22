@@ -1,20 +1,18 @@
-# Native compute preparation, argument packing and submission-owned scratch.
-# SPIR-V belongs to CodeInstance; linked pipelines belong to the device cache.
+# Compute kernel preparation, argument packing and owner-held scratch. SPIR-V
+# lives with its CodeInstance, pipelines in the device cache.
 # Type-valued arguments specialize as Type{T}, not DataType.
 @inline arg_sigtype(@nospecialize(a)) = a isa Type ? Type{a} : typeof(a)
 
-# ── Launch argument validation ──
-
 """
-    validate_launch_args(ctxof(bq), args)
+    validate_launch_args(ctx, args)
 
-Check that buffer arguments are valid (not freed, not poisoned).
-Runs by default; disable with `ctx.diag.launch_arg_validation = false`.
+Throw a `LavaError` for a `LavaArray` argument whose `DataRef` was released or
+whose buffer is `BUF_STATE_DEAD`. On by default; disable with
+`ctx.diag.launch_arg_validation = false`.
 """
-
 @generated function validate_launch_args(ctx::VkContext, args::T) where T <: Tuple
     exprs = Expr[]
-    # Keep the diagnostics toggle runtime-configurable in generated code.
+    # The toggle is read at run time, not baked into the generated body.
     push!(exprs, :((ctx.diag.launch_arg_validation || return)))
     for i in 1:fieldcount(T)
         Ti = fieldtype(T, i)
@@ -43,14 +41,13 @@ Runs by default; disable with `ctx.diag.launch_arg_validation = false`.
     return Expr(:block, exprs...)
 end
 
-"""lava_launch!(bq, f, args...; ndrange, workgroup_size=(64,1,1))
+"""lava_launch!(bq, f, args...; ndrange, workgroup_size=(64,1,1), tlas=nothing)
 
-Submit a plain kernel in a one-shot. preparekernel holds the original function
-and argument leaves, then adapts and packs device values before dispatch."""
+Submit a plain kernel in a one-shot on `bq` (see `emitkernel!`)."""
 function lava_launch!(bq::SubmitChannel{<:VulkanQueue}, @nospecialize(f), args...;
                        ndrange::Union{Integer, NTuple{3,<:Integer}},
                        workgroup_size::NTuple{3,Int} = (64, 1, 1),
-                       tlas=nothing)  # Union{Nothing, VulkanTLAS} — declared later in raytracing/hwtlas.jl
+                       tlas=nothing)  # Union{Nothing, VulkanTLAS}, declared later in raytracing/hwtlas.jl
     oneshot!(bq; tag = :launch) do e
         emitkernel!(e, f, args...; ndrange, workgroup_size, tlas)
     end
@@ -60,9 +57,8 @@ end
 """
     emitkernel!(emitter, f, args...; ndrange, workgroup_size, tlas = nothing)
 
-Prepare and emit into an existing owner. Plans supply derived dependencies;
-unmodelled one-shots use their head barrier. Both share preparekernel.
-
+Prepare a kernel (`preparekernel`) and emit its dispatch into `emitter`'s
+owner. Plans supply derived dependencies; one-shots rely on their head barrier.
 """
 function emitkernel!(e::Emitter, @nospecialize(f), args...;
                      ndrange::Union{Integer, NTuple{3,<:Integer}},
@@ -78,13 +74,9 @@ function emitkernel!(e::Emitter, @nospecialize(f), args...;
 end
 
 """
-Compile `f` for `args`, pin and pack them where `owner` holds memory, and answer
-what a dispatch needs: the pipeline, the argument address, the workgroup counts
-and a name for the log.
-
-Compile/link, retain original function/argument leaves, adapt and pack into
-owner-held memory, then return pipeline, argument address, group counts and name.
-
+Compile `f` for `args`, hold their array leaves in `owner`, adapt and pack them
+into owner-held memory, and return the pipeline, argument address, workgroup
+counts and log name (`""` unless logging or timing is on).
 """
 function preparekernel(owner::O, @nospecialize(f), args::Tuple,
                        ndrange::Union{Integer, NTuple{3,<:Integer}},
@@ -103,18 +95,15 @@ function preparekernel(owner::O, @nospecialize(f), args::Tuple,
         cld(ndrange_3d[3], workgroup_size[3]),
     )
 
-    # Pin pass (side effects): walk the closure + args and pin every LavaArray
-    # leaf into the owner's pinned set so the backing VkManagedBuffers outlive
-    # the last submission that names them.
-    # Strip pass (pure): Adapt.jl rewrites LavaArray → LavaDeviceArray via the
-    # side-effect-free `adapt_storage(::LavaAdaptor, ::LavaArray)`.
+    # Hold every array leaf of `f` and `args` so its buffer outlives the
+    # submissions naming it; then adapt, which is pure, to device types.
     holdleaves!(owner, f)
     holdleaves!(owner, args)
     adaptor = LavaAdaptor(owner)
     converted_f = Adapt.adapt(adaptor, f)
     converted_args = argmap(a -> Adapt.adapt(adaptor, a), args)
 
-    # Kernel ABI: kernel signature types are POST-adapt (LavaDeviceArray, not Ptr{T}).
+    # The kernel is compiled at the adapted types (LavaDeviceArray, not Ptr{T}).
     tt = Tuple{map(arg_sigtype, converted_args)...}
 
     enable_ray_query = tlas !== nothing
@@ -122,15 +111,14 @@ function preparekernel(owner::O, @nospecialize(f), args::Tuple,
         get_compiled_kernel_and_pipeline(ctx, converted_f, tt, workgroup_size;
                                          enable_ray_query)
 
-    # Loud error: kernel needs HWTLAS but none was provided at launch.
     if pipeline.needs_tlas_descriptor && tlas === nothing
         error("kernel was compiled with enable_ray_query=true but launch_kernel was " *
               "called without a tlas keyword. Pass tlas=<VulkanTLAS> to bind the " *
               "acceleration structure to descriptor set 0, binding 0.")
     end
 
-    # GPUCompiler prepends typeof(f) as the LLVM entry's first param; the entry
-    # wrapper allocates a BDA slot for it unless it's a ghost type.
+    # The LLVM entry takes `f` as its first parameter; it gets a slot unless
+    # it is a ghost type.
     all_args = (converted_f, converted_args...)
     inline_extra = compute_inline_extra_from_byval(byval_sizes)
     total_size = compiled.push_info.arg_buffer_size + inline_extra
@@ -144,16 +132,15 @@ function preparekernel(owner::O, @nospecialize(f), args::Tuple,
     return pipeline, arg_buf.address, groups, name
 end
 
-# Arguments use a fixed slot layout followed by inlined by-value aggregates.
-# Aggregate slots contain self-referencing BDAs; allocation handles contain BDAs.
-# Original leaves are held before pure adaptation; descriptors own no storage.
+# Argument buffer: one slot per passed argument (`offsets`), then the inlined
+# by-value aggregates. An aggregate's slot holds the address of its inlined
+# copy; an allocation's slot holds its BDA.
 
 """
     compute_inline_extra_from_byval(byval_sizes::Vector{Int})
 
-Total bytes needed after the fixed arg layout to hold inlined isbits-struct
-data.  Uses LLVM byval sizes (which can exceed Julia's sizeof for types with
-zero-sized fields like Nothing).
+Bytes after the slot layout for the inlined aggregates, each 8-byte aligned.
+Uses LLVM byval sizes, which can exceed Julia's `sizeof` (zero-sized fields).
 """
 function compute_inline_extra_from_byval(byval_sizes::Vector{Int})
     extra = 0
@@ -165,11 +152,10 @@ function compute_inline_extra_from_byval(byval_sizes::Vector{Int})
     return extra
 end
 
-# Per-type arg packer.  Dispatched (no big if/elseif ladder):
-#   * default: isbits struct → inline + self-ref BDA; primitive → direct store
-#   * Ptr: direct 64-bit store (the pointer value *is* the BDA)
-#   * VkManagedBuffer: pin for batch lifetime + write its BDA
-
+# Per-type argument packers, each returning the next inline offset:
+#   * default: isbits struct inlined, slot gets its address; primitive stored
+#   * Ptr: the pointer value is the BDA
+#   * VkManagedBuffer: held by the owner, slot gets its BDA
 @inline function pack_arg!(x::T,
                            mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                            offset::Int, byval_size::Int, inline_offset::Int,
@@ -232,12 +218,9 @@ end
 """
     pack_args_direct!(owner, mapped_ptr, arg_buf_bda, offsets, base_size, byval_sizes, all_args)
 
-Write kernel arguments directly into mapped GPU memory via per-type
-`pack_arg!` dispatch.  Zero heap allocations for the arg packing itself.
-
-owner retains allocation arguments: a one-shot until completion, a recording
-until release. Slot selection uses core passedslots; byval sizes come from LLVM.
-
+Write kernel arguments into mapped GPU memory through `pack_arg!`, without heap
+allocation. Slots follow core's `passedslots`. The owner holds allocation
+arguments: a one-shot until completion, a recording until release.
 """
 @generated function pack_args_direct!(batch::Closed,
                                         mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
@@ -260,17 +243,12 @@ until release. Slot selection uses core passedslots; byval sizes come from LLVM.
 end
 
 """
-    clear_kernel_cache!()
+    clear_kernel_cache!(ctx = vk_context())
 
-Drop this device's pipelines for compiled kernels, and its launch plans, so the
-next dispatch of each kernel builds them again. The SPIR-V stays with its
-`CodeInstance`; an edited kernel needs none of this, since its new code is a
-new `CodeInstance` and a new compile.
-
-All three ownership layers must go together: launch plans can bypass linked
-kernel lookup, and the native content cache can otherwise return the same
-pipeline when linking again. Existing plans and submissions retain their own
-strong references; clearing lookup state does not invalidate accepted work.
+Drop `ctx`'s pipelines, linked kernels and launch plans so each kernel's next
+dispatch builds them again; the SPIR-V stays with its `CodeInstance`. All three
+go together, since each can return a pipeline the others would rebuild.
+Submissions and plans keep their own references, so accepted work stays valid.
 """
 function clear_kernel_cache!(ctx::VkContext = vk_context())
     empty!(ctx.caches.pipelines)
@@ -281,9 +259,9 @@ function clear_kernel_cache!(ctx::VkContext = vk_context())
 end
 
 """
-    link_kernel(compiled::LavaGPUKernel) -> LavaLinkedKernel
+    link_kernel(ctx, compiled::LavaGPUKernel) -> LavaLinkedKernel
 
-Create session-dependent Vulkan objects (VkPipeline) from cached SPIR-V bytes.
+`ctx`'s pipeline and argument layout for a compiled kernel.
 """
 function link_kernel(ctx::VkContext, compiled::LavaGPUKernel)
     pipeline = get_compute_pipeline(ctx, compiled.spirv_bytes, compiled.entry_name;
@@ -299,18 +277,17 @@ end
       -> (compiled, pipeline, offsets, byval_sizes)
 
 The SPIR-V for `(f, tt, workgroup_size)` (`compile_or_lookup`) and this device's
-pipeline for it.
+pipeline for it. `@noinline` and `@nospecialize` keep compiler inference out of
+specialised launch callers.
 """
-# Keep compiler inference out of specialized launch callers.
 @noinline function get_compiled_kernel_and_pipeline(ctx::VkContext, @nospecialize(f), @nospecialize(tt),
                                           workgroup_size;
                                           enable_ray_query::Bool=false)
     job = lava_kernel_job(f, tt; workgroup_size, enable_ray_query, features = ctx.features)
-    # Isolate compiler/filesystem method invalidations from the warm launch path.
+    # `invokelatest` keeps compiler invalidations away from the warm launch path.
     compiled = Base.invokelatest(compile_or_lookup, job)::LavaGPUKernel
     linked = get!(() -> link_kernel(ctx, compiled), ctx.caches.linked, compiled)
 
-    # Dump SPIR-V if dump dir is set
     dd = ctx.diag.spirv_dump_dir
     if dd !== nothing && !isempty(dd)
         ctx.diag.spirv_dump_counter += 1
@@ -322,16 +299,15 @@ pipeline for it.
     return linked.compiled, linked.pipeline, linked.offsets, linked.byval_sizes
 end
 
-# Scratch belongs to the closed command owner, never a queue-wide rewindable slab.
-# Plans allocate their own argument/indirect slots at compile time.
+# Scratch belongs to the closed command owner, not the queue. Plans allocate
+# their argument and indirect slots at compile time.
 
 const ARG_ALIGN = 256                     # BDA alignment for sub-allocations
 """A block of the [`Unified`](@ref) arena. Small, because BAR memory is scarce on
 a device without resizable BAR and a recording's arguments are kilobytes."""
 const UNIFIED_BLOCK_SIZE = 4 * 1024 * 1024
-"""A block of the [`Readback`](@ref) arena. A download of a full frame is tens of
-megabytes and `acquire!` sizes a block to the larger of the request and this, so
-this only decides how many SMALL downloads share one allocation."""
+"""A block of the [`Readback`](@ref) arena. `acquire!` sizes a block to the larger
+of the request and this, so it only sets how many small transfers share one."""
 const READBACK_BLOCK_SIZE = 16 * 1024 * 1024
 
 """A slice of the unified arena a recording writes its arguments into."""
@@ -344,26 +320,23 @@ end
 """
     scratch!(owner, nbytes) -> Region
 
-Borrow Unified memory for this owner's arguments. One-shots release it after
-completion; recordings retain it until release because they can be replayed.
-
+Borrow Unified memory for this owner's arguments. A one-shot returns it after
+completion, a recording at release, since it can be replayed.
 """
 @inline scratch!(owner::O, nbytes::Integer) where {O<:Closed} = scratch!(owner, nbytes, Unified())
 
 """
     scratch!(owner, nbytes, kind) -> Region
 
-Borrow owner-held memory: Unified for addressed arguments, Readback for CPU
-staging writes followed by a GPU copy. The owner returns it at its release point.
-
+Borrow owner-held memory: `Unified` for addressed arguments, `Readback` for host
+staging that a GPU copy reads. The owner returns it at its release point.
 """
 @inline function scratch!(owner::O, nbytes::Integer, kind) where {O<:Closed}
     bq = queueof(owner)
     ownthread(bq)
     dev = lavadevice(ctxof(bq))
-    # `maywait = false`: see the pool's `acquire!`. This runs INSIDE an open
-    # recording, and a waiting reclaim would sweep the channel and take that
-    # recording's hold frame out from under it.
+    # `maywait = false`: this can run inside an open recording, and a waiting
+    # reclaim sweeps the channel and pops that recording's hold frame.
     r = acquire!(pool(dev), dev, kind, nothing, max(Int(nbytes), 16);
                  align = ARG_ALIGN, blocksize = scratchblock(kind), maywait = false)
     push!(owner.regions, r)
@@ -387,8 +360,7 @@ end
     indirect_command!(owner) -> LavaArray{UInt32,1}
 
 One owner-held indirect dispatch triple, written by a prepare kernel and read
-by the command processor. Declared plans use their compiled argument slots.
-
+by the command processor. Plans use their compiled argument slots instead.
 """
 function indirect_command!(owner::O) where {O<:Closed}
     r = scratch!(owner, INDIRECT_STRIDE)

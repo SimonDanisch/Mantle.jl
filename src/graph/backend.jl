@@ -1,10 +1,10 @@
-# Legacy graph hooks. Core owns scheduling, liveness, placement and barriers;
-# backends compile, encode and submit the resulting work. Target verbs: docs/api.md §4.
+# Backend hooks for graph execution. Core owns scheduling, liveness, placement and
+# barriers; backends compile, encode and submit the resulting work.
 
 """
     isdepth(x) -> Bool
 
-Classify legacy attachment element types: Float32 is depth; other types are color.
+Classify attachment element types: `Float32` is depth, every other type is color.
 """
 isdepth(::Type{Float32}) = true
 isdepth(::Type) = false
@@ -40,8 +40,8 @@ Resize to the current requirements; return false when the existing resource fits
 """
 function refit! end
 
-# Core emitplan! walks passes; backends implement native emission below.
-# Interpreted work uses Immediate; Metal also uses it for front-of-run updates.
+# Core `emitplan!` walks the passes; backends implement the emission verbs below.
+# Interpreted work uses `Immediate`; Metal also uses it for front-of-run updates.
 
 """
     openrecording(device, plan, passes) -> emitter or nothing
@@ -83,7 +83,7 @@ emitbarriers!(e, ::PassPlan) = nothing
 """
     withpredicate(f, emitter, predicate)
 
-Run f with device work discarded when the predicate is zero. Nothing is unconditional.
+Run f with device work discarded when the predicate is zero. `nothing` is unconditional.
 """
 withpredicate(f, e, ::Nothing) = f()
 
@@ -193,7 +193,7 @@ librarygemm(::Device, out, A, B, bias, epilogue) = nothing
 """
     native_conv2d_dispatch!(device, graph, out, x, w;
                             bias=nothing, stride, pad, dilation, groups,
-                            epilogue=identity, name)
+                            epilogue=identity, transposed=false, name)
 
 Declare native convolution; return nothing or (; bias::Bool, epilogue::Bool) for folded
 post-operations. Layouts: x=(W,H,Cin,N), w=(KW,KH,Cin/groups,Cout), out=(OW,OH,Cout,N).
@@ -224,9 +224,8 @@ Unlike librarygemm, partial fusion is allowed.
 """
 native_gemm_dispatch!(::Device, graph, out, A, B;
                       bias = nothing, epilogue = identity, name) = nothing
-# Immediate execution carries a KernelAbstractions backend while declaration
-# carries a Mantle device.  Backends may answer for either; the default is the
-# same absence of a native path.
+# Immediate execution passes a KernelAbstractions backend, declaration a Mantle
+# device; backends may answer for either.
 native_gemm_available(::Union{Device,KA.Backend}, ::Type, ::Type, ::Type) = false
 
 """
@@ -257,7 +256,7 @@ native_attention_dispatch!(::Device, graph, out, q, k, v; scale, name) = false
     patchable(device) -> Bool
 
 Whether recorded addresses can be patched after storage moves. Otherwise invalidate
-and recompile before replay; captured HIP graphs currently require that path.
+and recompile before replay; captured HIP graphs require that path.
 """
 patchable(::Device) = true
 
@@ -355,9 +354,6 @@ Wait for the last run's token. A plan with no argument memory or no previous run
 """
 function waitfor!(pl::Plan)
     am = pl.args
-    # No argument memory on a backend that passes arguments directly, and
-    # `token` is 0 until the first run — a plan that has not run has nothing
-    # to wait for.
     am === nothing && return nothing
     tok = argtoken(am)      # a method, not a field read: no boxing (see types.jl)
     tok == 0 && return nothing
@@ -431,8 +427,7 @@ function makeargmemory(dev, passes)
     mem = argbytes(dev, bytes)
     mem === nothing && return nothing
     store, address, ptr = mem
-    # One view per device-sized dispatch, built here because the offsets never
-    # move and building one per record is an allocation on the recording path.
+    # Built once: the offsets never move, and a view per record would allocate.
     indirect = Any[indirectslot(dev, store, indbase + (k - 1) * INDIRECT_STRIDE) for k in 1:nind]
     return ArgMemory(store, address, ptr, Ref(UInt64(0)), indirect)
 end
@@ -456,7 +451,7 @@ function indirectslot end
 """
     slotgrid(slot) -> device array of three UInt32
 
-Return the three UInt32 workgroup counts as a device array.
+The slot's workgroup counts as a device array. Default: the slot itself.
 """
 slotgrid(s) = s
 
@@ -479,51 +474,43 @@ Initialize/register this build's backend from __init__. Backend-only names stay 
 """
 function initbackend! end
 
-# Legacy backend extension surface, checked by test_backend_vocabulary.jl.
-# Replace entries with the target verbs in docs/api.md as their old callers disappear.
+# Core names a backend under `src/vulkan/` or `src/metal/` may add methods to;
+# test/test_backend_vocabulary.jl enforces the list.
 const BACKEND_VOCABULARY = (
-    # what a backend does once, at load
     :initbackend!,
-    # for humans: which GPU this is
     :devicename,
     # Runtime hooks outside the graph (runtime/backendhooks.jl).
     :staged_gemm_tile, :videodecodes, :decode_h264_gpu, :h264decoder, :feed!, :decodemore!, :remaining, :build_blas_aabb, :upload_texture_data!,
-    # which of a backend's errors is the device out of memory (the pool's pressure steps)
     :isoutofmemory,
     # devices, memory, resources
     :Device, :backend, :kibackend, :batchqueue, :capacity, :caps, :maxalloc, :pool,
-    # A channel names its device. Core answers for its own `SubmitChannel`; a
-    # backend whose channel is a type of its driver package's (Metal.jl's
-    # `BatchedCommandQueue`) answers for that one, and gives it back to `reclaim!`.
+    # Core answers these for `SubmitChannel`; a backend answers for its own channel
+    # type (Metal.jl's `BatchedCommandQueue`).
     :todevice, :reclaim!,
     :bestshape,
     :rawalloc, :rawfree, :constraintof, :mergeconstraints, :compatible, :materialize!,
     :alignment, :bufferusage, :extrausage, :imageusage, :devicearray, :deviceview,
     :deviceslice,
-    # How far a kernel may trust an operand's base address. Core answers its own
-    # resources; a backend answers for its device array, whose offset lives
-    # inside it where no core type can see it.
+    # A backend answers for its device array, whose offset core cannot see.
     :basealignment,
     :upload!, :download, :devicecopy!, :hostspan, :deviceaddress, :patchable, :release!,
     # host memory a device reads in place, `runtime/api.jl`
     :importhost, :canimporthost,
-    :indexbuffer,
-    # The recording primitives a submission channel needs — 2.3. Core owns the
-    # free list and when a recording may be reused; these are the driver half.
+    :indexbuffer,             # Vulkan needs a usage bit at allocation, Metal does not
+    # Driver half of recording reuse; core owns the free list.
     :makerecording, :resetrecording!, :destroyrecording!, :finishrecording!, :recorder,
     # Core owns lifetime decisions; backends provide destructors/stamp storage and
     # recording-specific claims/residency.
     :stampof, :deviceof, :hold!, :holdleaves!,
-    # Whether handing a recording over pops the channel's hold frame: a one-shot
-    # is submitted once and does, a recording that is submitted every run took
-    # its frame when it was sealed and must not pop a second one.
+    # Whether handover pops the hold frame: a one-shot does; a recording submitted
+    # every run took its frame when sealed and must not pop another.
     :submissionholds!,
     # Native render-pass primitives shared by hand-recorded and graph emission.
     :compile_draw, :begin_render_pass!, :record_draw!, :end_render_pass!,
-    # What `record_draw!` baked about an argument — a backend's device array
-    # answers with its address, so a cached plan sees a reallocation.
+    # What `record_draw!` bakes per argument; a device array answers with its
+    # address, so a cached plan sees a reallocation.
     :argidentity,
-    :setviewport!, :colorimage, :depthimage, :currentimage, :blittarget,                             # Vulkan needs a usage bit at allocation, Metal does not
+    :setviewport!, :colorimage, :depthimage, :currentimage, :blittarget,
     :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel, :mipmapped,
     :supports, :supports_graphics, :supports_geometry_stage,
     :supports_tessellation, :supports_mesh_pipeline, :supports_batch_queue,
@@ -531,48 +518,40 @@ const BACKEND_VOCABULARY = (
     :supportspredicate,                       # only whether fixed-size gated work can be discarded
     # Device lifecycle, validation and allocation probes (runtime/lifecycle.jl).
     :debugenv, :validating, :validationmessages!, :submissions, :retired, :tryallocate,
-    # the queue and its tokens
     :devices, :defaultdevice!,
-    # Core's channel over a backend's queue: the backend constructs it around
-    # the driver half it owns, and core never looks inside that.
+    # the queue and its tokens; the backend builds core's channel around its driver half
     :SubmitChannel,
     :allocate_batch_queue!, :release_batch_queue!, :submit!, :flush!, :waitidle,
     :waitfor, :waitfor!, :passed, :fence, :reset_device!, :awaitwrites,
     # sync lowering
     :access, :stages, :layout, :needs_transition, :initial_state, :initial_usage,
-    # Vendor-named verbs are not in this list: `vkformat` is the Vulkan
-    # backend's own and `mtlformat` is Metal's.
+    # Vendor verbs (`vkformat`, `mtlformat`) are backend-private and not listed.
     # compile: the phases are core's, a backend answers these
     :syncbackend,
     :compiledraw, :compile_dispatch, :passbarriers,
     :argbytes, :indirectslot,
-    # Argument packing: core owns the classification and both walks
-    # (`graph/packing.jl`); a backend adds `passedas` for its OWN allocation
-    # handles and never restates the rule for what takes no slot at all.
+    # Argument packing is core's (`graph/packing.jl`); a backend adds `passedas`
+    # only for its own allocation handles.
     :passedas,
-    # What an `llvmcall`'s external symbol does to the pointer it is handed.
-    # A declaration and not a hook with a default answer: `nothing` means
-    # undeclared, which the walk refuses rather than guesses about.
+    # What an `llvmcall`'s external symbol does to its pointer; `nothing` means
+    # undeclared, which the walk refuses.
     :intrinsic_usage,
     # Library callable types declare their own argument accesses.
     :argument_usage,
     # Properties required from backend-specific compiled dispatches.
     :callgroup,
     :makeprofiler, :Profiler,
-    # Whether the profiler can time a pass, and so whether a plan can cut its
-    # recording by the budget; and the budget itself (`partitionranges`).
+    # Whether passes can be timed, so recordings can be cut by the budget
+    # (`partitionranges`); and the budget.
     :timestamps, :submissionbudget,
-    # Legacy properties of backend-specific compiled dispatches; remove when the
-    # target compiled representation replaces these types.
+    # Also read from backend-specific compiled dispatches.
     :argsize, :devicesized, :indirectindex,
-    # Likewise declared rather than left implicit: core defines each of these and
-    # a backend overrides it.
+    # Core defines a default for each; a backend overrides it.
     :retire!, :blocksize, :copy_target!, :gpupasstime!,
     # the walk's primitives
     :openrecording, :closerecording!, :emithead!, :emitloophead!, :emitbarriers!,
     :withpredicate,
     :emitupdate!, :emitdispatch!, :emitcopy!, :beginrender!, :emitdraw!, :endrender!,
-    # argument_usage is listed once above.
     :profiled!, :collect!,
     :emitkernel!, :emitpreparebarrier!, :workgroupsize, :indirectslot, :writegroups!, :slotgrid,
     :storebytes!, :orderstore!,
@@ -580,14 +559,12 @@ const BACKEND_VOCABULARY = (
     :native_conv2d_dispatch!,
     :native_gemm_dispatch!, :native_batched_gemm_dispatch!,
     :native_attention_dispatch!,
-    # Core's GEMM asks the backend how its arrays are laid out (`gemmstrides`) and
-    # for split-k scratch when the call is immediate (`splitscratch`).
+    # Array layout for core's GEMM, and split-k scratch for immediate calls.
     :gemmstrides, :splitscratch,
     :kernelcompiles, :resetkernelcompiles!,
     :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,
-    # Submitting ONE baked piece, and giving one back that will never be
-    # submitted. Core owns the sequence a partition makes of them
-    # (`RecordingParts`) and the walk that builds it.
+    # Submit one baked piece, or give back one never submitted; core owns the
+    # partition (`RecordingParts`).
     :submitrecording!, :abandonrecording!,
     :beginframe!,
     # graphics verbs, immediate and windowed

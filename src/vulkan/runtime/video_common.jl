@@ -3,7 +3,8 @@ struct H264PictureOrder
     offset::Int
 end
 
-"""Shared session, upload, DPB and display-order state; codec state stays typed."""
+"""Decoder state shared by the codecs: session, bitstream buffer, DPB slots and the
+display-order queue. `Codec` is the codec's picture-order state, `Entry` a DPB entry."""
 mutable struct CodecDecoder{Codec,Entry} <: VideoDecoder
     ctx::MANTLE.VkContext
     profile::Tuple
@@ -246,7 +247,8 @@ picture_resource(view, width, height) = C.VkVideoPictureResourceInfoKHR(
     C.VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR, C_NULL, C.VkOffset2D(0,0),
     C.VkExtent2D(width,height), UInt32(0), view)
 
-"""Write Annex-B prefixes and slices directly into mapped video input memory."""
+"""Write each slice of `au` with a 3-byte Annex-B start code to `dst`. Return the
+slice offsets and the total size rounded up to `alignment`."""
 function uploadbitstream!(dst::Ptr{UInt8}, au, alignment::Integer)
     offsets = Vector{UInt32}(undef, length(au))
     off = 0
@@ -261,18 +263,15 @@ function uploadbitstream!(dst::Ptr{UInt8}, au, alignment::Integer)
     return offsets, cld(off, alignment) * alignment
 end
 
-"""
-Decode targets allocated at once under DPB_AND_OUTPUT_DISTINCT. Bounds the memory
-of an unbounded chunk; larger just means fewer video-queue submits per stream.
-"""
+"""Decode targets per video submission under DPB_AND_OUTPUT_DISTINCT; bounds their memory."""
 const MAX_DECODE_TARGETS = 16
 
 "Frames not yet returned by [`decodemore!`](@ref) (undecoded AUs + pending reorder)."
 remaining(dec::CodecDecoder) = (length(dec.aus) - dec.nextau + 1) + length(dec.pending)
 
-"""Decode up to `maxframes` AUs. Return display-safe `(Y, UV)` pairs in (GOP, POC)
-order, retaining `holdback` frames until the feed ends. DISTINCT targets are reused
-in bounded subchunks; each submission waits before its resources are reused."""
+"""Decode up to `maxframes` fed AUs and return `(Y, UV)` pairs in (GOP, POC) order,
+holding back the last `holdback` frames until the feed is decoded. `UV` is `nothing`
+without `chroma`. Each submission completes before its resources are reused."""
 function decodemore!(dec::CodecDecoder, maxframes::Integer; holdback::Integer = dec.nslots)
     dec.open || throw(ArgumentError("decoder is closed"))
     hi = min(dec.nextau + Int(min(maxframes, typemax(Int) ÷ 2)) - 1, length(dec.aus))
@@ -280,8 +279,8 @@ function decodemore!(dec::CodecDecoder, maxframes::Integer; holdback::Integer = 
         batch = dec.nextau:hi
         ausize(au) = cld(sum(length(sl) + 3 for sl in au), dec.bsalign) * dec.bsalign
         w = dec.ctx; CB = dec.cbh.vks
-        # COINCIDE copies each DPB slot immediately. DISTINCT retains one target per AU
-        # until the main-queue copies finish; reuse a bounded target pool between chunks.
+        # COINCIDE copies each DPB slot in the decode submission. DISTINCT keeps one
+        # target per AU until the main-queue copies finish, so it submits in sub-chunks.
         step = dec.mkoutimg === nothing ? length(batch) : min(length(batch), MAX_DECODE_TARGETS)
         for sub in Iterators.partition(batch, max(step, 1))
             ensurebitbuf!(dec, sum(ausize(dec.aus[i]) for i in sub))
@@ -297,8 +296,7 @@ function decodemore!(dec::CodecDecoder, maxframes::Integer; holdback::Integer = 
             si = Ref(C.VkSubmitInfo(C.VK_STRUCTURE_TYPE_SUBMIT_INFO,C_NULL,UInt32(0),Ptr{C.VkSemaphore}(C_NULL),Ptr{UInt32}(C_NULL),UInt32(1),Base.unsafe_convert(Ptr{C.VkCommandBuffer},cbref),UInt32(0),Ptr{C.VkSemaphore}(C_NULL)))
             GC.@preserve si cbref vkchk(ccall(dfp(w,"vkQueueSubmit"),Int32,(Ptr{Cvoid},UInt32,Ptr{Cvoid},Ptr{Cvoid}),w.video_decode_queue.vks,UInt32(1),Base.unsafe_convert(Ptr{Cvoid},si),C_NULL), "vkQueueSubmit")
             vkchk(ccall(dfp(w,"vkQueueWaitIdle"),Int32,(Ptr{Cvoid},),w.video_decode_queue.vks), "vkQueueWaitIdle")
-            # Blocks until the copies complete (flush! waits on the timeline), so the
-            # decode targets are free for the next sub-chunk.
+            # Waits for the copies, freeing the decode targets for the next sub-chunk.
             drain_copies!(dec)
         end
         dec.nextau = hi + 1
@@ -311,8 +309,8 @@ function decodemore!(dec::CodecDecoder, maxframes::Integer; holdback::Integer = 
     return out
 end
 
-"""Copy DISTINCT decode targets on the main queue after video completion. Targets
-use concurrent sharing across both families and remain live until copies finish."""
+"""Copy the queued DISTINCT decode targets on the main queue and wait. Call after
+the video submission completed; the targets are shared across both queue families."""
 function drain_copies!(dec::CodecDecoder)
     isempty(dec.copyq) && return nothing
     ctx = dec.ctx
@@ -332,7 +330,7 @@ function drain_copies!(dec::CodecDecoder)
     return nothing
 end
 
-"Grow the (host-visible) bitstream upload buffer to hold an AU of `need` bytes."
+"Grow the mapped bitstream buffer to at least `need` bytes, rounded up to `bsalign`."
 function ensurebitbuf!(dec::CodecDecoder, need::Integer)
     dec.open || throw(ArgumentError("decoder is closed"))
     size = UInt64(cld(max(need,1),dec.bsalign)*dec.bsalign)
@@ -366,8 +364,8 @@ function ensurebitbuf!(dec::CodecDecoder, need::Integer)
               (Ptr{Cvoid},C.VkBuffer,Ptr{Cvoid}), ctx.device.vks, buffer, C_NULL)
         rethrow()
     end
-    # Streaming submissions have completed before growth. Publish only after the
-    # replacement is mapped, so a failed allocation leaves the old input usable.
+    # No submission reads the old buffer here. Replace it only once the new one is
+    # mapped, so a failed allocation leaves the old one usable.
     if dec.bbuf !== nothing
         ccall(dfp(ctx,"vkUnmapMemory"), Cvoid, (Ptr{Cvoid},C.VkDeviceMemory),ctx.device.vks,dec.bmem.vks)
         ccall(dfp(ctx,"vkDestroyBuffer"), Cvoid,

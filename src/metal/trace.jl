@@ -1,31 +1,10 @@
-# Hardware ray traversal on Metal.
+# Hardware ray traversal on Metal, written in MSL: `intersector<>` is a C++
+# template the Metal frontend instantiates, with no AIR intrinsic Metal.jl could
+# call. `newLibraryWithSource:` compiles it at runtime without Xcode. Shading
+# stays in Julia; the kernel only writes the nearest hit per ray.
 #
-# ── Why this file is MSL source and not a Julia kernel ───────────────────────
-#
-# Every other kernel this backend runs is Julia, compiled to AIR by Metal.jl.
-# Traversal cannot be, and the reason is structural rather than a gap someone
-# can fill in Metal.jl: `metal::raytracing::intersector<>` is a C++ class
-# template whose traversal the Metal *frontend* instantiates and inlines. It is
-# not an `extern` AIR function, so there is no symbol for `@typed_ccall` to
-# name and no `@device_override` that could become one. Confirmed by looking:
-# no `air.intersect*` appears anywhere in Metal.jl or in AIR's intrinsic set.
-#
-# What IS available is `newLibraryWithSource:`, which runs that frontend at
-# runtime with no Xcode installed. So the traversal is written once, in MSL,
-# compiled on first use and cached per device.
-#
-# This does not put shading in MSL. `trace_closest_hits!` is the ray-query
-# contract — rays in, nearest hit out, no shader callback — which is exactly
-# what a self-contained kernel can express. Hikari's wavefront integrator reads
-# the hit buffer back in Julia and shades there, so the Julia/MSL boundary sits
-# where the data does.
-#
-# ── The layouts are Raycore's, byte for byte ─────────────────────────────────
-#
-# `RTRay` and `RTHitResult` are 32-byte flat structs of Float32/UInt32 with no
-# padding, which is why they can be mirrored in MSL at all. The asserts below
-# check that rather than trusting it: a field added on the Julia side would
-# otherwise silently shear every hit record.
+# `RTRay` and `RTHitResult` mirror Raycore's 32-byte, padding-free layouts. The
+# asserts below catch a Julia-side field change that would shear every hit record.
 
 const TRACE_MSL = """
 #include <metal_stdlib>
@@ -96,7 +75,6 @@ kernel void trace_closest_hits(
 }
 """
 
-# The Julia side of the ABI above. Checked at load, not assumed.
 @assert sizeof(Raycore.RTRay) == 32       "RTRay must be 32 bytes to match TRACE_MSL; got $(sizeof(Raycore.RTRay))"
 @assert sizeof(Raycore.RTHitResult) == 32 "RTHitResult must be 32 bytes to match TRACE_MSL; got $(sizeof(Raycore.RTHitResult))"
 @assert fieldnames(Raycore.RTRay) ==
@@ -105,10 +83,10 @@ kernel void trace_closest_hits(
         (:hit, :t, :primitive_id, :instance_custom_index, :bary_u, :bary_v, :instance_id, :_pad2)
 
 """
-Compile the traversal kernel once per device and keep it.
+    trace_pipeline(dev) -> MTLComputePipelineState
 
-`newLibraryWithSource:` runs the Metal frontend, which costs tens of
-milliseconds — fine once, not per trace.
+The traversal pipeline, compiled on first use and cached on `dev`: compiling
+from source costs tens of milliseconds.
 """
 function trace_pipeline(d::MetalDevice)
     p = d.trace_pipeline
@@ -118,18 +96,16 @@ function trace_pipeline(d::MetalDevice)
     return d.trace_pipeline = MTL.MTLComputePipelineState(d.dev, fun)
 end
 
-# The MTLBuffer behind a device array, and the byte offset into it. Mantle's
-# `deviceview` hands out borrowed `MtlArray`s over pool regions, so the offset
-# is load-bearing — binding the buffer at 0 would read another tenant's bytes.
+# The `MTLBuffer` behind an `MtlArray` and the byte offset into it. Views over
+# pool regions share a buffer; binding at offset 0 reads another region's bytes.
 _mtlbuffer(a::MtlArray) = (a.data[].buffer, a.offset * sizeof(eltype(a)))
 
 """
     trace_closest_hits!(hits, rays, tlas, n_rays; cull_mask = 0xFF)
 
-Trace `n_rays` from `rays` against `tlas`, writing the nearest hit of each into
-`hits`. Hardware traversal.
-
-`cull_mask` is ANDed with each instance's mask, as in Vulkan.
+Trace `n_rays` from `rays` against `tlas` with hardware traversal, writing the
+nearest hit of each into `hits`. `cull_mask` is ANDed with each instance's mask,
+as in Vulkan.
 """
 function trace_closest_hits!(hits::MtlArray, rays::MtlArray, tlas::MetalTLAS,
                                               n_rays::Integer; cull_mask::UInt32 = UInt32(0xFF))
@@ -154,8 +130,8 @@ function trace_closest_hits!(hits::MtlArray, rays::MtlArray, tlas::MetalTLAS,
     MTL.MTLComputeCommandEncoder(cmdbuf) do cce
         MTL.set_function!(cce, pip)
         MTL.set_acceleration_structure!(cce, tlas.handle, 1)
-        # Residency for the structures the TLAS points at. Binding the TLAS
-        # alone leaves its BLASes non-resident and traversal silently misses.
+        # Binding the TLAS alone leaves its BLASes non-resident; traversal then
+        # silently misses.
         isempty(tlas.blases) || MTL.use!(cce, tlas.blases, MTL.ReadUsage)
         MTL.set_buffer!(cce, rbuf, roff, 2)
         MTL.set_buffer!(cce, hbuf, hoff, 3)

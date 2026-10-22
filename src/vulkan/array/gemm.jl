@@ -3,10 +3,10 @@
 """
     mul!(C, A, B, α, β) -> C
 
-Compute C = A*B*α + C*β on C's device. Stride projection supports wrapped
-operands; non-strided inputs are densified. Eligible dense fp16 inputs into
-fp32 output use cooperative matrices; other numeric shapes use core scalar
-kernels. Non-Number elements retain GPUArrays' generic arithmetic.
+Compute `C = A*B*α + C*β` on C's device. Operands without a `gemmstrides`
+projection are densified first. Dense fp16 `LavaArray` inputs into fp32 with
+`α == 1`, `β == 0` and extents divisible by `GEMM_TILE` use cooperative
+matrices; the rest use the scalar kernel. Non-`Number` eltypes use GPUArrays.
 """
 function LinearAlgebra.mul!(C::LavaArray{T,2}, A::AbstractVecOrMat,
                             B::AbstractVecOrMat, α::Number, β::Number) where {T<:Number}
@@ -28,8 +28,7 @@ function LinearAlgebra.mul!(C::LavaArray{T,2}, A::AbstractVecOrMat,
 end
 
 
-# A matrix-vector product is just the N == 1 case. `C` carries strides like the
-# operands do, so its rank never reaches the kernel and one kernel serves both.
+# Matrix-vector product: the N == 1 case of the same strided kernel.
 function LinearAlgebra.mul!(C::LavaArray{T,1}, A::AbstractVecOrMat,
                             B::AbstractVector, α::Number, β::Number) where {T<:Number}
     M, K = size(A, 1), size(A, 2)
@@ -38,8 +37,8 @@ function LinearAlgebra.mul!(C::LavaArray{T,1}, A::AbstractVecOrMat,
     gemmlaunch!(C, A, B, M, 1, K, T(α), T(β))
 end
 
-# Resolve the dense-GEMM/Diagonal intersection; GPUArrays owns scaling,
-# dimension checks and diagonal/off-diagonal initialization.
+# Disambiguate against the dense methods above; GPUArrays handles Diagonal
+# operands, including scaling and dimension checks.
 function LinearAlgebra.mul!(C::LavaArray{T,2},
                             D::Diagonal{<:Any, <:AbstractGPUArray},
                             B::Union{AbstractGPUArray,
@@ -65,20 +64,15 @@ function LinearAlgebra.mul!(C::LavaArray{T,2},
     return GPUArrays.generic_diagonal_mul!(C, A, B, α, β)
 end
 
-"""Does this device implement the tile `mul!` wants?"""
-# Cooperative-matrix operations are subgroup-scoped, so a device whose subgroup
-# is not 32 lanes gets a different number of subgroups per workgroup than this
-# kernel assumes, and `lane ÷ 32` stops naming a real subgroup. The arithmetic
-# still comes out right for the lanes that run — on a wave64 device exactly half
-# the output tile is written, bit-exact, and the other half stays zero, which is
-# a silently wrong answer rather than a failure.
-#
-# Two ways to have a 32-lane subgroup: the device is natively wave32, or it lets
-# the pipeline pin its subgroup size, which `get_compute_pipeline` does for any
-# coopmat module. Failing both, `mul!` falls through to `gemmlaunch!`, which is
-# correct at any width — slower, but not wrong. Making the kernel itself
-# wave-size agnostic would mean retuning GEMM_WORKGROUP and the block factors
-# together, and those were measured at 32.
+"""
+    coopmat_gemm_available(ctx) -> Bool
+
+Whether `ctx` runs the cooperative-matrix GEMM: the Float16 `GEMM_TILE` shape
+and a 32-lane subgroup, native or pinned by `get_compute_pipeline`. The kernel
+indexes subgroups as `lane ÷ 32`; on an unpinned wave64 device it writes half
+the output tile and leaves the rest zero without error. Otherwise `mul!` uses
+the scalar `gemmlaunch!`, which is correct at any subgroup width.
+"""
 function coopmat_gemm_available(ctx::VkContext)
     coopmat_shape(ctx, Float16, GEMM_TILE, GEMM_TILE, GEMM_TILE) &&
         (device_subgroup_size(ctx) == GEMM_SUBGROUP ||

@@ -1,30 +1,15 @@
-# Suballocation across plans. Backend-independent, on purpose.
-#
-# `Place` already packs one arena's transients into `height` bytes. This is the
-# layer under that: where those `height` bytes come from, and how they are reused
-# once the plan that asked for them is gone.
-#
-# It lives here rather than in a backend for the same reason the phases do — a
-# second backend must not need a second suballocator. A backend supplies four
-# primitives and no policy: `rawalloc`, `rawfree`, `constraintof` and
-# `compatible`. Everything about which block, what offset, when to grow and when
-# to release is decided in this file.
-#
-# It also must not sit on a backend's own allocator. Mantle asking Lava for a
-# `LavaArray` and suballocating inside it stacks two allocators, and the lower one
-# is invisible to the thing claiming to manage memory. `rawalloc` is meant to be
-# the rawest allocation the device offers — `vkAllocateMemory`, not a pooled
-# wrapper around it.
+# Backend-independent suballocation across plans: which block, which offset,
+# when to grow and when to release. A backend supplies only `rawalloc`,
+# `rawfree`, `constraintof` and `compatible`. `rawalloc` must be the device's
+# rawest allocation (`vkAllocateMemory`), not a pooled wrapper, or the pool
+# suballocates inside a second allocator it cannot see.
 
 """
     rawalloc(dev, kind, bytes, constraint) -> memory
 
-One raw allocation from the device, of at least `bytes`, legal for `constraint`.
-
-Called once per BLOCK, never per transient and never per compile. A backend that
-routes this through its own pool defeats the point: the memory Mantle hands out
-would then be a suballocation of a suballocation, and the peak it reports would
-be about its own bookkeeping rather than about the device.
+One raw device allocation of at least `bytes`, legal for `constraint`. Called
+once per block. Must not go through a backend pool, or the peak Mantle reports
+describes its own bookkeeping rather than the device.
 """
 function rawalloc end
 
@@ -34,22 +19,10 @@ function rawfree end
 """
     maxalloc(dev) -> Int
 
-The largest single allocation this device will make.
-
-A harder limit than [`capacity`](@ref) and usually a far smaller one — 4 GB
-against 29 GB of budget on this machine — and the one that
-actually bounds a block, because a block is *one* allocation: the offsets a
-placement produces are into a single contiguous range, so it cannot be split
-across two.
-
-Measured rather than assumed. The alternative was a reserve fraction subtracted
-from the heap, and every such fraction is either too small to prevent the failure
-or too large to justify. A plan needing 5 GB in one arena cannot run on this
-device however idle the card is, and saying so by name is worth more than a
-percentage that happens to catch it here.
-
-`typemax(Int)` is the default: a backend that will not say is not blocked, it is
-merely bounded by `capacity` alone.
+The largest single allocation the device makes, usually far below
+[`capacity`](@ref). Bounds a block, because a block is one allocation and
+placement offsets index one contiguous range. The default `typemax(Int)` leaves
+`capacity` as the only bound.
 """
 maxalloc(dev) = typemax(Int)
 
@@ -57,35 +30,20 @@ maxalloc(dev) = typemax(Int)
 """
     constraintof(dev, kind, transients) -> constraint
 
-What memory the given transients can legally share, as whatever the backend needs
-to answer [`compatible`](@ref) later — a memory-type mask, a usage flag set.
-
-Derived from the transients rather than declared: on Vulkan an image's memory
-type bits are a property of the image, and a block that hosts several must
-satisfy all of them at once.
+What memory `transients` can legally share, in the form the backend's
+[`compatible`](@ref) reads (a memory-type mask, usage flags). Derived from the
+transients: on Vulkan an image's memory-type bits belong to the image, and a
+block hosting several images must satisfy all of them.
 """
 function constraintof end
 
 """
-    mergeconstraints(dev, kind, a, b) -> constraint | nothing
+    mergeconstraints(dev, kind, a, b) -> constraint
 
-One constraint that satisfies both, or `nothing` when none can.
-
-An arena outlives the plan that first sized it, so the block behind it has to
-keep satisfying every tenant placed there — and what "both" means is the
-backend's: buffer usage bits UNION (the block must permit everything any tenant
-does with it) while image memory-type bits INTERSECT (the type has to be one
-every image can bind to). Getting those the wrong way round is memory that works
-until the one image whose type was excluded is bound.
-
-The default demands equality, which is the safe reading for a backend that has
-not said otherwise: two constraints that are not the same are not reconciled by
-core guessing.
-
-Impossibility is a THROW, not a returned `nothing`. `nothing` is a perfectly good
-constraint — memory with no placement rule — so using it as the failure signal
-made such graphs unplaceable. A sentinel that a
-backend can legitimately return is not a sentinel.
+One constraint satisfying both `a` and `b`, for an arena whose block must keep
+serving every tenant placed in it. The backend defines the merge (Vulkan: buffer
+usage bits union, image memory-type bits intersect); the default requires
+`a == b`. Throws when no merge exists, because `nothing` is a valid constraint.
 """
 mergeconstraints(dev, kind, a, b) = a == b ? a : throw(ArgumentError(
     "arena $kind cannot host this plan and the ones already placed in it: it " *
@@ -95,11 +53,8 @@ mergeconstraints(dev, kind, a, b) = a == b ? a : throw(ArgumentError(
 """
     compatible(dev, block_constraint, request) -> Bool
 
-May a block created for `block_constraint` host a request needing `request`?
-
-Core cannot answer this — "what memory is legal here" is exactly the backend's
-semantics. It is why blocks are not interchangeable and why a pool cannot simply
-be one large buffer.
+Whether a block created for `block_constraint` may host a request needing
+`request`. Backend semantics, and the reason blocks are not interchangeable.
 """
 function compatible end
 
@@ -107,53 +62,13 @@ function compatible end
 const NBINS = 8 * sizeof(Int)
 
 """
-The unused parts of one block, indexed three ways so that both ends of an
-allocation are O(1): by where a span starts, by where it ends, and bucketed by
-how large it is.
-
-The obvious structure — one sorted `Vector{Span}`, first fit to carve,
-`insert!` and coalesce to release — is adequate only while the pool serves graph
-arenas alone: a handful of live regions per block, one free entry per plan, with
-`Place` having packed the transients inside each one already.
-
-What it does not have is a bound. First fit scans the free list from the front,
-and `insert!`/`deleteat!` memmove half of it per release, so both are O(number of
-free spans) — and once the pool serves general device allocation rather than a
-handful of arenas, nothing keeps that number small. Measured, taking the
-ordinary shape of many small arrays with half of them freed and staying freed,
-then a run of larger allocations no hole can host (2000 of them, this machine):
-
-    scattered holes    vector     bins
-              250     0.76 ms   0.85 ms
-              500     1.47      1.02
-             1000     2.86      1.38
-             2000     5.67      2.06
-             4000    11.16      3.53
-             8000    22.21      6.72
-
-The vector is exactly linear in the holes it has to get past. The point is not
-the 3.3x at the right-hand end — it is that the right-hand end keeps going.
-
-**Below about 350 free spans the vector is the faster of the two**, by around
-10%, because a `Dict` operation costs more than a `Vector` one and at that size
-neither is scanning far enough for it to matter. That is the price paid here, and
-it is paid deliberately: a 10% constant against an unbounded worst case. A churn
-benchmark that reuses its holes immediately never leaves the regime where the
-vector wins — so this is a bound being bought, not a speedup being claimed.
-
-Everything here is O(1) amortised instead:
-
-  * `bylower` and `byupper` turn coalescing into two dictionary lookups, where
-    the vector needed a binary search and a shift.
-  * `bins[k]` holds the LOWER of every free span whose length falls in
-    `[2^(k-1), 2^k)`, so a fit is found by taking an entry out of a high enough
-    bin rather than by searching for one.
-  * `slot` records where each span sits inside its bin, which is what makes
-    removing it a swap-with-last instead of a scan.
-
-Scanning bins upward from the request's own bin also changes the fit policy
-from first to approximate-best, which is the better default here: it leaves the
-large spans intact for the requests that need them.
+The unused spans of one block, indexed by start (`bylower`), by end (`byupper`)
+and by size class (`bins[k]` holds the starts of spans with length in
+`[2^(k-1), 2^k)`, `slot` their index there), so carving and coalescing are O(1)
+amortised. A sorted span vector is about 10% faster below ~350 free spans but
+O(free spans) per operation, with no bound once the pool serves general
+allocation. Searching bins upward gives approximate best fit, which keeps long
+spans whole.
 """
 struct FreeSpans
     bylower::Dict{Int,Int}          # span start  => span end
@@ -168,11 +83,8 @@ FreeSpans() = FreeSpans(Dict{Int,Int}(), Dict{Int,Int}(),
 @inline binof(n::Int) = n <= 0 ? 1 : NBINS - leading_zeros(n)
 
 """
-The lowest bin every one of whose spans is at least `n` long.
-
-The point of the distinction: from `binceil(n)` upward, *any* entry fits and can
-be taken without looking at it. `binof(n)` itself straddles `n`, so its entries
-have to be checked — which is what the bounded scan in [`carve!`](@ref) does.
+The lowest bin whose spans are all at least `n` long. From here up any entry
+fits unchecked; `binof(n)` straddles `n`, so [`carve!`](@ref) scans it.
 """
 @inline binceil(n::Int) = n <= 1 ? 1 : binof(n - 1) + 1
 
@@ -190,8 +102,7 @@ end
     hi = fs.bylower[lo]
     v = fs.bins[binof(hi - lo)]
     i = fs.slot[lo]
-    # Swap-with-last: the bin is a bag, so order carries no meaning and moving
-    # the tail entry into the hole costs one slot update instead of a memmove.
+    # Swap-with-last: a bin is unordered, so removal is O(1).
     last = v[end]
     v[i] = last
     fs.slot[last] = i
@@ -203,19 +114,11 @@ end
 end
 
 """
-One raw allocation, which parts of it are unused, and which parts are out on
-loan.
-
-`live` is the exact set of regions [`carve!`](@ref) has handed out and
-[`release!`](@ref) has not taken back — offset to end, one entry each. It is
-what makes a bad release an error rather than corruption, and it is a stronger
-check than the free list can give on its own: with spans coalescing, a region
-that has already been merged into a neighbour leaves no trace in the free list
-to recognise, so releasing it twice would quietly hand the same bytes out again.
-
-`lock` is per block rather than per pool because [`release!`](@ref) takes no
-pool: a `Region` knows only its block. The order, wherever both are held, is
-pool then block, and never the reverse.
+One raw allocation, its free spans, and `live`: offset => end of every region
+[`carve!`](@ref) handed out and [`release!`](@ref) has not taken back. `live`
+turns a double release into an error; coalescing leaves no trace of it in the
+free list. `lock` is per block because `release!` gets only the region. Lock
+order where both are held: pool, then block.
 """
 mutable struct Block
     memory::Any
@@ -231,10 +134,8 @@ Block(memory, bytes::Int, kind, constraint) =
           addspan!(FreeSpans(), 0, bytes), Dict{Int,Int}(), ReentrantLock())
 
 """
-A slice of a block, held by whoever asked for it.
-
-`offset` is what `materialize!` needs — a transient's own offset from `Place` is
-relative to the region, and the two add.
+A slice of a block. A transient's offset from `Place` is relative to the region,
+so `offset(region)` is added for `materialize!`.
 """
 struct Region
     block::Block
@@ -245,22 +146,11 @@ Base.length(r::Region) = length(r.span)
 memoryof(r::Region) = r.block.memory
 
 """
-One arena's shared bytes, and the plans placed in them.
-
-**Every tenant starts at offset 0**, so two plans on one device alias each other
-by construction and the arena is sized to the LARGEST of them rather than to
-their total. That is the whole reason a device owns its arenas: two plans that
-each acquired their own region could never share, whatever the placer did inside
-either one. Measured on SAM 2 and MatAnyone, whose scratch never coexists.
-
-Two things make the overlap safe, and neither is here. Ordering is one barrier at
-the head of a recording when the arena has more than one live tenant — the
-backend emits it, because only the backend has a command stream. Data lifetime is
-the caller's: a plan's transients are gone the moment another tenant runs, which
-is the same rule that already governs two runs of one plan.
-
-`tenants` is weak. A plan nobody holds is a plan nobody can run, so it neither
-keeps its graph alive nor needs remapping.
+One arena's shared region and the plans placed in it. Every tenant starts at
+offset 0, so the arena is sized to its largest tenant, not their sum. Safe
+because every recording opens with a global barrier (emitted by the backend)
+and a plan's transients are dead once another tenant runs. `tenants` is weak: a
+plan nobody holds cannot run and needs no remap.
 """
 mutable struct Arena
     region::Union{Nothing,Region}
@@ -285,41 +175,25 @@ end
 """
     remap!(tenant, kind, region)
 
-Re-materialise a tenant's transients of arena `kind` into its new region.
-
-`kind` because a tenant is usually placed in more than one arena — buffers and
-images are separate allocations — and only one of them moved.
-
-Called only when an arena actually grew. A tenant keeps the offsets its own
-placement produced — those are unaffected by the arena moving underneath — so
-this rebinds storage and touches nothing the compiler decided.
+Rebind a tenant's transients of arena `kind` to `region` after that arena grew.
+The tenant's own offsets stay valid, so nothing recompiles. `kind` because a
+tenant usually spans several arenas and only one moved.
 """
 function remap! end
 
 """
     remappable(tenant) -> Bool
 
-Whether this tenant can survive its arena moving. `true` unless it says otherwise.
-
-The one thing a tenant knows that the pool cannot: a plan whose commands have
-been written once and are submitted again every run (`record!`) holds the
-addresses the old region had, and nothing can rewrite a command buffer.
-Re-materialising underneath it produces a run that reads freed storage —
-deterministic, quiet, and wrong, which is the worst of the three.
-
-So growth asks first and refuses, rather than discovering it later. Asked of
-every live tenant, not of the one growing: it is the INCUMBENT that cannot move.
+Whether `tenant` survives its arena moving; `true` by default. A recorded plan
+does not: its commands hold the old region's addresses and a replay would
+silently read freed storage. Growth asks every live tenant before moving.
 """
 remappable(x) = true
 
-# What a finalizer hands the pool: a lock-free stack, pushed with one CAS.
-#
-# A finalizer may not wait, and `lock` on a contended `ReentrantLock` waits by
-# switching tasks, which Julia refuses inside one ("task switch not allowed from
-# inside gc finalizer"): the push was dropped and the region or plan leaked. The
-# lock is contended whenever a finalizer runs on one task while another holds it
-# across a yield, which `reclaim!(; wait = true)` does while it waits for the
-# device. `reclaim!` takes the whole stack at once, on the owning thread.
+# Lock-free stack a finalizer pushes onto with one CAS. A finalizer cannot wait
+# on a contended `ReentrantLock` ("task switch not allowed from inside gc
+# finalizer"), and `reclaim!(; wait = true)` holds the pool lock across a yield.
+# `reclaim!` takes the whole stack on the owning thread.
 mutable struct InboxNode
     item::Any
     next::Union{Nothing,InboxNode}
@@ -346,45 +220,24 @@ takeall!(ib::Inbox) = @atomicswap ib.head = nothing
 """
     PoolPolicy()
 
-When a pool trims and collects BY ITSELF, without being asked: configuration, one
-per pool, read and changed as `pool(dev).policy.trim_threshold = …`.
+When a pool trims and collects on its own. One per pool, changed as
+`pool(dev).policy.trim_threshold = …`.
 
-  * `trim_threshold`: bytes the pool may reserve before empty blocks are handed
-    back on their own ([`autotrim!`](@ref)). 1 GiB.
+  * `trim_threshold`: reserved bytes above which [`autotrim!`](@ref) returns
+    empty blocks. 1 GiB.
   * `trim_min_interval`: seconds between two such trims. 5.
-  * `trim_full_gc_interval`: seconds between two FULL collections a trim may run
-    to find an empty block, when the incremental one found none. 30.
-  * `soft_cap`: reserved bytes past which an allocation collects before the pool
-    grows ([`autocollect!`](@ref)); `0` never does. 2 GiB.
+  * `trim_full_gc_interval`: seconds between two full collections a trim may run
+    when the incremental one found no empty block. 30.
+  * `soft_cap`: reserved bytes above which an allocation collects before the
+    pool grows ([`autocollect!`](@ref)); `0` disables it. 2 GiB.
   * `gc_mingap`, `gc_full_mingap`: seconds between two such collections, and
     between two full ones. 0.02 and 0.5.
-  * `gc_budget`: the share of wall time those collections may take. 0.05.
+  * `gc_budget`: share of wall time those collections may take. 0.05.
 
-The rest is when each last ran and what it cost, which is what the intervals and
-the budget are measured against.
-
-Two mechanisms because they answer two problems. Trimming hands device memory
-back and needs the queue drained, so it is rare and gated by elapsed time: it is
-what stops a finished workload from holding memory the rest of the machine needs
-(a 5-scene sweep on an iGPU sharing system RAM hit a driver timeout without it).
-Collecting before growth reuses what is dead and uncollected and touches no
-driver, so it can run on the allocation path: SAM 2's encoder ran to 16 136 MiB
-across 200 blocks with nothing asking the collector, and holds its working set
-with the cap.
-
-The defaults were Vulkan's `MemoryPolicy`, measured there. 2 GiB is where SAM 2's
-encoder stops caring (blocks / VRAM / p50 / min):
-
-    3.00 GiB   48   4615 MB   340.2   332.2
-    2.00 GiB   32   3541 MB   339.8   328.8     <- same speed, 1 GiB less
-    1.50 GiB   30   3407 MB   374.0   347.9     <- 10% slower for 134 MB
-    1.25 GiB   30   3407 MB   375.4   356.3
-
-The graph's own live set is 26 blocks, so a cap below ~30 leaves nothing to
-collect and every allocation past it pays for a collection and grows anyway. The
-5% budget is what RIFE at 1920x1152 needed: its steady state is 2094.6 MiB against
-the 2048 MiB cap, and spaced by `gc_mingap` alone six collections a run turned
-142 ms of work into a p50 of 519 ms with a spread out to 912.
+The other fields record when each last ran and what it cost. Trimming returns
+memory to the device and drains the queue, so it is time-gated; collecting
+before growth touches no driver, so it runs on the allocation path. At 2 GiB
+SAM 2's encoder runs as fast as with a 3 GiB cap.
 """
 mutable struct PoolPolicy
     trim_threshold::Int
@@ -397,8 +250,7 @@ mutable struct PoolPolicy
     last_trim::Float64
     gc_last::Float64
     gc_full_last::Float64
-    # What the last collection cost, in seconds: the gap after it is this over
-    # `gc_budget`, which is what bounds the share of the clock collections take.
+    # Seconds the last collection took; the next gap is this over `gc_budget`.
     gc_lastcost::Float64
     gc_seconds::Float64
     gc_count::Int
@@ -408,59 +260,31 @@ PoolPolicy() = PoolPolicy(1 << 30, 5.0, 30.0, 2 << 30, 0.02, 0.5, 0.05,
                           0.0, 0.0, 0.0, 0.0, 0.0, 0, Threads.Atomic{Bool}(false))
 
 """
-Blocks per arena kind, and the shared arena each kind is placed into.
-
-Growth ADDS a block; it never reallocates an existing one. That is the whole
-reason for a list: a plan holding offsets into a block must not have the ground
-move under it because another plan needed more room. An ARENA can still outgrow
-its region — a later, larger tenant — and that is what `remap!` is for; the block
-list is what makes the new region a fresh carve rather than a reallocation of
-memory somebody still points into.
+Blocks per arena kind, and the shared arena of each kind. Growth adds a block
+and never reallocates one, so offsets into existing blocks stay valid. An arena
+that outgrows its region gets a fresh carve and [`remap!`](@ref).
 """
 struct Pool
     blocks::Dict{Any,Vector{Block}}
     arenas::Dict{Any,Arena}
-    # Regions handed back from a context that must not touch a free list, and
-    # the same regions once stamped with a fence. See `retire!` / `reclaim!`.
-    #
-    # PARALLEL vectors, and the fences CONCRETE. One
-    # `Vector{Tuple{Region,Any}}` — `Any` because a fence is documented as
-    # opaque — has a boxed field in every element, so
-    # `reclaim!` paid a boxed read and a boxed write for each entry it KEPT. That
-    # walk runs on every `run!`, over everything the device has not finished with:
-    # measured through RayMakie with four dropped screens' worth in the list, 1200
-    # allocations and 48 KB a frame, on a frame whose own cost is 240 bytes.
-    #
-    # `UInt64` and not a type parameter on `Pool`, which is the other way to make
-    # it concrete: `LavaDevice` and `MetalDevice` hold their pool by value, and a
-    # `Pool{F}` field would be abstract in both unless the parameter cascaded into
-    # the device types too — churn for a property the element type already gives.
-    # What it costs instead is a narrower contract, and `fence` below now states
-    # it: a fence IS a monotone `UInt64`. Both real backends already mint one (a
-    # timeline-semaphore value on Vulkan, a retirement counter on Metal), and a
-    # backend with nothing to count says so with zero.
+    # Regions retired from a finalizer (`pending`), then stamped with a fence
+    # (`retiring`, `retiring_at`); see `retire!` and `reclaim!`. Parallel
+    # vectors with concrete `UInt64` fences so the per-run walk does not box;
+    # a type parameter on `Pool` would cascade into the device types.
     pending::Inbox
     retiring::Vector{Region}
     retiring_at::Vector{UInt64}
-    # The plans whose recordings hold device addresses, so a resource that
-    # MOVES (`resize!`, an arena growing) can patch their argument memory
-    # instead of invalidating them — see `notify_move!`. Registered by
-    # `record!`, dropped by `free!` and by the recording going away. Weak, like
-    # an arena's tenants: a plan nobody holds cannot run.
+    # Recorded plans whose argument memory holds device addresses, so a moving
+    # resource patches them (`notify_move!`). Added by `record!`, removed by
+    # `free!` and when the recording is dropped. Weak.
     movelisteners::Vector{WeakRef}
-    # Bumped whenever a BLOCK is created or destroyed, so a caller that caches
-    # something derived from the block list can tell in one comparison whether its
-    # cache is stale. Metal's recorded replay is the caller: the commands reach
-    # every resource by address, so the frame has to declare the blocks to its
-    # encoder, and counting them under this lock every frame is the scanning this
-    # codebase does not do. Nothing else about the pool changes it — a region
-    # acquired or released inside an existing block does not move any block.
+    # Bumped when a block is created or destroyed, so a cache derived from the
+    # block list (Metal's recorded replay) checks staleness in one comparison.
+    # Regions acquired or released inside existing blocks do not bump it.
     blockgen::Base.RefValue{Int}
-    # Plans dropped without a `free!`, waiting for a thread that may tear one
-    # down. A plan's teardown is NOT finalizer-safe — it unlistens from
-    # `movelisteners` and destroys a command buffer — so its finalizer pushes
-    # here, which is the same trade `pending` makes for regions: the GC thread
-    # says what is no longer wanted and the owning thread decides when.
+    # Plans dropped without `free!`. Their teardown is not finalizer-safe (it
+    # unlistens from `movelisteners` and destroys a command buffer), so the
+    # finalizer pushes here and `reclaim!` frees them on the owning thread.
     pendingplans::Inbox
     lock::ReentrantLock
     # When this pool trims and collects by itself; see `PoolPolicy`.
@@ -483,17 +307,9 @@ arenaof(p::Pool, kind) = get!(Arena, p.arenas, kind)
 """
     movable(pool) -> Bool
 
-Whether every live tenant of every arena could survive its memory moving.
-
-`false` means a plan somewhere has been recorded: its command buffer holds the
-addresses its regions have today, and nothing can rewrite a command buffer.
-`growarena!` asks this of ONE arena before growing it; the block trim asks it of
-the whole pool before destroying a buffer, which is the same hazard with no arena
-to name it against.
-
-Not "is a capture open" (`bq.capturing !== nothing`), which is a different
-question: that is true only while `bake!` runs, so a recording already taken
-pins nothing and the trim is free to destroy a block it names.
+Whether every live tenant of every arena survives its memory moving. `false`
+once any plan holds a recording, whose commands name the current blocks; the
+automatic and pressure trims refuse to run then.
 """
 movable(p::Pool) =
     all(a -> all(wr -> remappable(wr.value), tenants!(a)), values(p.arenas))
@@ -509,20 +325,14 @@ reserved(p::Pool, kind) = sum(b -> b.bytes, get(p.blocks, kind, Block[]); init =
 """
     largestfree(pool, kind) -> Int
 
-The biggest span any existing block of `kind` could still hand out.
-
-What makes the capacity bound TIGHT rather than merely safe: a request this size
-or smaller reaches no device allocation at all, so bounding it by what the device
-has left would refuse a placement that costs nothing. Compatibility is not
-consulted — this is a bound, and an over-estimate here can only be corrected by
-`acquire!` going on to allocate, which the bound has already been checked against.
+The longest free span in any block of `kind`. A request this size or smaller
+needs no device allocation. Ignores compatibility, so it is an upper bound.
 """
 function largestfree(p::Pool, kind)
     best = 0
     for b in blocksof(p, kind)
         lock(b.lock) do
-            # Only the highest occupied bin can hold the winner: every span in
-            # bin k is shorter than every span in bin k+1, by construction.
+            # Only the highest non-empty bin can hold the longest span.
             for k in NBINS:-1:1
                 v = b.free.bins[k]
                 isempty(v) && continue
@@ -539,14 +349,8 @@ end
 """
     headroom(pool, dev, kind) -> Int
 
-How large a single request of `kind` can still be satisfied.
-
-Two bounds and the smaller wins: what the device will hand over in one piece, and
-what is left of its budget once everything this pool already holds is subtracted
-— plus whatever an existing block could absorb without allocating at all.
-
-In core rather than in a backend because only the pool knows what it has
-reserved, and the two device facts it needs are already primitives.
+The largest single request of `kind` that can still be satisfied: the smaller
+of [`maxalloc`](@ref) and the unreserved budget plus [`largestfree`](@ref).
 """
 headroom(p::Pool, dev, kind) =
     min(maxalloc(dev), max(capacity(dev) - reserved(p), 0) + largestfree(p, kind))
@@ -554,15 +358,11 @@ headroom(p::Pool, dev, kind) =
 """
     arenaroom(pool, dev, kind) -> Int
 
-The tallest placement arena `kind` can take: the region it already has, which
-[`reserve!`](@ref) hands every tenant at offset 0, or a fresh one of what the
-device can still give.
-
-Not [`headroom`](@ref) alone, which counts the arena's own region as spent. A
-plan no taller than a sibling placed before it costs nothing, and the bound
-refused it: TRELLIS.2's texture decoder needed 2.92 GB, the arena held the 2.92
-GB its shape decoder had sized, and 232 MB was "available". A bound, like
-`largestfree`: compatibility is `reserve!`'s to settle.
+The tallest placement arena `kind` can take: its current region, which
+[`reserve!`](@ref) gives every tenant at offset 0, or [`headroom`](@ref),
+whichever is larger. `headroom` alone counts the region as spent and would
+refuse a plan no taller than an earlier tenant. An upper bound; `reserve!`
+checks compatibility.
 """
 arenaroom(p::Pool, dev, kind) = max(arenaof(p, kind).bytes, headroom(p, dev, kind))
 
@@ -570,32 +370,21 @@ arenaroom(p::Pool, dev, kind) = max(arenaof(p, kind).bytes, headroom(p, dev, kin
 alignup(from::Int, align::Int) = align <= 1 ? from : cld(from, align) * align
 
 """
-How far into a bin `carve!` looks before giving up on it.
-
-Only bins below `binceil` need looking at at all — from there up, every span is
-long enough and the first entry is taken unseen. Those lower bins straddle the
-request, so an entry may fail on alignment, and this bounds what that costs.
-
-A miss is not a wrong answer: the search moves to the next bin and eventually to
-one where everything fits, so the worst case is a block allocated that a longer
-scan would have avoided. Bounded rather than exhaustive because the alternative
-reintroduces exactly the O(n) scan this structure exists to remove.
+How many entries of a straddling bin `carve!` checks before moving up a bin. A
+miss costs at most a block a full scan would have avoided; an exhaustive scan
+would be O(free spans) again.
 """
 const BIN_SCAN = 8
 
 """
-Carve `bytes` out of `blk`, honouring `align`, or `nothing` if it does not fit.
-
-Approximate best fit: bins are searched upward from the request's own, so a
-request takes the smallest span that will hold it and the long spans stay whole
-for the requests that need them. The vector this replaced was first fit, which
-walks up a block chopping the front off whatever it meets.
+Carve `bytes` at `align` out of `blk`, or return `nothing`. Approximate best
+fit: bins are searched upward from the request's own, keeping long spans whole.
 """
 function carve!(blk::Block, bytes::Int, align::Int)
     lock(blk.lock) do
         fs = blk.free
-        # Worst case the alignment costs `align - 1` bytes of the span, so from
-        # this bin up nothing has to be examined.
+        # Alignment costs at most `align - 1` bytes, so from this bin up any
+        # entry fits.
         guaranteed = binceil(bytes + align - 1)
         for k in binof(bytes):NBINS
             v = fs.bins[k]
@@ -603,7 +392,7 @@ function carve!(blk::Block, bytes::Int, align::Int)
             if k >= guaranteed
                 return takespan!(blk, v[end], bytes, align)
             end
-            # This bin straddles the request: check entries, but not all of them.
+            # This bin straddles the request: check up to `BIN_SCAN` entries.
             for i in length(v):-1:max(1, length(v) - BIN_SCAN + 1)
                 lo = v[i]
                 start = alignup(lo, align)
@@ -620,8 +409,7 @@ function takespan!(blk::Block, lo::Int, bytes::Int, align::Int)
     fs = blk.free
     hi = dropspan!(fs, lo)
     start = alignup(lo, align)
-    # Whatever alignment skipped, and whatever is left over, go back — dropping
-    # either leaks bytes that nothing can ever hand out again.
+    # Return both the alignment gap and the remainder, or those bytes leak.
     addspan!(fs, lo, start)
     addspan!(fs, start + bytes, hi)
     blk.live[start] = start + bytes
@@ -639,21 +427,21 @@ function carveany!(pool::Pool, dev, kind, bytes::Int, align::Int, want)
 end
 
 """
-    acquire!(pool, dev, kind, transients, bytes; align) -> Region
+    acquire!(pool, dev, kind, transients, bytes; align = 256, blocksize = 64 MiB,
+             constraint, maywait = true, onpressure) -> Region
 
-`bytes` from a block that can host `transients`, growing the pool if none can.
-
-A new block is at least `bytes` and at least `blocksize`, so a run of small plans
-does not produce a device allocation each. `blocksize` is a kwarg rather than a
-constant because the right value is a device property, not a Mantle opinion.
+A private region of `bytes` from a block that can host `transients`, growing the
+pool if none can. A new block is at least `blocksize`, a device property the
+caller passes. `constraint` replaces the one derived from `transients`.
+`maywait = false` (inside an open recording) never waits for the device and
+skips the pressure steps; `onpressure` replaces [`makeroom!`](@ref).
 """
 function acquire!(pool::Pool, dev, kind, transients, bytes::Int;
                   align::Int = 256, blocksize::Int = 64 << 20, constraint = nothing,
                   maywait::Bool = true, onpressure = nothing)
     refuseretired(dev)
     bytes = max(bytes, 1)
-    # `constraint` given means the caller knows more than these transients do —
-    # an arena reconciling what its other tenants also need. Deriving it here
+    # A given `constraint` covers an arena's other tenants too; deriving it here
     # would size the block for this plan alone.
     want = constraint === nothing ? constraintof(dev, basekind(kind), transients) : constraint
     return underpressure(pool, dev, maywait, onpressure) do
@@ -662,24 +450,13 @@ function acquire!(pool::Pool, dev, kind, transients, bytes::Int;
 end
 
 """
-    underpressure(f, pool, dev, maywait) -> f()
+    underpressure(f, pool, dev, maywait, onpressure = nothing) -> f()
 
-`f()`, and when the device refuses it for lack of memory, the pressure steps and
-`f()` once more; a second refusal is final. See `docs/api.md`, "An allocation
-beyond the budget": out of memory is thrown only after them.
-
-The steps are [`makeroom!`](@ref): a full collection, so dropped buffers retire;
-what the device has finished with reclaimed; every empty block handed back.
-Measured on TRELLIS.2's shape decoder on a 7900 XTX that other processes held
-5.4 GB of: 15.3 GB of weights, 3.9 GB of transient blocks from earlier stages,
-and the driver's budget refused the 1.7 GB arena the plan needed with no trim
-ever tried — the pool grew straight into `rawalloc` and threw.
-
-OUTSIDE the pool's lock, which is why this wraps the locked part rather than
-sitting inside it: holding a `ReentrantLock` disables finalizers (Base's
-`_trylock`), so a collection under it retires nothing. Only where waiting is
-allowed — `makeroom!` waits, and the caller that says it may not is
-mid-recording (see `maywait` in [`carveorgrow!`](@ref)).
+Run `f()`. If the device refuses it for lack of memory and `maywait` is true,
+run the pressure steps (`onpressure()`, default [`makeroom!`](@ref)) and `f()`
+once more; a second refusal is final (docs/api.md, "An allocation beyond the
+budget"). Must run outside the pool's lock: holding a `ReentrantLock` disables
+finalizers, so a collection under it retires nothing.
 """
 function underpressure(f, pool::Pool, dev, maywait::Bool, onpressure = nothing)
     try
@@ -694,29 +471,16 @@ end
 """
     carveorgrow!(pool, dev, kind, bytes, align, blocksize, want, maywait) -> Region
 
-[`acquire!`](@ref)'s attempt under the pool's lock: carve, reclaim and carve,
-wait and carve, then grow. An out-of-memory propagates; [`underpressure`](@ref)
-decides what it means.
+[`acquire!`](@ref)'s locked attempt: carve; reclaim and carve; wait, reclaim and
+carve; then allocate a block. Out-of-memory propagates to [`underpressure`](@ref).
 """
 function carveorgrow!(pool::Pool, dev, kind, bytes::Int, align::Int, blocksize::Int,
                       want, maywait::Bool)
-    # Three attempts before the device is asked for anything, and the last two
-    # are why `free!` can be deferred without a rebuild doubling peak memory.
-    # Bytes a caller just gave back are RETIRED, not free: they are waiting on
-    # work the device may already have finished. Growing while they sit there is
-    # exactly the growth a pool exists to prevent — so try, take back what the
-    # device is done with, try again, wait for what it has already been given,
-    # try once more.
-    #
-    # `wait = true` cannot block for ever: `waitfor` declines a fence whose work
-    # has not been submitted, so the worst case is this falls through and grows,
-    # which is what it would have done anyway.
-    #
-    # Under the pool lock for the whole body, `blocksof` included: two threads
-    # allocating would otherwise walk and `push!` the same block vector, which
-    # is a `ConcurrencyViolationError`. `ReentrantLock`, so `reclaim!` re-entering from
-    # this thread is fine — and so is a finalizer landing here, which reaches
-    # only `retire!` and touches `pending` rather than any block.
+    # Retired bytes may already be done on the device, so reclaiming before
+    # growing keeps a deferred `free!` from doubling peak memory. `wait = true`
+    # cannot block forever: `waitfor` declines unsubmitted work. The lock also
+    # covers `blocksof`, since two allocating threads would `push!` the same
+    # vector; it is reentrant, so `reclaim!` can take it again.
     lock(pool.lock) do
         r = carveany!(pool, dev, kind, bytes, align, want)
         r === nothing || return r
@@ -724,15 +488,9 @@ function carveorgrow!(pool::Pool, dev, kind, bytes::Int, align::Int, blocksize::
             r = carveany!(pool, dev, kind, bytes, align, want)
             r === nothing || return r
         end
-        # `maywait = false` skips the WAITING reclaim, and the caller that asks
-        # for it is `scratch!` — argument bytes for a recording that is OPEN.
-        # Waiting sweeps completed submissions, and a sweep RELEASES recordings,
-        # and releasing pops the channel's top hold frame — which is the open
-        # recording's, because the frame stack is positional. The caller's next
-        # `hold!` then finds an empty stack and throws `no recording is open on
-        # this channel`, from inside a frame, having allocated successfully.
-        # Growing instead is what the branch below does anyway, and it is what
-        # this would have fallen through to had the wait found nothing.
+        # `maywait = false` comes from `scratch!`, inside an open recording. A
+        # waiting reclaim sweeps completed submissions, which pops the channel's
+        # top hold frame (the open recording's), and its next `hold!` throws.
         if maywait && reclaim!(pool, dev; wait = true) > 0
             r = carveany!(pool, dev, kind, bytes, align, want)
             r === nothing || return r
@@ -753,22 +511,18 @@ function carveorgrow!(pool::Pool, dev, kind, bytes::Int, align::Int, blocksize::
 end
 
 """
-Give a region back, merging it with any neighbouring free space.
+    release!(r::Region)
 
-Coalescing here rather than at acquire time is what keeps a plan that recompiles
-at the same size from walking up the block: release then acquire finds the span
-it just gave back, whole.
+Give a region back and coalesce it with its free neighbours, so a plan
+recompiled at the same size gets its span back whole. Throws for a region that
+is not live: released twice, or outlived its block.
 """
 function release!(r::Region)
     blk = r.block
     lock(blk.lock) do
         lo, hi = r.span.lower, r.span.upper
-        # Checked against what was HANDED OUT, not against the free list. A
-        # double release is silent otherwise — the span goes back twice, two
-        # later `acquire!`s return the same bytes, and the corruption surfaces
-        # nowhere near here. The free list cannot see it either: coalescing
-        # dissolves a released span into its neighbours, so by the time the
-        # second release arrives there is nothing left that looks like it.
+        # Checked against `live`: a double release would hand the same bytes
+        # out twice, and coalescing leaves nothing in the free list to check.
         held = get(blk.live, lo, -1)
         held == hi || error(
             "release!: $(r.span) was not handed out by this block — " *
@@ -777,8 +531,7 @@ function release!(r::Region)
              "outlived the block it came from" :
              "the live region at $lo ends at $held, not $hi"))
         delete!(blk.live, lo)
-        # Coalesce with the span ending where this one starts, and the one
-        # starting where it ends. Two lookups; at most two joins per release.
+        # Join the span ending at `lo` and the span starting at `hi`.
         fs = blk.free
         p = get(fs.byupper, lo, -1)
         p == -1 || (dropspan!(fs, p); lo = p)
@@ -791,114 +544,60 @@ end
 """
     fence(dev) -> UInt64
 
-A stand-in for "everything submitted to `dev` up to now", as a monotone counter.
-
-`UInt64` rather than anything a backend likes, and the narrowing is deliberate:
-`reclaim!` keeps one of these per retired region and walks them every frame, so
-the type is what decides whether that walk allocates (see `Pool.retiring_at`).
-Both real backends already mint a counter — a timeline-semaphore value on Vulkan,
-a retirement count on Metal — and core only ever hands it back to [`passed`](@ref),
-which compares. A backend whose work is synchronous has nothing to count and
-answers zero, which `passed` then ignores.
+A monotone counter standing for everything submitted to `dev` so far (Vulkan: a
+timeline-semaphore value, Metal: a retirement count). Core only hands it to
+[`passed`](@ref) and [`waitfor`](@ref). `UInt64` so `reclaim!`'s per-run walk
+does not allocate. A backend with nothing to count returns zero.
 """
 function fence end
 
 """
     passed(dev, f) -> Bool
 
-Has `dev` finished everything that [`fence`](@ref) stood for?
-
-The one question that decides whether a retired region can go back on a free
-list, and the reason [`reclaim!`](@ref) is two-phase.
+Whether `dev` has finished everything the [`fence`](@ref) value `f` stands for.
 """
 function passed end
 
 """
     waitfor(dev, f) -> Bool
 
-Block until [`passed`](@ref)`(dev, f)`, and say whether that happened.
-
-**Returns `false` rather than waiting when `f` names work that has not been
-submitted yet**, which is the whole subtlety. A fence taken while a command
-buffer was open stands for a value only that buffer's submission will signal, and
-nothing here can make that happen — an allocator that forced a submit to collect
-its own memory would cut a recording in half to do it. So it declines, and the
-caller grows the pool instead. Rare, because `run!` reclaims at its head, by
-which point the previous frame is submitted.
-
-The counterpart of that rule: this NEVER submits, flushes, or otherwise advances
-the device. It only waits for what is already on its way.
+Block until [`passed`](@ref)`(dev, f)` and return whether it did. Returns
+`false` without waiting when `f` names work not yet submitted: forcing a submit
+would split an open recording, so the caller grows the pool instead. Never
+submits or flushes.
 """
 function waitfor end
 
 """
     retire!(pool, dev, r::Region)
 
-Give a region back from a context that must not touch a free list — a finalizer,
-which runs on whatever thread the GC picks.
-
-`dev` is taken and not derived, for the same reason [`reclaim!`](@ref) takes it:
-a `Pool` does not know its device (a device holds its pool by value, so the back
-reference would be circular), and a backend method on this verb needs one. The
-Metal backend's `retire!(::Pool, ::MTLBuffer)` reached `Device(MetalAPI())` — a
-process global — from inside a function that had been handed the pool, so on a
-second device the destroy was ordered against the wrong queue's completion and
-the bytes came back while a reader still named them. That is the failure
-`vulkan/runtime/coretypes.jl` records having already paid for once.
-
-Pushes onto a lock-free stack and does nothing else: a finalizer may not take a
-lock (see `Inbox`). [`release!`](@ref) inserts into a
-block's free list and coalesces its neighbours; a GC thread doing that while
-another `acquire!`s is the bug [`trim!`](@ref) describes below, which Lava has
-already paid for once with a `ConcurrencyViolationError` and then a SIGSEGV.
-
-The release itself is [`reclaim!`](@ref), from the owning thread. So this is not
-"free from a finalizer" — the finalizer never frees, it only says what is no
-longer wanted, and something on the owning thread decides when that is safe.
+Give a region back from a finalizer: push it onto a lock-free stack and nothing
+else, since a finalizer must not take a lock or touch a free list another thread
+is carving. [`reclaim!`](@ref) releases it on the owning thread once the device
+is done. `dev` is passed because a `Pool` does not know its device, and a
+backend method must order against that device's queue.
 """
 retire!(p::Pool, dev, r::Region) = (push!(p.pending, r); nothing)
 
 """
-    reclaim!(pool, dev) -> Int
+    reclaim!(pool, dev; wait = false) -> Int
 
-Release every retired region the device has finished with, and return how many.
-
-**Two phases, and the delay between them is the point.** A resource nobody holds
-cannot be named by work recorded AFTER it was dropped, but work recorded BEFORE
-it may still be in flight — and a finalizer is in no position to ask a queue
-about that. So the first call that sees a region only stamps it with
-[`fence`](@ref), taken here on the owning thread; a later call releases it once
-[`passed`](@ref) says the device is through. One full submission boundary between
-the drop and the release, with the GC thread never asking the device anything.
-
-Cheap and idempotent, so a renderer can call it every frame; it is a no-op when
-nothing has been dropped.
-
-Regions only. A backend array the GC collected goes back through the channel
-that last named it (`retire!(ch, obj)`), because only a channel knows whether a
-recording that has not been submitted yet still names it; [`waitidle`](@ref)
-drains those, and [`makeroom!`](@ref) does both.
-
-`wait = true` additionally blocks on whatever the device has already been given,
-via [`waitfor`](@ref). That is what [`acquire!`](@ref) does before it grows the
-pool, and it is the only place in Mantle that waits for the device at all —
-which is the point: a caller never has to know what is in flight, because the
-one piece of code that needs the bytes does.
+Release every retired region the device has finished with; return how many.
+Two phases: the first call to see a region stamps it with [`fence`](@ref), and a
+later call releases it once [`passed`](@ref), since work recorded before the
+drop may still be in flight. Also frees plans dropped without `free!`. Cheap
+and idempotent, so callable every frame. Backend arrays go back through their
+channel instead (`retire!(ch, obj)`). `wait = true` also blocks on submitted
+work via [`waitfor`](@ref); [`acquire!`](@ref) uses it before growing.
 """
 function reclaim!(p::Pool, dev; wait::Bool = false)
-    # The whole body, not just the `pending` swap. `retiring` was reached
-    # unlocked on the assumption that only the owning thread gets here, and
-    # `acquire!` — which is now on every allocating thread — calls this.
-    # Re-entrant, so `acquire!` already holding it costs nothing.
-    #
-    # Explicit lock/try/unlock rather than `lock do`: the closure cost 224
-    # bytes per call, and this runs in `run!` — which allocates nothing.
+    # Locked throughout: `acquire!` calls this from any allocating thread.
+    # Explicit lock/try/unlock: a `lock() do` closure allocates 224 bytes per
+    # call, and `run!` must not allocate.
     lock(p.lock)
     try
-        # Plans first: tearing one down retires ITS regions, so doing it here
-        # means they join this same pass rather than waiting for the next one.
-        # `free!` is idempotent, so a plan that was explicitly freed and then
-        # collected costs a flag read.
+        # Plans first: tearing one down retires its regions into this pass.
+        # `free!` is idempotent.
         node = takeall!(p.pendingplans)
         while node !== nothing
             free!(node.item)
@@ -913,18 +612,9 @@ function reclaim!(p::Pool, dev; wait::Bool = false)
                 node = node.next
             end
         end
-        # A PREFIX, and the loop stops at the first entry that has not passed.
-        #
-        # `retiring_at` is sorted by construction — `fence` is monotone and every
-        # entry is appended with the value it had when the region was stamped — so
-        # the entries the device is through with are a prefix, and the first one
-        # that fails ends the question for all of them. A frame that releases
-        # nothing therefore asks `passed` ONCE, whatever is waiting behind it.
-        #
-        # Not a walk over the whole list: with four dropped screens' worth of
-        # regions in it — 600, and on a backend whose timeline advances only on
-        # an explicit wait they stay — every still frame would pay 600
-        # comparisons to rediscover there is nothing to do.
+        # `retiring_at` is sorted (`fence` is monotone, entries are appended),
+        # so finished entries form a prefix and the first unfinished one ends
+        # the loop: an idle frame asks `passed` once.
         freed = 0
         n = length(p.retiring)
         while freed < n
@@ -962,8 +652,7 @@ function withcollection(f, p::PoolPolicy)
     end
 end
 
-# A pressure collection has already run. Return its dead capacity without
-# starting another full collection through the explicit reclamation path.
+# After a pressure collection: return what it freed without another full one.
 function trimcollected!(pool::Pool, dev)
     movable(pool) || return false
     return withcollection(pool.policy) do
@@ -1007,14 +696,11 @@ end
 """
     makeroom!(pool, dev) -> pool
 
-Release submission holds by flushing first, then collect the dropped owners,
-reclaim retired objects and regions, and trim empty blocks. Refused while a
-recording pins the pool. What a placement that does not fit tries before it gives up.
-
-The flush is what frees an upload's staging: those bytes belong to the one-shot
-that copies out of them and go back when the channel sweeps it, which nothing
-else here does. A 175 MB staging region kept its 1.77 GB block alive through
-the trim, and the placement that asked for room was refused.
+Flush to release submission holds, run a full collection, reclaim retired
+objects and regions, and trim empty blocks. What a placement that does not fit
+tries before giving up; refused while a recording pins the pool
+([`movable`](@ref)). The flush matters: an upload's staging region returns only
+when the channel sweeps its one-shot, and can keep a whole block alive.
 """
 function makeroom!(pool::Pool, dev)
     return makeroom!(() -> quiesce_pool!(pool, dev), pool, dev)
@@ -1037,24 +723,13 @@ end
 """
     autotrim!(pool, dev) -> Bool
 
-The trim a pool runs by itself, on an allocation: [`makeroom!`](@ref), but only
-when the pool holds more than `policy.trim_threshold`, at most every
-`policy.trim_min_interval` seconds, and only when something can come back. Says
-whether it ran. Refused while a plan holds a recording ([`movable`](@ref)): its
-command buffer names the blocks a trim would destroy.
-
-A region is returned to its block by a **finalizer**, so a block only becomes
-empty once those have run — and an incremental collection sweeps the young
-generation and leaves older objects, which a region that has survived a few
-frames is. So the incremental collection alone almost never found anything and
-the trim almost never fired: the pool ratcheted up to its transient high-water
-mark and stayed there. Measured on SAM 2.1: encode then 20 decodes reached
-2 096 MiB with two empty 64 MiB blocks no automatic path would return; a full
-collection and a trim handed back 128 MiB. So it escalates: the cheap collection
-first, and when that finds nothing, a full one — on its own, longer, timer
-(`policy.trim_full_gc_interval`), because a full collection is tens of
-milliseconds on a heap this size and a render loop must not pay it every five
-seconds.
+[`makeroom!`](@ref) run on an allocation: only above `policy.trim_threshold`,
+at most every `policy.trim_min_interval` seconds, only when something can come
+back, and never while a plan holds a recording ([`movable`](@ref)). Returns
+whether it trimmed. Regions return to their block through finalizers, and an
+incremental collection misses regions that survived a few frames, so when it
+finds nothing a full collection runs, at most every
+`policy.trim_full_gc_interval` seconds because it costs tens of milliseconds.
 """
 function autotrim!(pool::Pool, dev)
     p = pool.policy
@@ -1085,17 +760,10 @@ end
 """
     reclaimable(pool, dev) -> Bool
 
-Whether the automatic trim could hand anything back without waiting for the
-device: a block with nothing live in it once what the device is through with has
-been released ([`reclaim!`](@ref), which does not wait), or destroys the device's
-channel is holding for submissions to pass (a backend array dropped by the
-collector goes back through the channel that last named it).
-
-**This deliberately does not see the third case**, a buffer that a recording not
-yet submitted still holds: it stays retired until the hold is dropped, and only
-a flush gets there. Detecting it would make the automatic path flush whenever a
-recording is open, which for a render loop is a stall every
-`policy.trim_min_interval`. The explicit trim pays for that and this does not.
+Whether the automatic trim can return anything without waiting for the device:
+an empty block after a non-waiting [`reclaim!`](@ref), or destroys the device's
+channel holds. Does not see buffers held by an unsubmitted recording: that
+needs a flush, which would stall a render loop every trim interval.
 """
 function reclaimable(pool::Pool, dev)
     reclaim!(pool, dev)
@@ -1108,23 +776,16 @@ end
 """
     autocollect!(drain, pool; pressure = nothing, blocking = false) -> Bool
 
-A collection on the allocation path, run when the pool is past `policy.soft_cap`
-and about to grow: the memory a request needs is then far more likely dead and
-uncollected than in use. `drain()` gives back what the collection freed — a
-channel's destroys, the pool's retired regions — so the allocation after it can
-reuse the bytes. Says whether it ran.
+A collection on the allocation path, for a pool past `policy.soft_cap` that is
+about to grow or a device heap under `pressure`, followed by `drain()` to return
+what it freed. Returns whether it ran. Spaced by the larger of
+`policy.gc_mingap` and the last collection's cost over `policy.gc_budget`; a
+full collection follows at most every `policy.gc_full_mingap`.
 
-Spaced by `policy.gc_mingap`, or by what the LAST collection cost over
-`policy.gc_budget`, whichever is longer. The gap alone bounds how often and not
-what it costs: an incremental collection on a heap holding a couple of GiB of
-device arrays takes ~63 ms, so a 20 ms gap allowed three quarters of the clock
-in the allocator. A full collection joins it at most every `policy.gc_full_mingap`.
-
-`pressure` is the fraction of the device heap in use. Below 75% (50% when
-`blocking`) it does nothing. Above 90% and 95%, and when blocking, it doubles
-the budget. Heap pressure and the soft cap share this history, so one allocation
-cannot collect twice through independent rate controllers. A pressure-triggered
-collection adds the full collection only when the pool also exceeds its soft cap.
+`pressure` is the fraction of the device heap in use: below 0.75 (0.5 when
+`blocking`) nothing runs, and `blocking`, `> 0.9` and `> 0.95` each double the
+budget. Both triggers share one history so an allocation cannot collect twice.
+A pressure collection goes full only when the pool also exceeds the soft cap.
 """
 function autocollect!(drain, pool::Pool; pressure = nothing, blocking::Bool = false)
     pressure !== nothing && pressure < (blocking ? 0.5 : 0.75) && return false
@@ -1153,22 +814,19 @@ function autocollect!(drain, pool::Pool; pressure = nothing, blocking::Bool = fa
 end
 
 """
-Hand every fully-unused block back to the device.
+    trim!(pool, dev) -> pool
 
-Explicit, and never from a finalizer. Lava already learned this one: its pool
-free-list was pushed from the GC finalizer thread while another thread popped,
-which gave a `ConcurrencyViolationError` and then a SIGSEGV. A pool that frees on
-a finalizer is the same bug waiting for a different day.
+Return every block with no live region to the device. Never from a finalizer:
+a GC-thread free racing an allocating thread corrupts the block list (Lava's
+pool hit a `ConcurrencyViolationError`, then a SIGSEGV).
 """
 function trim!(pool::Pool, dev)
     lock(pool.lock) do
         for (kind, blks) in pool.blocks
             keep = Block[]
             for blk in blks
-                # "Nothing is out on loan", asked of the ledger. Asking the
-                # free list instead — one entry spanning the whole block — is
-                # the same fact only while coalescing is perfect, and makes the
-                # trim depend on the allocator's internals.
+                # Ask `live`, not the free list: they agree only while
+                # coalescing is perfect.
                 if isempty(blk.live)
                     rawfree(dev, blk.memory)
                 else
@@ -1183,75 +841,48 @@ function trim!(pool::Pool, dev)
 end
 
 """
-What a region is aligned to unless a tenant needs more.
-
-Named because two places need the same number: this is `reserve!`'s default,
-and the `Place` phase raises it to whatever its tenants ask for. Passing a
-tenant's alignment straight through would LOWER it — a Metal storage buffer
-wants 16 — and a region off its 256-byte boundary costs 19% on the ray-tracing
-benchmark.
+Default region alignment. `Place` raises it to what its tenants need and never
+lowers it (a Metal storage buffer asks for 16); a region off a 256-byte
+boundary cost 19% on the ray-tracing benchmark.
 """
 const REGION_ALIGN = 256
 
 """
     reserve!(pool, dev, kind, transients, bytes; align, blocksize) -> Region
 
-The shared region for `kind`, grown to `bytes` if a tenant now needs more.
+The shared region of arena `kind`, grown to `bytes` when a tenant needs more.
+Every tenant gets the same region, so the arena costs its largest tenant.
+`Place` reserves (transients are per-run scratch); persistent resources use
+[`acquire!`](@ref), since shared bytes would corrupt data kept between runs.
 
-This is what `acquire!` is under: `acquire!` hands out a private slice, and two
-plans that each take one can never share bytes however well either is placed.
-`reserve!` hands every tenant of an arena the SAME slice, so the arena costs the
-largest of them rather than their total.
-
-**Which of the two you get is decided by what you are allocating, never by an
-argument.** `Place` reserves, because a transient is scratch scoped to one run;
-`allocate` — and so every `Buffer` and `GPURef` — acquires, because a persistent
-resource holds data between runs and sharing its bytes would be silent
-corruption. There is deliberately no flag here to get that wrong with.
-
-Growing carves a fresh region, remaps the live tenants into it, and only then
-releases the old one — in that order, so growth never tramples the bytes it is
-copying tenants out of. Tenants keep their own offsets; nothing recompiles.
-
-The caller registers itself with [`tenant!`](@ref) once it exists, because a plan
-cannot be a tenant before it is a plan.
+Growth carves a fresh region, remaps the tenants into it, then retires the old
+one; tenants keep their offsets. The caller registers with [`tenant!`](@ref)
+once it exists.
 """
 function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
                   align::Int = REGION_ALIGN, blocksize::Int = 64 << 20)
     refuseretired(dev)
-    # The pressure steps around the LOCKED part, not inside it — see
-    # `underpressure` — so the growth below is `carveorgrow!`, which leaves an
-    # out-of-memory to this, and not `acquire!`, which would try them under the lock.
+    # Pressure steps wrap the locked part (see `underpressure`), so growth
+    # below calls `carveorgrow!`, not `acquire!`.
     underpressure(pool, dev, true) do
     lock(pool.lock) do
     a = arenaof(pool, kind)
     bytes = max(bytes, 1)
     req = constraintof(dev, basekind(kind), transients)
-    # The REGION's absence is what says nothing has been placed here yet — not the
-    # constraint's value, which a backend may legitimately leave as `nothing`.
+    # No region, not a `nothing` constraint, means no tenant yet: `nothing` is a
+    # valid backend constraint.
     want = a.region === nothing ? req : mergeconstraints(dev, basekind(kind), a.constraint, req)
-    # The fast path has to ask about the CONSTRAINT as well as the size: an
-    # arena outlives the plan that sized it, and a block created for one plan's
-    # usage bits may not permit what the next plan does with them. Skipping this
-    # is memory that works until the one transient whose bit was missing is used.
-    # `align` belongs in the fast path too, not just in `acquire!`. An arena
-    # outlives the plan that sized it, and the region it kept was aligned to
-    # whatever THAT plan asked for; handing it to a caller that needs more is a
-    # region every one of whose tenant offsets is off its boundary. The
-    # constraint check right below exists for the same reason and had the same
-    # hole.
+    # The fast path checks alignment and constraint too: the region was sized,
+    # aligned and typed for an earlier tenant.
     if a.region !== nothing && bytes <= a.bytes && offset(a.region) % align == 0 &&
        compatible(dev, a.region.block.constraint, want)
         a.constraint = want
         return a.region
     end
-    # A recorded plan's commands hold the region's addresses. For a buffers
-    # arena every one of those is a BDA in the plan's argument memory, which
-    # `notify_move!` below patches — the recording survives the growth. For an
-    # IMAGES arena the commands name the image handles themselves and there is
-    # nothing to patch: the recording is invalidated, and the next `run!`
-    # writes it again before it submits. A tenant that is not a plan has no patch table, so it still
-    # refuses — a refusal leaves the arena exactly as it was.
+    # Recorded tenants hold the region's addresses. Buffers: `notify_move!`
+    # below patches the plan's BDAs. Images: the commands name image handles,
+    # so the recording is invalidated and the next `run!` records again. Any
+    # other tenant cannot be patched and refuses; the arena stays unchanged.
     for wr in tenants!(a)
         t = wr.value
         (t === nothing || remappable(t)) && continue
@@ -1271,13 +902,11 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
     for wr in tenants!(a)
         remap!(wr.value, kind, fresh)
     end
-    # Retired, not released: the tenants were just copied OUT of these bytes by
-    # a device copy, which has been recorded rather than run.
+    # Retired, not released: the remap's copies out of these bytes are recorded,
+    # not yet executed.
     old === nothing || retire!(pool, dev, old)
-    # The recordings follow the move. Range-keyed: every address a tenant
-    # packed out of the old region shifts by the same delta. Images have no
-    # addresses to patch — their recordings were dropped above. A backend
-    # without BDA patching answers `nothing` here.
+    # Recorded addresses into the old region shift by one delta. Images were
+    # invalidated above; `notify_move!` invalidates plans it cannot patch.
     old === nothing || basekind(kind) isa Images ||
         notify_move!(pool, deviceaddress(dev, old), deviceaddress(dev, fresh), length(old))
     return fresh
@@ -1288,10 +917,8 @@ end
 """
     tenant!(pool, kind, x) -> x
 
-Register `x` as holding the arena's shared bytes, so a later grow remaps it.
-
-Idempotent: recompiling a plan re-registers the same object, and a list with it
-twice would remap it twice and count it twice in `sharing`.
+Register `x` as a tenant of arena `kind` so a later growth remaps it.
+Idempotent, since recompiling a plan registers it again.
 """
 function tenant!(pool::Pool, kind, x)
     lock(pool.lock) do
@@ -1304,11 +931,8 @@ end
 """
     untenant!(pool, dev, kind, x)
 
-Drop `x` from the arena, releasing the shared region once the last tenant goes.
-
-The counterpart of [`tenant!`](@ref), called by `free!`. Refcounting by tenant
-list rather than by a number: the list already has to be walked for `remap!`, and
-a count that disagrees with it is a leak nobody can find.
+Drop `x` from arena `kind`, retiring the region once the last tenant leaves.
+Called by `free!`. The tenant list is the refcount, so the two cannot disagree.
 """
 function untenant!(pool::Pool, dev, kind, x)
     lock(pool.lock) do
@@ -1316,10 +940,8 @@ function untenant!(pool::Pool, dev, kind, x)
     a === nothing && return nothing
     filter!(wr -> wr.value !== x && wr.value !== nothing, a.tenants)
     if isempty(a.tenants) && a.region !== nothing
-        # Retired, not released. The last tenant leaving says nothing about
-        # whether the device has finished running it — a plan freed right after
-        # its final `run!` is the ordinary case, and its recording is still in
-        # flight. This is why `free!(::Plan)` needs no precondition either.
+        # Retired, not released: the last tenant's final `run!` may still be in
+        # flight, so `free!(::Plan)` needs no precondition.
         retire!(pool, dev, a.region)
         a.region, a.bytes, a.constraint = nothing, 0, nothing
     end
@@ -1330,30 +952,19 @@ end
 """
     sharing(pool, kind) -> Bool
 
-Whether more than one live plan is placed in this arena.
-
-Nothing emits on the strength of it any more: a recording opens with a global
-barrier whoever ran last, because a cross-plan hazard cannot be derived and a
-barrier decided at record time from who ran last is wrong the moment two plans
-alternate, so the arena keeps no memory of who ran last.
+Whether more than one live plan is placed in arena `kind`. Informational only:
+every recording opens with a global barrier regardless.
 """
 sharing(pool::Pool, kind) =
     (a = get(pool.arenas, kind, nothing); a === nothing ? false : length(tenants!(a)) > 1)
 
 # ── Moves ────────────────────────────────────────────────────────────────────
 #
-# A resource that moves — a `resize!`d buffer, an arena that grew — changes a
-# device address that recorded plans have already packed into their argument
-# memory (or into a scratch region the recording owns, for the prepare kernels
-# emitted alongside the plan's dispatches). The recording itself is never
-# rewritten: the new address is written by a `cmd_update_buffer` in the next
-# run's own submission, ahead of the recording — the same route a `GPURef`
-# update takes.
-#
-# The table that makes it a lookup rather than a walk — which addresses a plan
-# holds, and at which (region, offset) — is baked at `record!` from the pack
-# itself, so a move is: find the entries in range, queue the writes, re-key.
-# Nothing is derived again and nothing is walked per run.
+# A moved resource (`resize!`, a grown arena) changes device addresses that
+# recorded plans packed into argument memory or recording-owned scratch. The
+# recording is never rewritten: the next run's submission writes the new
+# addresses ahead of it, like a `GPURef` update. Each plan's table of
+# (region, offset) per address is built at `record!`, so a move is a lookup.
 
 """Register `pl` for move notification. Called by `record!`; idempotent."""
 function listen_moves!(pool::Pool, pl)
@@ -1365,8 +976,7 @@ function listen_moves!(pool::Pool, pl)
     return nothing
 end
 
-"""Drop `pl` from move notification. Called by `free!` and when a recording is
-dropped; a plan with no recording holds no addresses worth patching."""
+"""Drop `pl` from move notification. Called by `free!` and when its recording is dropped."""
 function unlisten_moves!(pool::Pool, pl)
     lock(pool.lock) do
         filter!(wr -> wr.value !== nothing && wr.value !== pl, pool.movelisteners)
@@ -1377,66 +987,37 @@ end
 """
     deviceaddress(dev, memory) -> UInt64
 
-Where a backend allocation begins in the GPU's address space.
-
-The ONE thing core cannot work out for itself about a move, and therefore the
-whole of what a move asks a backend for: Vulkan answers `memory.address`, Metal
-`buf.gpuAddress`, and there is no third answer either could give. Everything
-built on it — which region moved, by how much, and which recorded plans hold an
-address inside it — is core's, below.
-
-It replaced `resource_moved!`/`arena_moved!`, which asked a backend to do that
-bookkeeping itself and defaulted to `nothing` when it did not. Metal never did,
-so a recorded plan quietly kept reading a resized buffer's old storage. A hook
-that can be a silent no-op and still look implemented is the shape of that bug;
-this one has a single right answer and no room for a second.
+Where a backend allocation starts in the GPU address space (Vulkan
+`memory.address`, Metal `buf.gpuAddress`). The only fact about a move core
+needs from a backend.
 """
 function deviceaddress end
 
 deviceaddress(dev, r::Region) = deviceaddress(dev, memoryof(r)) + UInt64(offset(r))
 
-# `devptroffsets!`, `devicepointeroffsets` and `notepacked!` were here, between
-# `deviceaddress` and `notify_move!`. They are what a PACKER calls, not what the
-# allocator calls, and they live in `graph/packing.jl` now, beside the rest of
-# the packing interface. `notify_move!` below is the allocator's half and stays.
-
 """
     notify_move!(pool, old_base, new_base, nbytes)
 
-The bytes `[old_base, old_base + nbytes)` moved to `new_base`. For every
-recorded plan holding an address in that range, queue a patch of each
-(region, offset) that holds it to `address + (new_base - old_base)`, and
-re-key the table so the NEXT move of the same storage still finds it.
-
-Called where the move happens — `resize!`, `reserve!` growing an arena — never
-at run time. A run only applies what this queued.
+`[old_base, old_base + nbytes)` moved to `new_base`. For each recorded plan
+holding an address in that range, queue a patch of every (region, offset) that
+holds it, and re-key the table so the next move still finds it. Plans on a
+backend without patching ([`patchable`](@ref)) are invalidated instead. Called
+where the move happens (`resize!`, `reserve!`), never at run time.
 """
 function notify_move!(pool::Pool, old_base::UInt64, new_base::UInt64, nbytes::Int)
     old_base == new_base && return nothing
-    # Collected here and invalidated AFTER the walk, not during it.
-    # `invalidate!` reaches `unlisten_moves!`, which `filter!`s the very vector
-    # being iterated — and a `filter!` mid-iteration skips whatever shifts down
-    # past the cursor. With one listener that is invisible; with several, a plan
-    # that should have been invalidated keeps a recording naming freed storage,
-    # which is the failure this path exists to prevent.
+    # Invalidated after the walk: `invalidate!` reaches `unlisten_moves!`,
+    # whose `filter!` on this vector would skip entries mid-iteration.
     drop = Any[]
     lock(pool.lock) do
         filter!(wr -> wr.value !== nothing, pool.movelisteners)
         for wr in pool.movelisteners
             pl = wr.value
-            # The `filter!` above is a SNAPSHOT, not a guarantee. A `WeakRef` may
-            # be cleared at any safepoint, and the loop below allocates — the
-            # `moved` comprehension, every `push!` — so a plan that was alive
-            # when the vector was filtered can be `nothing` by the time its turn
-            # comes. That is a `FieldError` on `nothing.graph`, thrown out of
-            # `resize!` on an unrelated buffer, with the collected plan nowhere
-            # in the backtrace. Check what was READ, not what was filtered.
+            # A `WeakRef` can clear at any safepoint and this loop allocates, so
+            # the `filter!` above does not guarantee `pl` is alive.
             pl === nothing && continue
-            # A backend whose recording cannot be rewritten gets it thrown away
-            # instead. Before this, such a plan fell through the `isempty(tab)`
-            # test below — it has no patch table, because there is nowhere for
-            # one to point — and kept running commands that named the old
-            # storage. See `patchable`.
+            # A recording that cannot be rewritten is dropped: it has no patch
+            # table and would keep naming the old storage.
             if !patchable(pl.graph.dev)
                 push!(drop, pl)
                 continue

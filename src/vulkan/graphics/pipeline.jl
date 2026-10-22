@@ -1,22 +1,18 @@
-# Graphics pipeline creation for Lava.jl
-#
-# Creates VkGraphicsPipeline using VK_KHR_dynamic_rendering (no VkRenderPass).
-# Pipeline state (blend, cull, depth, topology) configured via dispatch on config types.
-
-
-# The graphics pipeline cache is a `VkContext` field; a reset makes a new one.
+# Graphics pipelines over VK_KHR_dynamic_rendering (no VkRenderPass). Blend, cull,
+# depth and topology lower by dispatch on their config types. The pipeline cache
+# is a `VkContext` field, so a reset makes a new one.
 
 """
-    create_graphics_pipeline(vertex_spirv, fragment_spirv;
+    create_graphics_pipeline(vertex_spirv, fragment_spirv; ctx, mesh_spirv=nothing,
         blend=Opaque(), cull=CullBack(), topology=TriangleList(), depth=DepthLess(),
-        color_format=VK.FORMAT_B8G8R8A8_SRGB,
-        depth_format=VK.FORMAT_UNDEFINED, push_constant_size=8,
-        geometry_spirv=nothing, geometry_config=nothing,
-        tess_ctrl_spirv=nothing, tess_eval_spirv=nothing, tess_config=nothing,
+        color_format=VK.FORMAT_B8G8R8A8_SRGB, depth_format=VK.FORMAT_UNDEFINED,
+        push_constant_size=8, geometry_spirv=nothing, tess_ctrl_spirv=nothing,
+        tess_eval_spirv=nothing, tess_config=nothing,
         descriptor_set_layout=nothing) -> VulkanCompiledGraphicsPipeline
 
-Create a graphics pipeline from SPIR-V shader binaries.
-Uses VK_KHR_dynamic_rendering — no VkRenderPass needed.
+A dynamic-rendering graphics pipeline from SPIR-V. Exactly one of `vertex_spirv`
+and `mesh_spirv` is the front end; a mesh pipeline needs `VK_EXT_mesh_shader` and
+has no geometry or tessellation stage.
 """
 function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
                                     fragment_spirv::Vector{UInt8};
@@ -36,9 +32,7 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
                                     descriptor_set_layout::Union{Nothing, VK.DescriptorSetLayout}=nothing)
     dev = ctx.device
 
-    # A pipeline has EITHER a vertex stage or a mesh stage as its front end —
-    # the mesh stage replaces the whole vertex/geometry/tessellation chain, so
-    # the two are alternatives rather than options to combine.
+    # A mesh stage replaces the whole vertex/geometry/tessellation chain.
     (vertex_spirv === nothing) == (mesh_spirv === nothing) && throw(ArgumentError(
         "a graphics pipeline needs exactly one front end: pass `vertex_spirv` " *
         "for the classic chain, or `mesh_spirv` for a mesh pipeline. " *
@@ -53,7 +47,6 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
             "stage is what replaces them."))
     end
 
-    # Create shader modules
     frag_mod = create_shader_module(dev, fragment_spirv)
     front_mod = create_shader_module(dev, mesh_spirv === nothing ? vertex_spirv : mesh_spirv)
     front_bit = mesh_spirv === nothing ? VK.SHADER_STAGE_VERTEX_BIT : VK.SHADER_STAGE_MESH_BIT_EXT
@@ -65,7 +58,6 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
             VK.SHADER_STAGE_FRAGMENT_BIT, frag_mod, "main"),
     ]
 
-    # Optional: geometry shader
     if geometry_spirv !== nothing
         geom_mod = create_shader_module(dev, geometry_spirv)
         push!(modules, geom_mod)
@@ -73,7 +65,6 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
             VK.SHADER_STAGE_GEOMETRY_BIT, geom_mod, "main"))
     end
 
-    # Optional: tessellation shaders
     if tess_ctrl_spirv !== nothing && tess_eval_spirv !== nothing
         tc_mod = create_shader_module(dev, tess_ctrl_spirv)
         te_mod = create_shader_module(dev, tess_eval_spirv)
@@ -84,29 +75,24 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
             VK.SHADER_STAGE_TESSELLATION_EVALUATION_BIT, te_mod, "main"))
     end
 
-    # Vertex input: EMPTY (BDA vertex pulling), and absent entirely for a mesh
-    # pipeline — there is no input assembler in front of a mesh stage, so the
-    # topology comes from the shader's own `OutputTrianglesEXT` rather than from
-    # pipeline state.
+    # Empty vertex input (vertices are pulled by device address), and none for a
+    # mesh pipeline, whose topology is the shader's own `OutputTrianglesEXT`.
     vertex_input = mesh_spirv === nothing ?
         VK.PipelineVertexInputStateCreateInfo([], []) : C_NULL
     input_assembly = mesh_spirv === nothing ?
         VK.PipelineInputAssemblyStateCreateInfo(vk_topology(topology), false) : C_NULL
 
-    # Tessellation state (if applicable)
     tess_state = C_NULL
     if tess_config !== nothing
         tess_state = VK.PipelineTessellationStateCreateInfo(UInt32(tess_config.patch_vertices))
     end
 
-    # Viewport/scissor: dynamic (set via cmd_set_viewport/cmd_set_scissor)
-    # Pass dummy viewport/scissor — will be overridden by dynamic state
+    # Viewport and scissor are dynamic state; these placeholders are overridden.
     dummy_viewport = VK.Viewport(0.0f0, 0.0f0, 1.0f0, 1.0f0, 0.0f0, 1.0f0)
     dummy_scissor = VK.Rect2D(VK.Offset2D(0, 0), VK.Extent2D(1, 1))
     viewport_state = VK.PipelineViewportStateCreateInfo(;
         viewports=[dummy_viewport], scissors=[dummy_scissor])
 
-    # Rasterization
     cull_mode = vk_cull(cull)
     rasterization = VK.PipelineRasterizationStateCreateInfo(
         false, false,
@@ -117,19 +103,13 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
         cull_mode=cull_mode,
     )
 
-    # Multisampling: no MSAA
+    # No MSAA.
     multisample = VK.PipelineMultisampleStateCreateInfo(
         VK.SAMPLE_COUNT_1_BIT, false, 1.0f0, false, false)
 
-    # Depth/stencil.
-    #
-    # Whether the pipeline declares a depth attachment is a property of the RENDER
-    # TARGET, not of the depth mode: with dynamic rendering the format baked in here
-    # must equal the format of the view bound at `vkCmdBeginRendering`, and NULL
-    # there means UNDEFINED here (VUID-vkCmdDraw-pDepthAttachment-06181). Deriving
-    # it from `depth isa DepthOff` instead got both mismatches wrong — a DepthOff
-    # draw into a framebuffer that has depth, and a DepthLess draw into a window
-    # that has none — because neither combination is about the test being on.
+    # Whether the pipeline has a depth attachment follows the render target, not
+    # the depth mode: this format must equal the view bound at `vkCmdBeginRendering`,
+    # UNDEFINED for none (VUID-vkCmdDraw-pDepthAttachment-06181).
     has_depth = depth_format != VK.FORMAT_UNDEFINED
     checkdepthtarget(depth, has_depth)
     depth_enable, depth_compare = vk_depth(depth)
@@ -155,11 +135,9 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
         (0.0f0, 0.0f0, 0.0f0, 0.0f0),
     )
 
-    # Dynamic state
     dynamic_states = [VK.DYNAMIC_STATE_VIEWPORT, VK.DYNAMIC_STATE_SCISSOR]
     dynamic_state = VK.PipelineDynamicStateCreateInfo(dynamic_states)
 
-    # Pipeline layout
     all_stage_flags = front_bit | VK.SHADER_STAGE_FRAGMENT_BIT
     if geometry_spirv !== nothing
         all_stage_flags |= VK.SHADER_STAGE_GEOMETRY_BIT
@@ -182,7 +160,6 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
 
     layout = VK.PipelineLayout(dev, ds_layouts, push_ranges)
 
-    # Dynamic rendering info (Vulkan 1.3+)
     rendering_info = VK.PipelineRenderingCreateInfo(
         UInt32(0),           # view mask
         color_formats,       # color attachment formats
@@ -190,7 +167,6 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
         VK.FORMAT_UNDEFINED,  # stencil format
     )
 
-    # Create graphics pipeline (dynamic rendering — null render pass)
     gfx_flags = VK.PipelineCreateFlag(0)
     if PIPELINE_NO_COMPILE[]
         gfx_flags |= VK.PipelineCreateFlag(VK.PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) |
@@ -229,7 +205,7 @@ end
 """
     ismeshpipeline(p) -> Bool
 
-Whether `p`'s front end is a mesh stage, so a draw against it counts WORKGROUPS
+Whether `p`'s front end is a mesh stage, so a draw against it counts workgroups
 and issues `vkCmdDrawMeshTasksEXT`.
 """
 ismeshpipeline(p::VulkanCompiledGraphicsPipeline) = p.front === :mesh
@@ -241,17 +217,10 @@ and stays spellable as itself rather than as a one-element vector.
 colorformats(f::VK.Format) = [f]
 colorformats(f::AbstractVector{VK.Format}) = collect(f)
 
-# …and the portable spelling. A caller outside this backend names an attachment
-# format by its Julia element type — `RGBA{Float32}`, `BGRA{N0f8}` — because
-# that is the vocabulary `vkformat` already lowers for transient images. Funnel
-# it here so every `color_format=` keyword in this file accepts both without
-# each one needing its own conversion.
+# Julia element types (`RGBA{Float32}`, `BGRA{N0f8}`), lowered by `vkformat` as
+# for transient images, so every `color_format=` here accepts both spellings.
 colorformats(T::Type) = [vkformat(VulkanAPI(), T)]
 colorformats(ts::AbstractVector{<:Type}) = [vkformat(VulkanAPI(), T) for T in ts]
-
-
-
-# ── Pipeline State Dispatch ──
 
 vk_topology(::TriangleList)  = VK.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
 vk_topology(::TriangleStrip) = VK.PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
@@ -337,16 +306,7 @@ function vk_blend(::Premultiplied)
     )
 end
 
-# ── Draw Recording ──
-
-# `vk_draw!` is GONE. It was 178 lines that opened a render pass, transitioned
-# the attachments, bound and drew — a second implementation of what
-# `begin_pass!` + `record_draw!` already did, sharing none of it. That is why
-# it never learned mesh pipelines and why its barrier logic had to be fixed a
-# second time after `begin_pass!` was right. `Mantle.draw!` in
-# `src/graphics/record.jl` is the one path now, for both backends.
-
-"""Transition an image layout using a pipeline barrier."""
+"""Record a layout transition of `image`'s first color mip level and layer."""
 function transition_image!(cmd, image::VK.Image,
                               old_layout, new_layout,
                               src_stage, dst_stage,
@@ -363,32 +323,23 @@ function transition_image!(cmd, image::VK.Image,
         src_stage_mask=src_stage, dst_stage_mask=dst_stage)
 end
 
-# =============================================================================
-# Multi-draw rendering API
-# =============================================================================
-# Separates begin/draw/end for rendering multiple plots in a single pass.
-
 """
-    begin_pass!(color_view(s), color_image(s), extent; clear_color, depth_view)
+    begin_pass!(e, color_view(s), color_image(s), extent; clear_color, load_op,
+                depth_view, depth_image, depth_clear=1f0, depth_load_op,
+                depth_store_op, transition=true)
 
-Begin a dynamic rendering pass. Call `draw_in_pass!` for each draw,
-then `end_pass!` to finish.
-
-One colour attachment or several: pass vectors of views and images, and
-`clear_color` and `load_op` either once for all of them or once each. The
-fragment shader writes location `i` to attachment `i`.
-
-The depth attachment takes the same three-way answer as the colour one:
-`depth_clear` gives a value to clear to, `depth_clear = nothing` loads what is
-there, and `depth_load_op` states it outright, which is the only way to reach
-DONT_CARE.
+Begin a dynamic rendering pass; record draws with `draw_in_pass!` and finish with
+`end_pass!`. One colour attachment or vectors of several (fragment location `i`
+writes attachment `i`), with `clear_color` and `load_op` once or once each. A
+clear value means CLEAR, `nothing` means LOAD, and only an explicit load op
+reaches DONT_CARE; `depth_clear` and `depth_load_op` work the same way.
 """
 begin_pass!(target, color_view::VK.ImageView, color_image::VK.Image,
                extent::VK.Extent2D; kw...) =
     begin_pass!(target, [color_view], [color_image], extent; kw...)
 
-"""One value for every attachment, or one value each. Anything else is a mistake
-worth naming rather than a silent recycle."""
+"""One value for every attachment (anything but a vector), or a vector with one
+value each. Any other length is an error."""
 function perattachment(x, n::Integer, what::String)
     x isa AbstractVector || return [x for _ in 1:n]
     length(x) == n && return x
@@ -416,41 +367,32 @@ function begin_pass!(e::Emitter,
 
     color_attachments = map(1:n) do i
         clear, given = clears[i], ops[i]
-        # Resolved once, so it means the same thing on every path. An explicit
-        # `load_op` is the only way to reach DONT_CARE: inferring it from
-        # `clear_color === nothing` can only ever pick CLEAR or LOAD, so a pass that
-        # overwrites every pixel had to pay for a load whose result it discards.
+        # Only an explicit `load_op` reaches DONT_CARE; inference picks CLEAR or LOAD.
         op = given !== nothing ? given :
              clear !== nothing ? VK.ATTACHMENT_LOAD_OP_CLEAR :
                                  VK.ATTACHMENT_LOAD_OP_LOAD
 
-        # `transition=false` hands the layout transition to the caller. A caller that
-        # derives barriers from declared usage has to own this one too, because the
-        # transition below assumes it is the only writer of that image's layout and
-        # would double up with, or contradict, a derived barrier.
+        # `transition=false` leaves the layout transition to a caller that derives
+        # its own barriers; the transitions below would double up with them.
         if !transition
             clear_val = clear !== nothing ?
                 VK.ClearValue(VK.ClearColorValue(clear)) :
                 VK.ClearValue(VK.ClearColorValue((0f0, 0f0, 0f0, 0f0)))
         elseif clear !== nothing
-            # Clear mode: discard old content, start fresh
+            # Clear: the old contents are discarded.
             transition_image!(cmd, color_images[i],
                 VK.IMAGE_LAYOUT_UNDEFINED, VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                # srcStage is COLOR_ATTACHMENT_OUTPUT, not TOP_OF_PIPE. On a swapchain
-                # image the submit waits on the semaphore `vkAcquireNextImageKHR`
-                # signals, at COLOR_ATTACHMENT_OUTPUT — and a barrier whose srcStage is
-                # TOP_OF_PIPE creates NO execution dependency with that wait, so this
-                # transition (and the writes behind it) can run while the presentation
-                # engine still owns the image. Synchronization validation reports it as
-                # "WRITE_AFTER_READ hazard … previously accessed by vkAcquireNextImageKHR";
-                # on screen it is bands of stale pixels that vanish under any full sync.
+                # srcStage COLOR_ATTACHMENT_OUTPUT, not TOP_OF_PIPE: the submit waits
+                # on the acquire semaphore at that stage, and a TOP_OF_PIPE barrier
+                # does not depend on the wait, so a swapchain image would be written
+                # while the presentation engine still owns it (bands of stale pixels).
                 VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                 VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                 VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
 
             clear_val = VK.ClearValue(VK.ClearColorValue(clear))
         else
-            # Load mode: preserve existing content (for drawing on top of previous pass)
+            # Load: keep the previous contents.
             transition_image!(cmd, color_images[i],
                 VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -470,9 +412,7 @@ function begin_pass!(e::Emitter,
         )
     end
 
-    # Typed even when empty: a depth-only pass has no colour attachments, and
-    # `map` over an empty range does not always infer an element type the Vulkan
-    # constructor will take.
+    # Typed for depth-only passes: `map` over an empty range may not infer it.
     color_attachments = convert(Vector{VK.RenderingAttachmentInfo}, color_attachments)
 
     depth_attachment = C_NULL
@@ -480,10 +420,8 @@ function begin_pass!(e::Emitter,
         dop = depth_load_op !== nothing ? depth_load_op :
               depth_clear !== nothing ? VK.ATTACHMENT_LOAD_OP_CLEAR :
                                         VK.ATTACHMENT_LOAD_OP_LOAD
-        # Same rule as the colour attachment: a discarding op does not need the old
-        # contents, so it transitions from UNDEFINED; a LOAD does, so it has to come
-        # from the layout the previous pass left the image in. `transition = false`
-        # hands both to the caller.
+        # As for colour: a discarding op transitions from UNDEFINED, a LOAD from the
+        # layout the previous pass left. `transition = false` leaves both to the caller.
         if transition && depth_image !== nothing
             old = dop === VK.ATTACHMENT_LOAD_OP_LOAD ?
                   VK.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL :
@@ -528,19 +466,17 @@ function begin_pass!(e::Emitter,
 end
 
 """
-    draw_in_pass!(pipeline, vertex_count; push_data, instances,
-                     viewport, scissor)
+    draw_in_pass!(e, pipeline, vertex_count; push_data, push_bda, instances,
+                  viewport, scissor)
 
-Record a draw command within an active rendering pass.
-Viewport/scissor are Vulkan structs for per-scene rendering.
+Record a draw inside an active rendering pass. `viewport` and `scissor` are Vulkan
+structs, set only when given.
 """
 function draw_in_pass!(e::Emitter,
                            pipeline::VulkanCompiledGraphicsPipeline,
                            vertex_count::Integer;
                            push_data::Vector{UInt8}=UInt8[],
-                           # The push constant is one buffer device address. Taking
-                           # it as a value costs nothing; taking it as an eight-byte
-                           # `Vector` costs an allocation per draw per frame.
+                           # The device address by value; `push_data` allocates per draw.
                            push_bda::UInt64=UInt64(0),
                            instances::Integer=1,
                            viewport::Union{Nothing, VK.Viewport}=nothing,
@@ -554,13 +490,8 @@ end
 """
     draw_mesh_in_pass!(e, pipeline, groups; push_data, push_bda, viewport, scissor)
 
-Record a MESH draw within an active rendering pass.
-
-`groups` is a workgroup count, not a vertex count: there is no input assembler to
-feed, and the mesh stage's own `set_mesh_outputs!` says how much geometry each
-group produced. Everything before the command — bind, viewport, push constants —
-is what a classic draw does, which is why both spell it once in
-[`bind_for_draw!`](@ref).
+Record a mesh draw inside an active rendering pass. `groups` is a workgroup count;
+the mesh stage's `set_mesh_outputs!` says how much geometry each group emits.
 """
 function draw_mesh_in_pass!(e::Emitter,
                             pipeline::VulkanCompiledGraphicsPipeline,
@@ -579,8 +510,7 @@ end
 function push_draw_args!(cmd, pipeline::VulkanCompiledGraphicsPipeline,
                          push_bda::UInt64, push_data::Vector{UInt8})
     pipeline.push_constant_size == 0 && return nothing
-    # Push constants. The BDA path takes the address by value; the vector path is
-    # for callers written before it existed.
+    # `push_bda` by value if given, else the bytes of `push_data`.
     if push_bda != UInt64(0)
         bda = Ref(push_bda)
         GC.@preserve bda begin
@@ -611,7 +541,6 @@ function bind_for_draw!(e::Emitter, pipeline::VulkanCompiledGraphicsPipeline;
 
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
 
-    # Set viewport and scissor
     if viewport !== nothing
         VK.cmd_set_viewport(cmd, [viewport])
     end
@@ -626,28 +555,20 @@ end
 """
     indirect_buffer(bq, n = 1) -> LavaArray{DrawIndirectCommand,1}
 
-Room for `n` draw commands, allocated so a draw may read them.
-
-`BUFFER_USAGE_INDIRECT_BUFFER_BIT` is not in the flags an ordinary allocation
-gets, and a buffer without it is a validation error at the draw rather than at
-the allocation, which is a long way from the mistake.
+Room for `n` draw commands, with the `BUFFER_USAGE_INDIRECT_BUFFER_BIT` ordinary
+allocations lack; without it the error only surfaces at the draw.
 """
 indirect_buffer(bq::SubmitChannel{<:VulkanQueue}, n::Integer=1) =
     LavaArray{DrawIndirectCommand,1}(undef, (Int(n),);
         bq, extra_usage=UInt32(VK.BUFFER_USAGE_INDIRECT_BUFFER_BIT))
 
 """
-    draw_indirect_in_pass!(bq, pipeline, commands; first, count, push_bda, pin)
+    draw_indirect_in_pass!(e, pipeline, commands; first = 1, count = 1, push_bda)
 
-Record a draw whose counts are in device memory, inside an active rendering pass.
-
-`commands` is a `LavaArray` of `DrawIndirectCommand`, and `first` is which of
-them to start at. Nothing here reads them: that is the point, because the numbers
-are written by a compute pass in the same frame and reading them on the host
-would mean waiting for it.
-
-The array has to have been allocated with `BUFFER_USAGE_INDIRECT_BUFFER_BIT`,
-which `indirect_buffer` does.
+Record `count` draws whose parameters are in device memory, from `commands` (a
+`LavaArray{DrawIndirectCommand}` made by [`indirect_buffer`](@ref)) starting at the
+1-based `first`, inside an active rendering pass. The host never reads them, so a
+compute pass of the same frame can write them.
 """
 function draw_indirect_in_pass!(e::Emitter,
                                    pipeline::VulkanCompiledGraphicsPipeline,
@@ -674,16 +595,17 @@ function draw_indirect_in_pass!(e::Emitter,
     VK.cmd_draw_indirect(cmd, managed.buffer, UInt64(offset),
                              UInt32(count), UInt32(sizeof(DrawIndirectCommand)))
     hold!(e, pipeline)
-    # The draw parameters are READ BY THE DEVICE from this array, so it has to
-    # outlive the draw exactly as a vertex buffer does.
+    # The device reads the commands, so the array must outlive the draw.
     hold!(e, commands)
 end
 
 """
-    draw_indexed_in_pass!(pipeline, index_count; push_data, indices_buffer)
+    draw_indexed_in_pass!(e, pipeline, index_count; push_data, push_bda,
+                          indices_buffer, indices_offset, instances)
 
-Draw indexed geometry inside an active render pass (between begin_pass!/end_pass!).
-Uses the provided index buffer for indexed drawing.
+Record an indexed draw with `UInt32` indices at byte `indices_offset` of
+`indices_buffer`, inside an active rendering pass. Holds only the pipeline: the
+caller keeps the index buffer alive.
 """
 function draw_indexed_in_pass!(e::Emitter,
                                    pipeline::VulkanCompiledGraphicsPipeline,
@@ -691,10 +613,7 @@ function draw_indexed_in_pass!(e::Emitter,
                                    push_data::Vector{UInt8}=UInt8[],
                                    push_bda::UInt64=UInt64(0),
                                    indices_buffer::VK.Buffer,
-                                   # Where the indices START in that buffer. A
-                                   # `LavaArray` may be a slice of one, and a
-                                   # hard-coded zero draws someone else's
-                                   # triangles rather than failing.
+                                   # A `LavaArray` may be a slice of its buffer.
                                    indices_offset::UInt64=UInt64(0),
                                    instances::Integer=1)
     cmd = e.cmd
@@ -710,14 +629,10 @@ function draw_indexed_in_pass!(e::Emitter,
 end
 
 """
-    set_viewport!(bq, viewport, scissor)
+    set_viewport!(e, viewport, scissor)
 
-Set viewport and scissor once, for every draw that follows in the pass.
-
-They are dynamic pipeline state and every draw in a pass shares them, so setting
-them per draw records two extra commands and allocates two vectors per draw per
-frame — at a hundred plots, a third of the frame's garbage for a value that does
-not change.
+Set viewport and scissor once for every following draw in the pass, rather than
+per draw (two commands and two vector allocations each).
 """
 function set_viewport!(e::Emitter, viewport::VK.Viewport, scissor::VK.Rect2D)
     VK.cmd_set_viewport(e.cmd, [viewport])
@@ -733,18 +648,12 @@ End the dynamic rendering pass the emitter opened.
 end_pass!(e::Emitter) = VK.cmd_end_rendering(e.cmd)
 
 """
-Mantle's portable viewport verb: plain numbers in, viewport AND the scissor it
-implies out.
+    set_viewport!(e, x, y, w, h)
 
-The five-argument form is the one `graphics/commands.jl` declares, and it exists
-so a caller never has to build a `VK.Viewport`/`VK.Rect2D`, which would make
-every overlay draw a Vulkan-only line of code in a portable package.
-
-The scissor is derived rather than passed because the clamping below is not a
-choice: Vulkan rejects a negative offset, and a flipped viewport (negative
-height, which is how Y-down clip space is handled) puts the rectangle's origin
-at `y + h`. Deriving it in one place is what stops each caller getting that
-wrong in its own way.
+The portable viewport verb (`graphics/commands.jl`): sets the viewport and the
+scissor it implies. The scissor is clamped to non-negative offsets, which Vulkan
+requires, and a flipped viewport (negative `h`, for Y-down clip space) puts its
+origin at `y + h`.
 """
 function set_viewport!(e::Emitter, x::Real, y::Real, w::Real, h::Real)
     cmd = e.cmd
@@ -769,14 +678,11 @@ function use_bindings!(e::Emitter, compiled, bindings)
     VK.cmd_bind_descriptor_sets(e.cmd, VK.PIPELINE_BIND_POINT_GRAPHICS,
                                 compiled.pipeline_layout, UInt32(0),
                                 [bindings.set], UInt32[])
-    # The set and everything it points at — the textures and their samplers —
-    # are named by every draw that follows until another set is bound.
+    # The set, its textures and samplers are named by every following draw.
     hold!(e, bindings)
     return nothing
 end
 
-# Portable spelling: a pass is opened over a WxH area, not over a
-# `VK.Extent2D`. The views and images stay backend-typed — they come from a
-# `Framebuffer` or `Window` the backend made — but the size does not have to.
+# Portable form: the area as `w`, `h` instead of a `VK.Extent2D`.
 begin_pass!(e::Emitter, view, image, w::Integer, h::Integer; kw...) =
     begin_pass!(e, view, image, VK.Extent2D(UInt32(w), UInt32(h)); kw...)

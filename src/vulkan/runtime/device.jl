@@ -1,16 +1,12 @@
-# Vulkan device initialization for Lava.jl
-#
-# Singleton VkContext holds all persistent Vulkan state.
-# Lazy initialization: first use triggers device creation.
-#
-# Required features: BufferDeviceAddress, VariablePointers, Int64, Float64
-# Optional features: AccelerationStructure, RayTracingPipeline
+# Vulkan device creation, capability queries and validation-message capture.
+# `vk_context()` lazily builds the process-default `VkContext`;
+# `VkContext(; select, debug)` builds others.
 
 """
     RTPipelineProperties
 
-Ray tracing pipeline properties queried from the physical device.
-`nothing` if RT extensions are not available.
+Ray tracing pipeline properties of the physical device. `VkContext.rt_pipeline_properties`
+is `nothing` without the RT extensions.
 """
 struct RTPipelineProperties
     shader_group_handle_size::UInt32
@@ -20,57 +16,37 @@ struct RTPipelineProperties
     max_ray_hit_attribute_size::UInt32
 end
 
-# ── What the queue is handed ─────────────────────────────────────────────────
-#
-# Two kinds of GPU work, and both are CLOSED: a command buffer is never open
-# when a Mantle call returns. A `Recording` is a plan's, written once at
-# `record!`, owned by the plan and submitted every run; a `OneShot` is written,
-# sealed and handed over inside one call by whoever needed it, owned by the
-# submission that carries it and given back to the queue's pool when the
-# timeline passes. `submit!(bq, closed...)` is the only way either reaches the
-# driver, and it goes the moment it is called.
-#
-# This replaces the command batch: one command buffer open across call boundaries
-# that anything could append to — an ad hoc launch, an upload, a readback, a
-# per-run store, a present transition — with a dispatch count deciding whether
-# the next launch needed a barrier, a segment count deciding when to cut the
-# buffer, a threshold deciding when to submit it, and three lists of command
-# buffers saying which of them it owned. What the open buffer contained
-# depended on every call since it was opened, from any package, in any order;
-# a plan is the opposite, and the batching the buffer bought is the graph's
-# job. See `oneshot!` in `command.jl`.
+# The two kinds of GPU work, both closed: no command buffer is open when a
+# Mantle call returns. A `Recording` is a plan's, written once at `record!` and
+# submitted every run; a `OneShot` is written, sealed and submitted within one
+# call. `submit!(bq, closed...)` is the only path to the driver and submits
+# immediately. See `oneshot!` in `command.jl`.
 
 abstract type Closed end
 
 """
     OneShot
 
-Work submitted once: an ad hoc launch, an upload, a readback, a run's host
-stores and pointer patches, a frame. Written and sealed inside one call, carried
-by the submission that takes it, and given back to the channel's free list by
-the sweep once the timeline has passed it (core's `retire!`), which is when its
-scratch regions go back too.
+Work submitted once (an ad hoc launch, an upload, a readback, a run's host
+stores and pointer patches, a frame), written and sealed inside one call. Owned
+by the submission that carries it; core's `sweep!` hands it back to the
+channel's free list (`finishrecording!`) once the timeline passes it, and its
+scratch regions go back then. What the commands must outlive is held on the
+channel (`hold!`), not here.
 
-What the commands must OUTLIVE is not here: that is `hold!` on the channel
-(`graph/lifetime.jl`), and the submission's payload carries it. What is here is
-the driver's own bookkeeping for the buffers the commands name — see `sync`.
-
-`bq` is core's `SubmitChannel` over a `VulkanQueue` it was taken from; typed `Any`
-because the queue is declared below this, and asserted at every read
-(`queueof`) so the field is a static load and not a boxed one.
+`bq` is core's `SubmitChannel` over a `VulkanQueue`, typed `Any` because the
+queue is declared below; `queueof` asserts the concrete type at every read.
 """
 mutable struct OneShot <: Closed
     bq::Any
     cmd::VK.CommandBuffer
-    # The `Unified` regions the commands read their arguments and workgroup
-    # counts from. Owned here, so an address handed to `get_arg_buffer` is
-    # valid for exactly as long as these commands can run.
+    # The `Unified` regions the commands read arguments and workgroup counts
+    # from. An address from `get_arg_buffer` is valid as long as these commands
+    # can run.
     regions::Vector{Region}
-    # The buffers these commands NAME. A fact about the commands, reported
-    # where they are written (`syncbuf!`) and read once at `submit!`, where
-    # core's `crosswaits!` derives the waits from it and `stamp!` records who
-    # took them. What that means — which channel waits for which token — is not
-    # decided here; see `graph/lifetime.jl`.
+    # The buffers these commands name, recorded by `syncbuf!` and read once at
+    # `submit!`, where core's `crosswaits!` derives the waits and `stamp!`
+    # records the submission (`graph/lifetime.jl`).
     sync::Vector{VkManagedBuffer}
     open::Bool
 end
@@ -78,78 +54,49 @@ end
 """
     Recording
 
-A plan's work, written into ONE command buffer once and handed to the queue
-every time the plan runs. Nothing here is heuristic: the graph decided the pass
-order, the barriers and where the arguments live, and [`Emitter`](@ref) writes
-exactly that. There is no threshold to cut the buffer on, because a recording
-is not being submitted while it is being written.
-
-What a recording OWNS is the whole of its lifetime rule. The command buffer,
-the argument regions its dispatches read, the descriptor sets they bind and a
-strong reference to every resource they name stay alive until `release!`,
-because until then the recording may be submitted again.
-
-One command buffer and not a list: a capture that runs the ordinary recorder
-collects whatever segments the queue's split and submit thresholds happen to
-cut. Measured on Hikari's fused sample:
-five command buffers per recording, decided by a threshold about when to
-submit, applied while nothing was being submitted.
+A plan's work, written once into one command buffer and submitted every run.
+The graph decides pass order, barriers and argument placement and
+[`Emitter`](@ref) writes exactly that, so no submit threshold cuts it into
+several buffers. The command buffer, argument regions, descriptor sets and a
+strong reference to every resource it names stay alive until `release!`.
 """
 mutable struct Recording <: Closed
     bq::Any
     cmd::VK.CommandBuffer
-    # The `Unified` regions the emitted commands read. A plan's arguments live in
-    # its own `ArgMemory`, so this is usually empty — it is here because "who may
-    # hand these bytes out again" has to have exactly one answer per owner.
+    # `Unified` regions the commands read. Usually empty: a plan's arguments
+    # live in its own `ArgMemory`.
     regions::Vector{Region}
-    # Descriptor sets the emitted commands bind, one per (pipeline layout,
-    # acceleration structure) pair rather than one per dispatch — see
-    # [`tlasset!`](@ref).
+    # Descriptor sets the commands bind, one per (pipeline layout, acceleration
+    # structure) pair; see [`tlasset!`](@ref).
     sets::Vector{Any}
-    # What covers the last submission of this recording, or 0 if it has never
-    # been handed over. `release!` waits on it, which is the whole reason it is
-    # kept: the command buffer goes back to the device there, and freeing one
-    # the device is still reading is undefined behaviour that presents as a
-    # driver-side abort with no Julia frame. UInt64, not Any — the assignment
-    # is on the `run!` path, which allocates nothing, and an `Any` field boxes
-    # the timeline value it is handed. 0 is safe as "never": the first signal
-    # a queue emits is 1.
+    # Timeline value of the last submission, 0 if never submitted (a queue's
+    # first signal is 1). `release!` waits on it before the command buffer goes
+    # back to the free list; freeing one the device still reads aborts in the
+    # driver. `UInt64`, not `Any`: assigned on the allocation-free `run!` path.
     token::UInt64
     open::Bool
-    # Where each device address the pack wrote landed: (address, host pointer).
-    # The pointer is into the plan's argument memory or into one of this
-    # recording's own scratch regions (`emitkernel!` packs a prepare kernel's
-    # arguments there) — `record!` sorts out which when it builds the patch
-    # table (`patchtarget`). Filled by `recpatch!` while the commands are
-    # emitted, read once by `record!`. A one-shot never needs it — its commands
-    # run once — so the hook is a no-op there.
+    # (device address, host pointer) for each address the pack wrote. The
+    # pointer is into the plan's argument memory or this recording's scratch
+    # regions; `closerecording!` resolves which (`patchtarget`) when it builds
+    # the patch table. Filled by `recpatch!`; one-shots never need it.
     patches::Vector{Tuple{UInt64,Ptr{UInt8}}}
-    # Everything the emitted commands name and must outlive: taken from the
-    # channel's hold frame when the recording is sealed (`takeholds!`), and
-    # dropped by `release!`. On the RECORDING and not on each submission,
-    # because a plan's recording is submitted every run and must outlive all of
-    # them — a submission of it holds only the recording. This is what `pinned`
-    # and `pinned_refs` were, with core deciding when the references go.
-    #
-    # `nothing` before the recording is sealed and after `release!`: a hold
-    # frame is a list core hands over, and there is none until one is taken.
+    # Everything the commands name and must outlive, taken from the channel's
+    # hold frame at seal (`takeholds!`) and dropped by `release!`. Held by the
+    # recording, not each submission, because it is submitted every run.
+    # `nothing` before seal and after `release!`.
     holds::Union{Nothing,Vector{Any}}
-    # The VkManagedBuffers a submission of this recording has to order against,
-    # collected once while the commands are emitted — every array the pack
-    # walker strips and every acceleration structure a trace binds — and read by
-    # every run through core's `crosswaits!` / `stamp!`. A concrete vector, so a
-    # run boxes nothing. The set is fixed for the recording's life: the
-    # arguments are the plan's.
+    # The buffers a submission must order against (every array the pack walker
+    # strips, every acceleration structure a trace binds), collected while
+    # emitting and read by every run through core's `crosswaits!` / `stamp!`.
+    # Fixed for the recording's life.
     sync::Vector{VkManagedBuffer}
 end
 
 """
-Per-queue scratch for the wait and timeline-query fast paths: one semaphore
-slot, one value slot, one packed wait info and one counter cell, refilled per
-call. A fresh `Vector` + wrapper + `Ref` per wait cost ~300 bytes of every
-`waitfor!`; these cost nothing after construction. A heap object (mutable) so
-the `Any`-typed `BatchQueue.slots` field hands out a REFERENCE — an isbits
-bundle would box on every read.
+Per-queue scratch for `wait_timeline!` and `query_timeline`: one semaphore slot,
+one value slot, one packed wait info and one counter cell, refilled per call so
+a wait allocates nothing. Only the channel's owning thread (`bq.thread`) uses
+it; other threads take the allocating path.
 """
 mutable struct QueueSlots
     wait_sems::Vector{VK.vk.VkSemaphore}
@@ -166,69 +113,55 @@ QueueSlots() = QueueSlots(Vector{VK.vk.VkSemaphore}(undef, 1), Vector{UInt64}(un
 """
     VulkanQueue{C}
 
-What this backend submits through, behind core's `SubmitChannel`: the `VkQueue`,
-its command pool and timeline semaphore, the context, and the per-queue scratch
-the submit and wait fast paths refill rather than allocate.
-
-Core's channel owns what is in flight (`outstanding`), what each submission must
-outlive (the hold frames) and the recordings it reuses (`free`). Nothing of that
-is here — this is the driver arrangement and only the driver arrangement.
+The driver side of core's `SubmitChannel`: the `VkQueue`, its command pool and
+timeline semaphore, the context, and per-queue scratch the submit and wait
+paths refill. In-flight submissions, hold frames and pooled recordings are the
+channel's.
 """
 mutable struct VulkanQueue{C}
     device::VK.Device
     queue::VK.Queue
     family_index::UInt32
     cmd_pool::VK.CommandPool
-    # One timeline semaphore per queue. Each submit signals next_timeline+1.
+    # Each submit increments `next_timeline` and signals the new value.
     timeline_sem::VK.Semaphore
     next_timeline::UInt64
-    # The owning VkContext. A type parameter because `VkContext` is declared
-    # after this struct; `VkContext` holds core's `SubmitChannel` over a `VulkanQueue`.
+    # The owning VkContext; a type parameter because `VkContext` is declared
+    # after this struct.
     ctx::C
-    # How long `flush!` waits before it decides a dispatch is not completing.
+    # How long `flush!` waits before deciding a dispatch is not completing.
     flush_timeout_ns::UInt64
-    # What the last dispatch on this queue was, for the dispatch log and for
-    # DEVICE_LOST diagnostics. Per queue: process-wide, these attributed one
-    # queue's crash to another queue's kernel.
+    # The last two dispatches on this queue, for the dispatch log and
+    # DEVICE_LOST diagnostics. Per queue so a crash is attributed to the
+    # right queue's kernel.
     last_dispatch_info::String
     prev_dispatch_info::String
-    # Which hardware queue of `family_index` this one drives, so
-    # `release_batch_queue!` can hand the slot back. -1 for the primary queue
-    # and for any queue that had to share it because the family ran out.
+    # Hardware queue index within `family_index`, returned by
+    # `release_batch_queue!`. -1 for the primary queue and for queues sharing it.
     queue_index::Int
-    # Per-queue scratch for the wait and timeline-query fast paths.
     slots::QueueSlots
-    # Per-queue scratch for `submit!`, refilled per call — single-writer, and a
-    # submit is synchronous, so one set per queue is exactly enough. These were
-    # per `Submission` and pooled with it; the pool is core's now and holds
-    # recordings, not driver scratch.
+    # Scratch for `submit!`, refilled per call (single writer, synchronous).
     #
-    # Cross-channel dependencies for this submission, filled by core's
-    # `crosswaits!` from the buffers the closed command buffers name: pairs of
-    # (channel, token), which this backend lowers to a timeline semaphore and a
-    # value. `Any` in the first slot because the channel type names this one.
+    # Cross-channel waits filled by core's `crosswaits!`: (channel, token)
+    # pairs, lowered to a timeline semaphore and value. `Any` because the
+    # channel type names this one.
     waits::Vector{Tuple{Any,UInt64}}
-    # Raw VulkanCore structs: Vulkan.jl's `_`-level wrappers each box a `deps`
-    # vector for GC rooting — right once at setup, wrong fifty times a frame.
-    # `raw_submits[1]` points into these vectors' data, so a refill resizes only
-    # within capacity and the `vkQueueSubmit2` ccall runs under GC.@preserve.
+    # Raw VulkanCore structs, because Vulkan.jl's wrappers allocate a `deps`
+    # vector per struct. `raw_submits[1]` points into these vectors' data, so a
+    # refill must stay within capacity and `vkQueueSubmit2` runs under
+    # `GC.@preserve`.
     raw_cb_infos::Vector{VK.vk.VkCommandBufferSubmitInfo}
     raw_wait_infos::Vector{VK.vk.VkSemaphoreSubmitInfo}
     raw_signal_infos::Vector{VK.vk.VkSemaphoreSubmitInfo}
     raw_submits::Vector{VK.vk.VkSubmitInfo2}               # always length 1
 end
 
-# This backend's channel is core's `SubmitChannel` over the driver bundle above,
-# spelled out at each use rather than aliased: core owns queue management, so a
-# channel type named for this backend would say otherwise.
-#
-# The recording type pooled is `OneShot`; a plan's `Recording` keeps its own
-# lifetime (`release!`) and is never pooled. The payload of a submission is
-# core's `Submission` over the one-shot it carried -- or `nothing` when a run
-# submits its recording alone.
+# The channel type is spelled out at each use, not aliased, because the channel
+# is core's. It pools `OneShot`s; a plan's `Recording` is never pooled
+# (`release!`). A submission's payload is core's `Submission` over its one-shot,
+# or `nothing` when a run submits its recording alone.
 
-"""The queue a closed command buffer was taken from, as the concrete type — the
-field is `Any` only because the queue is declared after the closed types."""
+"""The queue a closed command buffer was taken from, as the concrete type."""
 @inline queueof(c::Closed) = c.bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
 
 
@@ -256,43 +189,32 @@ function SubmitChannel(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ctx;
                          Submission{Union{Nothing,OneShot}}}(q)
 end
 
-# The driver bundle behind the channel, and its fields. Every site that wrote
-# `ctxof(bq)` or `timelineof(bq)` reads one of these instead: the arrangement is
-# the backend's, the lists around it are core's, and `channelof` is the one
-# field core hands back without looking inside it.
+# The driver bundle behind a channel (`bq.channel`, which core never reads)
+# and its fields.
 @inline driver(bq::SubmitChannel{VulkanQueue{C}}) where {C} = bq.channel::VulkanQueue{C}
 @inline ctxof(bq::SubmitChannel{VulkanQueue{C}}) where {C} = driver(bq).ctx::C
 @inline vkdevice(bq::SubmitChannel{<:VulkanQueue}) = driver(bq).device
 @inline vkqueue(bq::SubmitChannel{<:VulkanQueue}) = driver(bq).queue
 @inline timelineof(bq::SubmitChannel{<:VulkanQueue}) = driver(bq).timeline_sem
 
-# The Mantle device this channel submits to — what core asks `rawfree` and
-# `flush!` of. A verb and not a field: a `LavaDevice` is built AROUND its
-# default channel (it holds the channel and the pool), so a channel that held
-# its device could not be constructed first. `lavadevice` is the cache that
-# makes this one device per context rather than one per call.
+# The Mantle device this channel submits to, which core passes to `rawfree`
+# and `flush!`. Not a field: a `LavaDevice` holds its default channel, so the
+# channel is built first. `lavadevice` caches one device per context.
 deviceof(bq::SubmitChannel{<:VulkanQueue}) = lavadevice(ctxof(bq))
 
 """
     CoopMat2Caps
 
-The sub-features of `VK_NV_cooperative_matrix2`, as enabled on this device.
-`available` is false when the extension itself is missing, in which case every
-other field is false too — so a kernel may test the single field it needs.
+The `VK_NV_cooperative_matrix2` sub-features enabled on this device. Without
+the extension `available` and every other field are false, so a kernel tests
+only the field it needs. NVIDIA-only: kernels keep a plain
+`VK_KHR_cooperative_matrix` path for AMD (RDNA3 WMMA).
 
-The extension is NVIDIA-only. On AMD (RDNA3 exposes WMMA through the portable
-`VK_KHR_cooperative_matrix`) all of these are false and kernels must fall back
-to the plain KHR path, which is the one that ships today.
-
-| field | what it adds | who wants it |
-|:--|:--|:--|
-| `workgroup_scope` | matrices spanning the whole workgroup, not one subgroup | wider GEMM tiles |
-| `flexible_dimensions` | M/N/K free of the driver's fixed shape list | `E = 72` without padding to 80 |
-| `reductions` | row/column reduce on an accumulator in place | flash softmax row max/sum |
-| `conversions` | element conversion without a round trip through memory | mixed-precision staging |
-| `per_element_operations` | a callback per element, given `(row, col)` | the flash rescale of a held `O` |
-| `tensor_addressing` | a tensor descriptor drives the addressing | hand-coded root+stride staging |
-| `block_loads` | load a tile straight from a descriptor | ditto |
+`workgroup_scope`: matrices spanning the workgroup. `flexible_dimensions`: M/N/K
+outside the fixed shape list. `reductions`: in-place row/column reduce.
+`conversions`: element conversion without a memory round trip.
+`per_element_operations`: a per-element `(row, col)` callback.
+`tensor_addressing`, `block_loads`: descriptor-driven addressing and tile loads.
 """
 struct CoopMat2Caps
     available::Bool
@@ -310,51 +232,26 @@ CoopMat2Caps() = CoopMat2Caps(false, false, false, false, false, false, false, f
 """
     query_shader_cores(phys_dev) -> (cores, warps)
 
-The SM/CU count and warps per SM, or `(0, 0)` where the device will not say.
-
-A grid that does not fill the device is the dominant cost on small shapes — SAM
-2's decode runs one attention at 8 workgroups on 48 SMs — so "how many
-workgroups before the device is busy" is a number kernels need queried rather
-than hardcoded.
-
-Vendor coverage follows llama.cpp's `ggml-vulkan.cpp:6138-6146`, which is the
-same question asked by the same kind of code. Neither extension is *enabled* on
-the logical device — these are physical-device property queries and enabling
-would be pointless — but the chained struct is only filled for an extension the
-device advertises, so each is guarded by `has_extension`.
-
-The chain is also only filled when the instance opted into
-`vkGetPhysicalDeviceProperties2`: core in Vulkan 1.1, or the
-`VK_KHR_get_physical_device_properties2` instance extension before that. Lava's
-instance asks for 1.4 (see `create_vulkan_context`), so this holds — but note the
-failure is silent if it ever stops holding. The base properties still come back
-fully populated and only the `next` chain is dropped, with no return code to
-check, because `vkGetPhysicalDeviceProperties2` returns void.
+SM/CU count and warps per SM, or `(0, 0)` where the device does not report
+them; kernels size grids to fill the device from it. Physical-device property
+queries (vendor coverage as in llama.cpp), so neither extension is enabled, but
+the chained struct is only filled for an advertised extension. The chain also
+needs an instance of API 1.1 or later (`VkContext` asks for 1.4); below that
+it is dropped silently, since `vkGetPhysicalDeviceProperties2` returns void.
 """
 function query_shader_cores(phys_dev)
     smcount, warps = 0, 0
     if has_extension(phys_dev, "VK_NV_shader_sm_builtins")
-        # No try: the extension was just confirmed present by `has_extension`,
-        # so a failure here is a bug in the query, not an absent capability.
-        # Swallowing it produced `sm_count = 0`, which every caller reads as "the
-        # device does not report it" — a wrong answer dressed as a fact.
+        # No try: the extension is advertised, so a failure is a bug, and a
+        # swallowed one would read as "not reported" (`0`).
         p = VK.get_physical_device_properties_2(
                 phys_dev, VK.PhysicalDeviceShaderSMBuiltinsPropertiesNV).next
         smcount, warps = Int(p.shader_sm_count), Int(p.shader_warps_per_sm)
     elseif has_extension(phys_dev, "VK_AMD_shader_core_properties2")
-        # Same reasoning as the NV branch above: advertised means queryable.
         p = VK.get_physical_device_properties_2(
                 phys_dev, VK.PhysicalDeviceShaderCoreProperties2AMD).next
         smcount = Int(p.active_compute_unit_count)
     end
-    # MERGE NOTE (2026-08-05): `sd/nvidia` restructured this as
-    # `query_device_compute(phys_dev, phys_props) -> DeviceCompute`, which
-    # `DeviceCaps` has since absorbed (see its docstring: "three things became
-    # this one"). Git matched the two bodies as one hunk and spliced theirs into
-    # this shell, leaving `return 0, 0` below the assignments — a function that
-    # always reported "no SM count", which is exactly the wrong-answer-dressed-
-    # as-a-fact their comment above warns about, reintroduced by the merge that
-    # removed it. Their bodies are the improvement and are kept.
     return smcount, warps
 end
 
@@ -362,9 +259,9 @@ end
 """
     VkContext
 
-Persistent Vulkan context. Batch-based command recording goes through
-`default_bq::SubmitChannel{<:VulkanQueue}` (the primary queue). Use `SubmitChannel(device, queue, ...)` to
-create additional independent queues (e.g., for async compute/RT).
+One Vulkan device: instance, physical and logical device, queues, capability
+flags and per-device caches. `default_bq` is the primary submit channel;
+[`allocate_batch_queue!`](@ref) hands out more.
 """
 mutable struct VkContext
     instance::VK.Instance
@@ -372,197 +269,132 @@ mutable struct VkContext
     device::VK.Device
     queue_family_index::UInt32
     device_name::String
-    # Primary batch queue — all global API functions delegate here.  Always
-    # non-nothing after the inner constructor returns (the channel is built
-    # using `new()`-based two-phase init to break the chicken-and-egg with
-    # the driver bundle's ctx).
-    # the fully concrete `SubmitChannel`, not the UnionAll — otherwise `ctx.default_bq` is
-    # abstract and the parameter above buys nothing at this end of the cycle.
+    # Primary channel; set by the inner constructor once `ctx` exists. Fully
+    # concrete so `ctx.default_bq` infers.
     default_bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
-    # Secondary compute queue (async RT) — same family, separate queue object
+    # Queue 1 of the primary family, or the primary queue when the family has
+    # only one. Used by the external-image copy.
     compute_queue::VK.Queue
     # Ray tracing (nothing if not available)
     rt_pipeline_properties::Union{Nothing, RTPipelineProperties}
-    # Debug messenger (nothing if validation layers not available)
+    # `nothing` without `VK_EXT_debug_utils`.
     debug_messenger::Any
-    # The messenger's ring, and its `pUserData`. Per context because the
-    # messenger is — see `ValidationRing`.
+    # The messenger's ring and its `pUserData`; see `ValidationRing`.
     validation::ValidationRing
-    # Queue allocation: next available index + total requested from device
+    # Next hardware queue index of the primary family, and how many were created.
     next_queue_index::Int
     max_queue_count::Int
-    # Every queue `allocate_batch_queue!` has handed out and that nobody has
-    # released yet.
-    #
-    # OWNERSHIP, not bookkeeping. A `ManagedBuffer` records `last_write = (bq,
-    # value)` and its finalizer asks that queue's timeline semaphore whether the
-    # GPU is done. Without this list the queue is reachable only from the buffers
-    # that name it, so when a screen and its buffers become garbage together the
-    # semaphore's own finalizer can run FIRST — and then
-    # `vkGetSemaphoreCounterValue` is a use-after-free that segfaults inside the
-    # driver. Holding the queue here means it outlives every buffer allocated on
-    # it, the same argument `caches` makes further down: a field dies with its
-    # context, so nothing outlives the handles it describes.
+    # Queues from `allocate_batch_queue!` not yet released. Holds them alive: a
+    # buffer's stamp names its channel and core's `reclaim!` queries that
+    # channel's timeline. Reachable only through the buffers, channel and
+    # buffers can be collected together, the semaphore finalized first, and the
+    # query segfaults in the driver.
     extra_queues::Vector{SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}}
     # Hardware queue slots handed back by `release_batch_queue!`, reused before
     # `next_queue_index` advances.
     free_queue_indices::Vector{Int}
-    # Async compute family (distinct from primary). RADV family 1: 4 queues,
-    # compute+transfer. Used by the explicit-queue refactor for upload_bq.
+    # A compute+transfer family other than the primary (RADV: family 1, 4
+    # queues). Its queues are created; nothing submits to them.
     async_queue_family_index::Union{Nothing, UInt32}
     async_queue_count::Int
-    # Per-device state.
-    # Set to `true` after vkQueueSubmit returns DEVICE_LOST. Finalizers
-    # holding a ref to the context check this to skip Vulkan calls on
-    # invalid handles.
+    # Set on `ERROR_DEVICE_LOST` and on retirement (`mark_device_lost!`).
+    # Finalizers check it to skip Vulkan calls.
     device_lost::Bool
-    # Cached physical-device properties (avoid re-querying on every alloc/dispatch).
+    # Physical-device properties, cached for the alloc and dispatch paths.
     memory_properties::VK.PhysicalDeviceMemoryProperties
     max_wg_dims::NTuple{3, Int}
-    # Alignment (bytes) for BDAs passed as `pScratchData` in AS builds.
-    # Picked by `bda_alignment_for(ctx, scratch=true)`.
+    # Byte alignment for BDAs passed as `pScratchData` in AS builds
+    # (`bda_alignment_for(ctx, true)`).
     as_scratch_align::UInt64
-    # Whether VK_KHR_ray_query is available on this device.
-    # Set to true by B1 (device extension probe). False until proven otherwise.
+    # VK_KHR_ray_query enabled.
     ray_query_available::Bool
-    # Whether VK_NV_ray_tracing_invocation_reorder (SER) is available.
-    # When true, the SPIR-V emitter declares the ShaderInvocationReorderNV
-    # capability and the raygen can use `lava_rt_hit_object_*` /
-    # `lava_rt_reorder_thread_*` intrinsics.  NVIDIA-only.
+    # VK_NV_ray_tracing_invocation_reorder (SER, NVIDIA-only) enabled: the
+    # emitter may declare ShaderInvocationReorderNV and raygen may use
+    # `lava_rt_hit_object_*` / `lava_rt_reorder_thread_*`.
     ser_available::Bool
-    # The two flags above as the record the compiler takes: what a module
-    # compiled FOR THIS DEVICE may declare. Every compile this context runs
-    # passes it, in the job's compiler configuration.
+    # The two flags above as passed to every compile this context runs: what a
+    # module compiled for this device may declare.
     features::TargetFeatures
-    # Whether VK_EXT_conditional_rendering is enabled. `repeat!` needs it — it is
-    # how a device-written count decides which iterations of a recorded loop
-    # actually run — and a graph that asks for one on a device without it has to
-    # be told so at compile, not silently run every iteration.
+    # VK_EXT_conditional_rendering enabled. `repeat!` needs it to let a
+    # device-written count skip iterations; without it the graph is rejected at
+    # compile rather than running every iteration.
     conditional_rendering_available::Bool
-    # Whether VK_KHR_cooperative_matrix is enabled: subgroup-scope matrix
-    # multiply-accumulate (tensor cores). `coopmat_shapes` holds the driver's
-    # legal (M, N, K, A/B type, C/result type, saturating) combinations -- the
-    # hardware only implements a fixed set, so a kernel must pick one of these
-    # rather than any tile size it likes. Empty when unsupported.
+    # VK_KHR_cooperative_matrix enabled. `coopmat_shapes` lists the driver's
+    # legal (M, N, K, A/B type, C type, scope) combinations, the only tile
+    # shapes a kernel may use; empty when unsupported.
     coopmat_available::Bool
     coopmat_shapes::Vector{NamedTuple{(:M, :N, :K, :ab_type, :c_type, :scope),
                                       Tuple{Int, Int, Int, UInt32, UInt32, UInt32}}}
-    # VK_NV_cooperative_matrix2, per sub-feature. NVIDIA-only; every kernel that
-    # branches on one of these must keep a path that runs with all of them false,
-    # because that is what AMD (RDNA3 WMMA via the plain KHR extension) gets.
+    # VK_NV_cooperative_matrix2 sub-features. NVIDIA-only: kernels branching on
+    # them keep a path for all-false (AMD).
     coopmat2::CoopMat2Caps
-    # VK_NV_cooperative_vector: matrix x vector at subgroup scope, for the shapes
-    # where a cooperative *matrix* would waste most of its tile (`Lq = 23`).
-    # NVIDIA-only.
+    # VK_NV_cooperative_vector (NVIDIA-only): subgroup matrix x vector, for
+    # shapes where a cooperative matrix wastes most of its tile.
     coopvec_available::Bool
-    # VK_KHR_shader_maximal_reconvergence + VK_KHR_shader_subgroup_uniform_control_flow.
-    # Together they make a spin-wait on a shared flag well-defined, which is how
-    # a producer/consumer (warp-specialised) kernel is written without Vulkan
-    # having named barriers. KHR, so RDNA3 has them too.
+    # VK_KHR_shader_maximal_reconvergence + subgroup_uniform_control_flow:
+    # together they make a spin-wait on a shared flag well-defined, which
+    # producer/consumer kernels need since Vulkan has no named barriers.
     maximal_reconvergence_available::Bool
     subgroup_uniform_control_flow_available::Bool
-    # VK_KHR_shader_subgroup_rotate: OpGroupNonUniformRotateKHR, a shuffle by a
-    # subgroup-uniform delta. KHR, promoted to Vulkan 1.4.
+    # VK_KHR_shader_subgroup_rotate: shuffle by a subgroup-uniform delta.
     subgroup_rotate_available::Bool
-    # VK_EXT_mesh_shader: the mesh (and task) stage, which replaces the
-    # vertex+geometry front end with a compute-like workgroup that writes
-    # vertices and primitives into output arrays. EXT, and RDNA3 has it.
+    # VK_EXT_mesh_shader: mesh (and task) stages.
     mesh_shader_available::Bool
-    # Whether VK_EXT_memory_budget is enabled. When true, OOM error reporting
-    # queries the driver's real per-heap budget vs usage via
-    # VkPhysicalDeviceMemoryBudgetPropertiesEXT.
+    # VK_EXT_memory_budget enabled: OOM reports read the per-heap budget and usage.
     memory_budget_available::Bool
-    # Whether VK_KHR_pipeline_executable_properties is enabled on THIS device:
-    # the extension was requested (`enable_pipeline_executable_properties!`)
-    # before it was created AND the device offers it. The request is global and
-    # says nothing about a context made before it or on a device without the
-    # extension, so pipeline creation and the queries ask this instead.
+    # VK_KHR_pipeline_executable_properties enabled on this device: requested
+    # (`enable_pipeline_executable_properties!`) before creation and offered.
+    # Pipeline creation and the queries check this, not the global request.
     pipeline_exec_props_available::Bool
-    # Whether VK_KHR_external_memory(_fd) is enabled. When true,
-    # `VulkanExternalImage` can export allocations as opaque fds for zero-copy
-    # sharing with other APIs (OpenGL via GL_EXT_memory_object_fd).
+    # VK_KHR_external_memory(_fd) enabled: `VulkanExternalImage` can export
+    # allocations as opaque fds (OpenGL via GL_EXT_memory_object_fd).
     external_memory_available::Bool
-    # The alignment of host memory `importhost` can hand the device
-    # (`minImportedHostPointerAlignment` of VK_EXT_external_memory_host), or 0
-    # where the extension is not enabled.
+    # `minImportedHostPointerAlignment` for `importhost`, or 0 without
+    # VK_EXT_external_memory_host.
     host_import_alignment::Int
-    # Whether VK_KHR_video_decode_queue + h264 are enabled (hardware decode into
-    # Vulkan images). The decode queue + its family index are `nothing` when the
-    # device has no video-decode support. No effect until a decode session is made.
+    # VK_KHR_video_decode_queue + h264 enabled. Queue and family index are
+    # `nothing` without video-decode support.
     video_decode_available::Bool
     video_decode_queue::Union{Nothing, VK.Queue}
     video_decode_queue_family_index::Union{Nothing, UInt32}
-    # Whether GPU-Assisted Validation is ACTIVE on this instance — what was
-    # achieved, which `debug` below is not: the layer or the extension can be
-    # missing, and then a requested `gpu_av` yields `gpu_assisted = false`.
-    # `verify_gpu_av` exists because even `true` here is not proof it fires.
+    # Whether GPU-assisted validation attached: the layer or extension can be
+    # missing, so this can be false where `debug.gpu_av` is true. Even `true`
+    # is no proof it fires; see `verify_gpu_av`.
     gpu_assisted::Bool
-    # What this device was ASKED for at construction. Kept so a caller can see
-    # the configuration without reconstructing it, and so `reset_device!` can
-    # carry it across a recovery reset instead of silently disarming it.
+    # The configuration requested at construction; `reset_device!` carries it
+    # across a recovery reset.
     debug::DebugConfig
-    # Whether `VK_LAYER_KHRONOS_validation` is loaded on this instance: what
-    # `debug.validation` asked for, achieved or not. See `validating`.
+    # Whether `VK_LAYER_KHRONOS_validation` loaded; `debug.validation` is what
+    # was asked.
     validating::Bool
-    # The word a compute kernel raises when it throws (`LavaRuntime.signal_exception`
-    # in Lava), host-visible so a wait reads it without a copy. Its address is the
-    # second push-constant word of every kernel that can throw; `checkexceptions!`
-    # reads and clears it.
+    # Host-visible word a kernel sets when it throws (`LavaRuntime.signal_exception`).
+    # Its address is the second push-constant word of every kernel that can
+    # throw; `checkexceptions!` reads and clears it.
     exception_flag::VkManagedBuffer
-    # Driver version (used to key the on-disk VkPipelineCache file).
+    # Keys the on-disk VkPipelineCache file.
     driver_version::String
-    # Persistent VkPipelineCache. Seeded from disk on init, passed to every
-    # vkCreate*Pipelines call, snapshotted back on reset_device! + atexit.
+    # Seeded from disk at init, passed to every vkCreate*Pipelines call, saved
+    # on `reset_device!` and at exit.
     pipeline_cache::VK.PipelineCache
-    # `vkCmdPipelineBarrier`, resolved for THIS device.
-    #
-    # Device function pointers are per device — `vkGetDeviceProcAddr` returns a
-    # pointer valid only for the device it was asked about. As a module global
-    # a second context overwrites it, and the FIRST device's command buffers are then recorded
-    # through the SECOND device's driver.
-    #
-    # That is an immediate segfault rather than a wrong answer, which makes it
-    # the most dangerous piece of module-scope device state in the library and
-    # the one `GUARDRAILS.md` §8 did not list — it names four caches holding
-    # handles and does not mention the function table. Found the first time two
-    # contexts existed at once: the crash was inside `libvulkan_lvp.so` while
-    # dispatching on the NVIDIA context.
+    # `vkCmdPipelineBarrier` resolved for this device. A device function pointer
+    # is valid only for its device; as a module global a second context
+    # overwrote it and the first device's commands went through the second
+    # device's driver (segfault in lavapipe while dispatching on NVIDIA).
     cmd_pipeline_barrier_fptr::Ptr{Nothing}
-    # A stable identity for this device, for as long as it exists.
-    #
-    # Four caches hold device-owned Vulkan handles at module scope and were keyed
-    # without the device, so two devices running the same kernel produced the
-    # SAME key and the second got the first's `VkPipeline` — bound into a command
-    # buffer on a different `VkDevice`, which is undefined behaviour
-    # (`GUARDRAILS.md` §8). This is the missing part of every one of those keys.
-    #
-    # A counter rather than `objectid(ctx)`: object ids are reused after the
-    # collector reclaims, and a *reused* id is exactly the failure this exists to
-    # prevent — a fresh device silently inheriting a dead one's pipelines. It
-    # also survives `reset_device!`, which builds a new context, so entries
-    # from before a reset can never be handed to after it.
-    #
-    # An identity — for logging, and for the probe's assertion that two contexts
-    # are distinct — and NOT a cache key: keying by it is not ownership. The
-    # cached value types are defined in `coretypes.jl`, ahead of this file, so
-    # `caches` below is concrete rather than an `Any` field costing inference on
-    # a lookup per dispatch.
+    # Identity for diagnostics, not a cache key. A counter, not `objectid`,
+    # because object ids are reused after collection.
     id::UInt64
 
-    # Per-device state, owned by the device: a field dies with its context, so
-    # nothing outlives the handles it describes and `reset_device!` has nothing
-    # to clear. See `DeviceCaches`.
+    # Per-device caches: they die with the context, so nothing outlives the
+    # handles they hold. See `DeviceCaches`.
     caches::DeviceCaches
 
-    # Every debugging and instrumentation toggle, owned by the device it
-    # instruments. Was eighteen module-level `Ref`s; see `Diagnostics`.
+    # Debugging and instrumentation toggles for this device; see `Diagnostics`.
     diag::Diagnostics
 
-    # Inner constructor: two-phase init via `new()` so we can hand a live
-    # `ctx` reference to `SubmitChannel(...)` while finishing the ctx's own
-    # field assignments.  There is no public ctor that can leave `default_bq`
-    # unset.  `primary_queue` is the raw `VK.Queue` for the default bq;
-    # everything else maps directly to a field.
+    # Two-phase init via `new()` so `SubmitChannel` gets the live `ctx`; no
+    # constructor leaves `default_bq` unset. `primary_queue` is the default
+    # channel's queue; the other arguments map to fields.
     function VkContext(instance::VK.Instance,
                        physical_device::VK.PhysicalDevice,
                        device::VK.Device,
@@ -645,34 +477,29 @@ mutable struct VkContext
         # Set by `VkContext(; …)` once it knows whether the layer loaded.
         ctx.validating = false
         ctx.driver_version = driver_version
-        # Seed a persistent VkPipelineCache from disk (if any). The header is
-        # validated against this physical device before the driver sees it —
-        # `vkCreatePipelineCache` is not a safe place to discover a mismatch.
         ctx.id = (VK_CONTEXT_COUNTER[] += 1)
-        # Registered before anything can allocate against it — see
-        # `LIVE_CONTEXTS`. A context that is not in this list is one whose
-        # buffers will call into a dead driver during Julia's shutdown sweep.
+        # Registered before anything can allocate against it, so the exit hook
+        # marks it lost (`LIVE_CONTEXTS`).
         push!(LIVE_CONTEXTS, WeakRef(ctx))
         ctx.caches = DeviceCaches()
         ctx.diag = Diagnostics()
-        # Filled by the constructor once the device exists; null until then so a
-        # barrier recorded before that point is skipped rather than jumping to
-        # whatever the field happened to contain.
+        # Null until `VkContext(; …)` sets it, so a barrier recorded earlier is
+        # skipped rather than jumping to garbage.
         ctx.cmd_pipeline_barrier_fptr = C_NULL
         ctx.host_import_alignment = 0
+        # Seeded from disk; the header is validated against this physical
+        # device first, since `vkCreatePipelineCache` is no safe place to find
+        # a mismatch.
         ctx.pipeline_cache = create_lava_pipeline_cache(
             device, lava_pipeline_cache_path(device_name, driver_version), physical_device)
         _register_pipeline_cache_atexit!()
-        # Now build the default submit channel with the live ctx.  Sets the
-        # remaining field; no nullable slot, no post-hoc mutation.
         ctx.default_bq = SubmitChannel(device, primary_queue, queue_family_index, ctx)
         return ctx
     end
 end
 
-# Compact, because the default walks the whole object graph: a context holds its
-# channels, which hold their queues, which hold the context. Printing one
-# backend kept a test runner busy for half an hour.
+# Compact: the default walks the cycle context -> channels -> queues -> context
+# and took half an hour for one backend.
 Base.show(io::IO, ctx::VkContext) = print(io, "VkContext(", repr(ctx.device_name), ")")
 Base.show(io::IO, q::VulkanQueue{VkContext}) =
     print(io, "VulkanQueue(", repr(q.ctx.device_name), ", family ", q.family_index, ")")
@@ -680,28 +507,19 @@ Base.show(io::IO, q::VulkanQueue{VkContext}) =
 """
     caps(ctx) -> DeviceCaps
 
-What kernels ask this device. Queried on first call and cached on the context.
-
-Lazy rather than filled by the constructor because half of it — whether a
-cooperative-matrix GEMM is usable, and at what subgroup width — is answered
-against the *logical* device and its enabled extensions, which do not exist while
-the context is still being built.
-
-Tests that want a kernel's decision for a device they do not have assign a
-modified copy: `ctx.caches.caps = DeviceCaps(caps(ctx); workgrouplimit = 512)`.
-Per context, so it cannot leak into another device the way the module-level
-`WORKGROUP_LIMIT` it replaces did.
+What kernels ask this device, queried on first call and cached on the context.
+Lazy because part of it (cooperative-matrix GEMM, subgroup width) is answered
+against the logical device, which does not exist while the context is built.
+Tests may assign a modified copy:
+`ctx.caches.caps = DeviceCaps(caps(ctx); workgrouplimit = 512)`.
 """
 function caps(ctx::VkContext)
     c = ctx.caches.caps
     c === nothing || return c
     limits = VK.get_physical_device_properties(ctx.physical_device).limits
     cores, warps = query_shader_cores(ctx.physical_device)
-    # The driver's own table, not a constant. `tile` was `GEMM_TILE = 16` — a
-    # comment reading "the cooperative-matrix tile this device implements" on a
-    # module-level binding, which is a device fact that no device answered for.
-    # On a card reporting anything but 16 the kernels strided by 16 and read
-    # another fragment's registers, and nothing would have crashed.
+    # The tile comes from the driver's table: a kernel striding by the wrong
+    # tile reads another fragment's registers without crashing.
     shapes = matrixshapes(ctx)
     square = bestshape(shapes, Float16, Float32)
     ctx.caches.caps = DeviceCaps(
@@ -716,32 +534,16 @@ function caps(ctx::VkContext)
         shapes)
 end
 
-# `wggranularity(caps, nt)` moved to `KernelInterface` with `DeviceCaps`. It is a
-# lookup into `caps.wggran` and nothing else, so it belongs with the table rather
-# than with the Vulkan query that fills it — which is `workgroup_matrix_granularity`
-# just below, and stays here because it is a driver call.
-
 """
     workgroup_matrix_granularity(ctx) -> Vector{(invocations, M, N, K)}
 
-The shapes a **workgroup-scope** fp16 x fp16 -> fp32 cooperative matrix may have
-on this device, one row per workgroup size, sorted by size.
-
-Empty means no workgroup-scope matrices — which is every device that is not
-NVIDIA with `VK_NV_cooperative_matrix2`, and is why this doubles as the
-capability test: a kernel cannot ask "may I?" without also being handed "at what
-shapes?", and those two drifting apart is how a kernel ends up asking for a tile
-the device refuses at pipeline creation.
-
-The pairing is the part that is not guessable. `M`, `N` and `K` are multiples,
-not sizes, and they COARSEN as the workgroup grows — on an RTX 4000 Ada,
-16/16/16 at 32 and 64 invocations, 32/16/16 at 128, 32/32/16 at 256. So a
-head dimension of 72 pads to 80 at 128 invocations and to 96 at 256, and the
-padding is 33% of both products in the second case. Measured: every tiling was
-faster at 128 than at 256 for exactly that reason.
-
-fp16 x fp16 -> fp32 only, because that is what every kernel here multiplies.
-Widen it when something needs bf16 or int8; the query returns those rows too.
+Granularities of workgroup-scope fp16 x fp16 -> fp32 cooperative matrices, one
+row per workgroup size, sorted by size. Empty without
+`VK_NV_cooperative_matrix2` workgroup scope, so it doubles as the capability
+test. `M`, `N`, `K` are multiples, not sizes, and coarsen as the workgroup
+grows (RTX 4000 Ada: 16/16/16 at 64 invocations, 32/32/16 at 256), so padding
+grows with the workgroup. Only fp16 -> fp32 rows are kept; the query also
+returns others.
 """
 function workgroup_matrix_granularity(ctx::VkContext)
     rows = NTuple{4,Int}[]
@@ -764,18 +566,9 @@ end
 """
     shader_core_count(ctx) -> Union{Nothing,Int}
 
-Streaming multiprocessors (NVIDIA) or active compute units (AMD), or `nothing`
-when the device does not report it.
-
-`nothing` rather than `0` on purpose. The number's whole job is to be a
-denominator — llama.cpp derives its flash-attention split count as
-`shader_core_count * 2 / total_workgroups` — and a `0` there yields zero splits
-silently, which is a wrong launch that still produces a plausible-looking answer.
-`nothing` cannot be divided, so an unguarded use fails immediately.
-
-Supply the fallback explicitly:
-
-    cores = something(shader_core_count(ctx), 16)
+SMs (NVIDIA) or active compute units (AMD), or `nothing` when unreported.
+`nothing`, not `0`, so an unguarded division fails instead of silently giving
+zero splits. Supply a fallback explicitly: `something(shader_core_count(ctx), 16)`.
 """
 shader_core_count(ctx::VkContext) =
     (c = caps(ctx).cores) == 0 ? nothing : c
@@ -783,8 +576,8 @@ shader_core_count(ctx::VkContext) =
 """
     shader_warps_per_sm(ctx) -> Union{Nothing,Int}
 
-Maximum resident subgroups per SM — the denominator for an occupancy figure.
-`nothing` when unreported; NVIDIA-only in practice (`VK_NV_shader_sm_builtins`).
+Maximum resident subgroups per SM, or `nothing` when unreported (only
+`VK_NV_shader_sm_builtins` reports it).
 """
 shader_warps_per_sm(ctx::VkContext) =
     (w = caps(ctx).warps) == 0 ? nothing : w
@@ -792,58 +585,20 @@ shader_warps_per_sm(ctx::VkContext) =
 """
     max_shared_memory(ctx) -> Int
 
-`maxComputeSharedMemorySize`: the per-workgroup shared-memory ceiling, in bytes.
-Core Vulkan, so this one is always a real number — a kernel that sizes its
-`@localmem` against a budget should read it here rather than assume 48 KB.
+`maxComputeSharedMemorySize`: the per-workgroup shared-memory limit in bytes.
+Core Vulkan, so always reported.
 """
 max_shared_memory(ctx::VkContext) = caps(ctx).sharedbudget
-
-# ── Async-safe validation message capture ──────────────────────────────────
-#
-# The Vulkan debug-utils callback can be invoked re-entrantly from inside a
-# blocking driver ccall — notably GPU-Assisted Validation reading back its
-# error log during `vkWaitSemaphores`.  In that context the calling thread is
-# mid-ccall with driver locks held; doing ANY Julia work that can allocate,
-# log, or hit a scheduler yield/safepoint deadlocks the runtime.  (Observed on
-# the RTX 4000 Ada: GPU-AV catches a BDA OOB, `@error` prints it once, then the
-# process hangs forever — the `@error` yielded while the driver held a lock.)
-#
-# So the callback writes ONLY into preallocated memory via raw ccalls
-# (strlen/memcpy) and `unsafe_store!`/`@inbounds` array writes — no allocation,
-# no logging, no `push!`.  The main thread later calls
-# `drain_validation_messages!(ctx)` to turn raw slots into Strings, capture the
-# hard errors in `ctx.validation.messages`, and log everything. See
-# `ValidationRing` for why the arrays live on the context and how the callback
-# reaches them.
 
 const VK_CONTEXT_REF = Ref{Union{Nothing, VkContext}}(nothing)
 
 """
-Every `VkContext` ever built, weakly.
-
-`VK_CONTEXT_REF` is the BOUND one, and at shutdown that is not the interesting
-set. Julia's `atexit` hooks run before the final finalizer sweep, and the hook in
-`MantleVulkanExt.__init__` marks the bound context lost so that a `LavaArray`
-finalizer running afterwards skips `query_timeline` instead of calling
-`vkGetSemaphoreCounterValue` on a driver that has been torn down.
-
-With one device that is enough. With two it is not, and Mantle's own suite makes
-two: `twodevice_probe.jl` builds a second context, and the software rasterizer
-answers it. Measured 2026-08-30 — the suite finished every test and then took a
-SIGSEGV at exit:
-
-    pthread_mutex_lock                      libc
-    …                                       libvulkan_lvp.so     <- lavapipe
-    vkGetSemaphoreCounterValue
-    query_timeline                          runtime/command.jl:944
-    vk_free!                                runtime/memory.jl:742
-    unsafe_free!(::LavaArray)
-    run_finalizer / ijl_atexit_hook
-
-Weak, so being in this list never keeps a context alive: a device that is
-collected during the session drops out of it, and marking a dead entry is a
-no-op. Never cleaned up in normal running — the list is bounded by how many
-devices a process makes, which is one, or two when something is probing.
+Every `VkContext` ever built, weakly. Julia runs `atexit` hooks before the final
+finalizer sweep; the hook in `initbackend!(::VulkanAPI)` marks every context
+here lost (`mark_all_devices_lost!`), not only the bound one, so no finalizer
+calls into a torn-down driver (a second lavapipe context segfaulted at exit).
+Weak, so the list keeps no context alive; never pruned, since a process makes
+one or two devices.
 """
 const LIVE_CONTEXTS = WeakRef[]
 
@@ -851,10 +606,7 @@ const LIVE_CONTEXTS = WeakRef[]
     mark_all_devices_lost!()
 
 Mark every live context lost, so no finalizer reaches a driver afterwards.
-
-Shutdown only. Marking a device lost makes every subsequent Vulkan call on it a
-no-op, which is what the process wants once it has decided to exit and is
-exactly what it must not do while it is still rendering.
+Shutdown only: every later Vulkan call on these devices becomes a no-op.
 """
 function mark_all_devices_lost!()
     for r in LIVE_CONTEXTS
@@ -865,26 +617,25 @@ function mark_all_devices_lost!()
 end
 
 """
-Bind the process-wide default context.
+    bind_context!(ctx)
 
-What the emitter may declare for a device is not pushed from here. As a process
-global the compiler reads, a kernel compiled for a second device is shaped by
-whichever device is bound; the record travels with the context (`ctx.features`)
-and with every compile job the context runs.
+Bind the process-default context. Pushes no emitter features: those travel with
+the context (`ctx.features`) and its compile jobs, so a kernel for a second
+device is not shaped by the bound one.
 """
 function bind_context!(ctx::Union{Nothing, VkContext})
     VK_CONTEXT_REF[] = ctx
     return ctx
 end
-# Guards the lazy init below. `VkContext(; …)` builds a whole VkDevice and has no
-# idempotency guard of its own, so two threads arriving together built TWO.
+# Guards the lazy init in `vk_context`: `VkContext(; …)` is not idempotent, and
+# two threads arriving together built two devices.
 const VK_CONTEXT_LOCK = ReentrantLock()
 
 """
     device_lost(ctx::VkContext)  ->  Bool
 
-Whether this context's device has been marked lost. Prefer passing `ctx`
-explicitly; the no-arg form looks up the current default context.
+Whether this context's device has been marked lost. The no-argument form reads
+the bound context (`false` if none).
 """
 device_lost(ctx::VkContext) = ctx.device_lost
 device_lost() = let ctx = VK_CONTEXT_REF[]
@@ -892,61 +643,42 @@ device_lost() = let ctx = VK_CONTEXT_REF[]
 end
 
 """
-Mark `ctx`'s device as lost. All subsequent finalizers will skip Vulkan calls.
+    mark_device_lost!(ctx)
 
-Two things reach this state, and only the first is a fault:
-
- 1. `ERROR_DEVICE_LOST` from any Vulkan call — see `mark_if_device_lost!`.
- 2. **Retirement**: a context nobody will call into again, whose buffers are
-    still alive in Julia and whose finalizers must therefore not touch it.
-    `reset_device!` retires the context it replaces; anything that builds a
-    context of its own with `VkContext(; select)` owns retiring it.
-
-The flag means the same thing to every consumer either way — *do not call into
-this device* — which is why the second case reuses it rather than adding a
-parallel one. A context that is dropped without being retired hands its
-finalizers a device that VK.jl's own handle finalizers may already have
-destroyed, and the crash lands inside the driver at whatever GC runs next.
+Mark `ctx`'s device lost: finalizers and later callers skip Vulkan calls on it.
+Set on `ERROR_DEVICE_LOST` (`mark_if_lost!`) and on retirement of a context
+whose buffers outlive it. `reset_device!` retires the context it replaces;
+whoever builds one with `VkContext(; select)` must retire it. A context dropped
+unretired hands its finalizers a device VK.jl may already have destroyed, and
+the driver crashes at the next GC.
 """
 mark_device_lost!(ctx::VkContext) = (ctx.device_lost = true; nothing)
 
 """
-Hands out `VkContext.id`. Monotonic and never reused, so a device destroyed and
-recreated cannot inherit cache entries keyed to its predecessor.
-
-Nothing in `src/` reads `ctx.id` any more — the dictionaries it keyed are
-`VkContext` fields now, which is what made it redundant. It survives as a cheap
-identity for diagnostics and for `twodevice_probe.jl`'s "two contexts must not
-share an id" assertion, and this counter with it.
+Source of `VkContext.id`: monotonic, never reused. Nothing in `src/` keys on
+the id; it identifies contexts in diagnostics.
 """
 const VK_CONTEXT_COUNTER = Ref{UInt64}(0)
 
 """
     vk_context() -> VkContext
 
-Get or create the global Vulkan context. Lazily initializes on first call.
+The process-default context, built and bound on first call. Thread-safe.
 """
 function vk_context()
     ctx = VK_CONTEXT_REF[]
     ctx === nothing || return ctx::VkContext
-    # Double-checked under a lock. Unlocked, two threads both saw `nothing` and
-    # both ran the constructor, leaving two live VkDevices: the loser's context is
-    # still reachable from every buffer it allocated (`buf.last_write` retains
-    # its channel), so the next cross-queue wait passed a semaphore from one
-    # device to the other and the driver segfaulted with no Julia frame to show.
+    # Double-checked under a lock: two contexts built concurrently left buffers
+    # stamped with the loser's channel, and a cross-queue wait then passed one
+    # device's semaphore to the other (driver segfault).
     lock(VK_CONTEXT_LOCK)
     try
         ctx = VK_CONTEXT_REF[]
         ctx === nothing || return ctx::VkContext
-        # `invokelatest`, not a direct call: a direct one makes inference record
-        # a backedge from `vk_context` to the `VkContext(; …)` constructor, and
-        # `getproperty(::LavaBackend, :bq)` goes through here, so EVERY Lava
-        # operation ends up inferring through Vulkan initialisation. Anything
-        # that invalidates the constructor then invalidates the whole package —
-        # loading GLMakie does exactly that (FreeType adds a `Base.unsafe_load`
-        # method), and it cost 50 506 Lava MethodInstances and ~41 s of
-        # re-inference on the first GPU call afterwards. The dynamic dispatch is
-        # paid once, on the single call that creates the context.
+        # `invokelatest` so inference records no backedge from `vk_context`,
+        # which every Lava operation reaches, to the constructor. Otherwise
+        # invalidating the constructor (loading GLMakie does) re-infers the
+        # whole package on the next GPU call (~41 s).
         ctx = Base.invokelatest(VkContext)::VkContext
         bind_context!(ctx)
         return ctx::VkContext
@@ -961,34 +693,21 @@ vk_device() = vk_context().device
     reset_device!(; select = nothing,
                        debug = <the outgoing device's config>)
 
-Replace the process-default Vulkan device. Destroys the old context and creates a
-fresh one; clears all caches (pipelines, kernels, arg buffers).
+Replace the process-default device: save the old context's pipeline cache,
+destroy its pool, mark it lost, and bind a new one. Per-device caches go with
+the old context. Every existing `LavaArray` becomes invalid and must be
+reallocated.
 
-`select` names the new device as [`selectdevice`](@ref) reads it; `nothing` is the
-best one by the ranking. Unlike `debug` it does not carry across, so after
-`defaultdevice!("NVIDIA")` a reset that should stay there says so again.
+`select` picks the new device as [`selectdevice`](@ref) does (`nothing`: best
+ranked) and does not carry across. `debug` defaults to the outgoing device's
+configuration, so a recovery reset after `ERROR_DEVICE_LOST` keeps it. Changing
+validation needs a reset, since it is fixed at `vkCreateInstance`:
 
-Two reasons to call it.
+    reset_device!(debug = DebugConfig(gpu_av = true, pool_disabled = true))
+    verify_gpu_av()
+    reset_device!(debug = DebugConfig())
 
-1. **Recovery**, after `ERROR_DEVICE_LOST` or another unrecoverable error:
-   `reset_device!()`. The debugging configuration carries across, so a reset in
-   the middle of a session does not silently turn the instruments off.
-
-2. **Switching validation on or off** — and this is the *only* way, because those
-   settings are fixed at `vkCreateInstance` and cannot be applied to a device
-   that already exists:
-
-       reset_device!(debug = DebugConfig(gpu_av = true, pool_disabled = true))
-       verify_gpu_av()                     # prove the layer actually fires
-       reset_device!(debug = DebugConfig())   # …and back to the fast path
-
-   See [`DebugConfig`](@ref). There is nothing else: no `enable_gpu_av`, no
-   environment variable, no post-hoc toggle. If you want a device *without*
-   installing it as the default — a second device, a lavapipe reference — build
-   it with `VkContext(; select, debug)` instead.
-
-**WARNING**: All existing `LavaArray`s become INVALID after reset — their backing
-GPU buffers no longer exist. You must reallocate all GPU data.
+For a device that is not the default, use `VkContext(; select, debug)`.
 """
 function reset_device!(; select = nothing,
                             debug::Union{Nothing,DebugConfig} = nothing)
@@ -996,54 +715,29 @@ function reset_device!(; select = nothing,
           let old = VK_CONTEXT_REF[]
               old === nothing ? DebugConfig() : old.debug
           end
-    # Persist the VkPipelineCache before tearing the device down so the
-    # next session can skip AMDVLK's SPIR-V → ISA recompile.
+    # Saved so the next session skips the SPIR-V to ISA recompile.
     let old = VK_CONTEXT_REF[]
         old === nothing || save_pipeline_cache!(old)
     end
-    # Retire the old context BEFORE dropping it. Pre-reset `VkManagedBuffer`s
-    # hold a strong ref to it, and their finalizers gate every Vulkan call on
-    # `device_lost` — so marking it here is what makes that gate true.
-    #
-    # Set and not assumed: a reset after `ERROR_DEVICE_LOST` finds the flag
-    # already true, while a voluntary `reset_device!()` does not. Dropping the
-    # ref below then makes the old context garbage — and its buffers garbage in
-    # the SAME collection, where Julia does not order finalizers. Run
-    # the context's first and `VK.Device`'s own finalizer destroys the
-    # device; the buffer's `vk_free!` then calls `query_timeline` on it and the
-    # driver takes a SIGSEGV inside `vkGetSemaphoreCounterValue`.
-    #
-    #     d = KA.allocate(LavaBackend(), Float32, 1000); fill!(d, 1f0)
-    #     reset_device!(); d = nothing; GC.gc()   # <- segfault
-    #
-    # A retired context is one nothing may call into: every array that predates
-    # the reset holds memory belonging to a device that is gone, so there is no
-    # case where skipping is wrong. `mark_device_lost!` is the same flag the
-    # `VkResult` rule sets, and this is the second way to reach it.
+    # Retire the old context before dropping it, also on a voluntary reset.
+    # Its buffers become garbage in the same collection, where Julia does not
+    # order finalizers: if `VK.Device`'s finalizer runs first, a buffer that
+    # still calls into the device segfaults in the driver. `device_lost` makes
+    # `destroy_buffer!` skip Vulkan calls.
     let old = VK_CONTEXT_REF[]
         if old !== nothing
-            # Its blocks, while it is still the thing that owns them. This used
-            # to be a reset callback walking a global `POOLS` dict.
+            # Its blocks, while it still owns them.
             destroy_pool!(old)
             mark_device_lost!(old)
         end
     end
     bind_context!(nothing)
-    # Don't destroy old Vulkan handles — they're invalid after DEVICE_LOST.
-    # GC will eventually try to destroy them; _destroy_buffer! skips when
-    # DEVICE_LOST was true (and we set it false only after clearing context).
-    # Nothing to clear: the ring, its cursor and the drained messages are all
-    # fields of the context being retired, and the new one brings a fresh
-    # `ValidationRing` that its own messenger writes into.
-    #
-    # Built here rather than left to `vk_context()`'s lazy path, because the
-    # configuration has to reach `vkCreateInstance` and the lazy path has no way
-    # to be told about it. `invokelatest` for the same backedge reason as there.
+    # Built here, not by `vk_context()`'s lazy path, because `cfg` must reach
+    # `vkCreateInstance`. `invokelatest` for the same backedge reason.
     ctx = Base.invokelatest(VkContext; select, debug = cfg)::VkContext
     bind_context!(ctx)
-    # `gpu_av` is what was ACHIEVED, not what was asked — the layer or the
-    # extension can be missing, and a run under an instrument that never attached
-    # reads exactly like a clean run. Logged so that is visible without asking.
+    # Logs what attached, not what was asked: a run without GPU-AV reads like
+    # a clean run.
     @info "Lava: device reset complete" device=ctx.device_name validation=cfg.validation gpu_av=ctx.gpu_assisted pool_disabled=cfg.pool_disabled
     if cfg.gpu_av && !ctx.gpu_assisted
         @warn "GPU-AV was requested but did NOT attach (gpu_assisted=false) — a clean run now means the instrument was off, not that there is no fault. Check VK_EXT_validation_features + VK_LAYER_KHRONOS_validation on this loader/driver."
@@ -1055,36 +749,20 @@ end
 """
     VkContext(; select = nothing, debug = DebugConfig()) -> VkContext
 
-Build a device. **Does not install it** as the process default — `vk_context()`
-is what does that, and it is the only caller that should.
+Build a device without binding it as the process default (`vk_context`,
+`reset_device!` and `defaultdevice!` bind). The caller retires it
+(`mark_device_lost!`).
 
-This is the explicit constructor. Reach for it when you want a *specific* device,
-or a device with validation on; `vk_context()` is the lazy default for everything
-else.
-
-`debug` is where every validation and instrumentation setting is chosen, and the
-only place they can be: they configure the `VkInstance` and are fixed by
-`vkCreateInstance`, so nothing set afterwards reaches a device that already
-exists. See [`DebugConfig`](@ref) — it replaced seven environment variables that
-were read here, two of whose failure modes were silent.
-
-    ctx = VkContext(debug = DebugConfig(gpu_av = true, gpu_av_shaders = ["step_kernel"]))
-
-`select` names the physical device the way `Device(VulkanAPI(); select)` does
-(`Mantle.selectdevice`): `nothing` for the ranking, a name substring, an index
-into `devices(VulkanAPI())`, or a predicate over `DeviceInfo`. That is what makes
-a two-device test possible on a single-GPU machine: the loader enumerates the
-real GPU *and* lavapipe from one instance, so
-
-    gpu = vk_context()
-    cpu = VkContext(select = "llvmpipe")
-
-gives two live contexts with two distinct `id`s, which is the pair every
-per-device cache key has to be checked against.
+`debug` ([`DebugConfig`](@ref)) holds every validation and instrumentation
+setting; they are fixed at `vkCreateInstance`. `select` picks the physical
+device as `Mantle.selectdevice` does: `nothing` for the ranking, a name
+substring, an index into `devices(VulkanAPI())`, or a predicate over
+`DeviceInfo`. The loader enumerates the GPU and lavapipe from one instance, so
+`VkContext(select = "llvmpipe")` beside `vk_context()` gives two devices on a
+single-GPU machine.
 """
 function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
-    # Create instance — target Vulkan 1.4 (device supports 1.4.335 on RADV).
-    # Bumping API version unlocks 1.3/1.4 core features we enable below.
+    # API 1.4, for the 1.3/1.4 core features enabled below.
     app_info = VK.ApplicationInfo(
         v"0.1.0", v"0.1.0", v"1.4.0";
         application_name="Lava.jl",
@@ -1103,11 +781,10 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         end
     end
 
-    # Collect all available instance extensions (driver + layer-provided)
+    # Instance extensions from the drivers and the validation layer.
     inst_extensions = String[]
     available_ext = unwrap(VK.enumerate_instance_extension_properties())
     ext_names = Set(String(filter(!=('\0'), collect(e.extension_name))) for e in available_ext)
-    # Also collect extensions provided by the validation layer
     has_validation = !isempty(layers)
     if has_validation
         layer_ext = unwrap(VK.enumerate_instance_extension_properties(; layer_name="VK_LAYER_KHRONOS_validation"))
@@ -1119,9 +796,8 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     if has_debug_utils
         push!(inst_extensions, "VK_EXT_debug_utils")
     end
-    # Surface extensions only where the drivers offer them. A device without
-    # any is headless — lavapipe on a Mac through `Vulkan_Loader_jll` has no
-    # `VK_EXT_metal_surface` — and asking for one it lacks fails the instance.
+    # Surface extensions only where offered: requesting a missing one fails the
+    # instance (lavapipe on macOS has no `VK_EXT_metal_surface`).
     "VK_KHR_surface" in ext_names && push!(inst_extensions, "VK_KHR_surface")
     if Sys.islinux()
         if "VK_KHR_xcb_surface" in ext_names
@@ -1137,25 +813,15 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     elseif Sys.isapple()
         "VK_EXT_metal_surface" in ext_names && push!(inst_extensions, "VK_EXT_metal_surface")
     end
-    # A surface with no window system behind it: what GLFW's null platform
-    # (`JULIA_GLFW_PLATFORM=null`) makes its windows' surfaces from. That platform
-    # is how window code runs where no window can be mapped — a locked session
-    # spins `glfwShowWindow` for ever — and without this extension it fails at
-    # `CreateWindowSurface`: "Vulkan instance missing VK_EXT_headless_surface".
+    # GLFW's null platform (`JULIA_GLFW_PLATFORM=null`, for sessions where no
+    # window can be mapped) creates its surfaces from this extension.
     "VK_EXT_headless_surface" in ext_names && push!(inst_extensions, "VK_EXT_headless_surface")
 
-    # Extended validation, all of it requiring VK_EXT_validation_features:
-    #   gpu_av         → shader instrumentation (OOB descriptor access, ray query
-    #                    misuse); does NOT cover plain BDA ranges in current layers.
-    #   sync_val       → synchronization validation (reads before writes, missing
-    #                    barriers, cross-submit hazards). Catches shadow-ownership UAFs.
-    #   best_practices → API-misuse / perf warnings.
-    #   printf         → NonSemantic.DebugPrintf output from `@lava_printf`.
-    # All are very slow; use one or a combination as needed for triage. See
-    # `DebugConfig` — it enforces the two rules rather than warning about them.
-    #
-    # `gpu_assisted` and `sync_val` below record what was ACHIEVED, which is not
-    # the same as `debug`, what was asked for: the extension may be missing.
+    # Extended validation, all needing VK_EXT_validation_features (all slow):
+    # gpu_av instruments shaders (OOB descriptor access, ray query misuse; not
+    # plain BDA ranges), sync_val checks synchronization, best_practices warns
+    # on API misuse, printf delivers `@lava_printf` output. `gpu_assisted` and
+    # `sync_val` record what attached, since the extension may be missing.
     gpu_assisted = false
     sync_val     = false
     want_gpu_av     = debug.gpu_av
@@ -1186,10 +852,9 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     if !isempty(validation_features_reqs) && has_validation && "VK_EXT_validation_features" in ext_names
         push!(inst_extensions, "VK_EXT_validation_features")
         validation_features = VK.ValidationFeaturesEXT(validation_features_reqs, [])
-        # `VkValidationFeaturesEXT` cannot express Safe Mode or selective
-        # instrumentation — those are `VK_EXT_layer_settings` only, which is why
-        # they were missing. Chain the settings struct in front when either is
-        # asked for; the layer reads both.
+        # Safe Mode and selective instrumentation exist only in
+        # `VK_EXT_layer_settings`; its struct is chained in front and the layer
+        # reads both.
         nextchain = validation_features
         if want_gpu_av && (want_gpuav_safe || !isempty(gpuav_shaders)) &&
            "VK_EXT_layer_settings" in ext_names
@@ -1225,15 +890,13 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         end
     end
 
-    # Set up debug messenger to capture validation/driver error messages
-    # Before the messenger, because the messenger is given its address.
+    # Created before the messenger, which is given its address.
     validation = ValidationRing()
     debug_messenger = nothing
     if has_debug_utils
         debug_messenger = setup_debug_messenger(instance, validation, debug)
     end
 
-    # Pick physical device (prefer discrete GPU)
     phys_devs = unwrap(VK.enumerate_physical_devices(instance))
     isempty(phys_devs) && throw(LavaError(
         "device initialization",
@@ -1244,20 +907,18 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     props = VK.get_physical_device_properties(phys_dev)
     dev_name = String(filter(!=('\0'), collect(props.device_name)))
 
-    # Find queue family (prefer graphics+compute for graphics pipeline support)
+    # Prefers a graphics+compute family.
     qf_idx = find_graphics_compute_queue_family(phys_dev)
 
-    # Create logical device with required features
     qf_props = VK.get_physical_device_queue_family_properties(phys_dev)
     max_queues = qf_props[qf_idx + 1].queue_count
     n_queues = min(4, Int(max_queues))
     queue_priorities = ones(Float32, n_queues)
     queue_ci = [VK.DeviceQueueCreateInfo(qf_idx, queue_priorities)]
 
-    # Additionally, request queues from any compute-capable family that
-    # isn't the primary one (RADV exposes graphics+compute on family 0 with
-    # 1 queue, and compute-only on family 1 with 4 queues). We need these
-    # for async upload/dispatch in the explicit-queue design.
+    # Queues from a second compute+transfer family, if any (RADV: family 0 is
+    # graphics+compute with 1 queue, family 1 compute-only with 4). Nothing
+    # submits to them.
     async_qf_idx = find_async_compute_queue_family(phys_dev, qf_idx)
     async_n_queues = 0
     if async_qf_idx !== nothing
@@ -1266,9 +927,8 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         push!(queue_ci, VK.DeviceQueueCreateInfo(async_qf_idx, ones(Float32, async_n_queues)))
     end
 
-    # Hardware video decode (opt-in): request one queue from the VIDEO_DECODE
-    # family. Enabling the extensions + queue has no effect until a decode
-    # session is created, so it's safe to always request when the device offers it.
+    # One video-decode queue whenever offered: extensions and queue have no
+    # effect until a decode session exists.
     video_qf_idx = find_video_decode_queue_family(phys_dev)
     has_video_decode = video_qf_idx !== nothing &&
         has_extension(phys_dev, "VK_KHR_video_queue") &&
@@ -1278,27 +938,19 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     video_qf_idx === nothing ||
         push!(queue_ci, VK.DeviceQueueCreateInfo(video_qf_idx, Float32[1.0]))
 
-    # Check for RT extension support
     has_rt = has_rt_extensions(phys_dev)
     has_ray_query = has_rt && has_extension(phys_dev, "VK_KHR_ray_query")
-    # SER (Shader Execution Reordering) — NVIDIA-specific extension that
-    # exposes the `HitObject*` API and `reorderThreadWithHitObjectNV` for
-    # warp-level work reordering between traceRay and shading.  Lets
-    # divergent path-tracer chits ((`vp_closesthit_shade`) execute in
-    # coherent warps.  Optional; we still ship a working RT pipeline path
-    # without it.
+    # SER (NVIDIA): `reorderThreadWithHitObjectNV` regroups divergent
+    # closest-hit shading into coherent warps. Optional.
     has_ser = has_rt && has_extension(phys_dev, "VK_NV_ray_tracing_invocation_reorder")
 
-    # Check for workgroup memory explicit layout (needed for mixed-type shared memory structs)
+    # Explicit workgroup memory layout: needed for mixed-type shared memory structs.
     has_wg_explicit = has_extension(phys_dev, "VK_KHR_workgroup_memory_explicit_layout")
     has_atomic_float = has_extension(phys_dev, "VK_EXT_shader_atomic_float")
-    # 64-bit atomics. These were hardcoded `false` below while the emitter happily
-    # declared the `Int64Atomics` SPIR-V capability, so any kernel using one built a
-    # module whose capability had no enabled feature behind it — undefined, and
-    # reported by the validation layer as
-    # VUID-VkShaderModuleCreateInfo-pCode-08740. Ask the device instead of
-    # assuming, in both directions: enabling an unsupported feature fails device
-    # creation, and leaving a supported one off is what caused this.
+    # 64-bit atomics, asked rather than assumed: the emitter declares
+    # `Int64Atomics`, undefined without the feature
+    # (VUID-VkShaderModuleCreateInfo-pCode-08740), and enabling an unsupported
+    # feature fails device creation.
     has_int64_atomics = let
         q = VK.get_physical_device_features_2(phys_dev,
                 VK.PhysicalDeviceVulkan12Features).next
@@ -1308,75 +960,44 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     # when work can run on the async compute family.
     has_memory_model_device_scope = VK.get_physical_device_features_2(phys_dev,
         VK.PhysicalDeviceVulkan12Features).next.vulkan_memory_model_device_scope
-    # Subgroup ops on anything other than 32-bit types. `subgroup_shuffle` and the
-    # rest are bound for Int64/UInt64/Float64 (test_subgroup_shuffle.jl's
-    # "every element type round-trips"), and SPIR-V group operations on 8-, 16- or
-    # 64-bit types REQUIRE this feature: VUID-RuntimeSpirv-None-06275. Hardcoded
-    # false, so those shuffles were undefined — GPU-assisted validation reports
-    # "OpGroupNonUniformShuffle is using a 64-bit int scalar but
-    # shaderSubgroupExtendedTypes was not enabled". Asked, not assumed, for the
-    # same reason as the atomics above.
+    # Subgroup operations on 8-, 16- and 64-bit types (`subgroup_shuffle` is
+    # bound for 64-bit types) require this feature
+    # (VUID-RuntimeSpirv-None-06275). Asked, as for the atomics.
     has_subgroup_extended = let
         q = VK.get_physical_device_features_2(phys_dev,
                 VK.PhysicalDeviceVulkan12Features).next
         q.shader_subgroup_extended_types
     end
     has_pipeline_exec_props = has_extension(phys_dev, "VK_KHR_pipeline_executable_properties")
-    # VK_EXT_memory_budget — lets us read VkPhysicalDeviceMemoryBudgetPropertiesEXT
-    # for real heap utilisation, used in OOM error reporting.
+    # Per-heap budget and usage for OOM reports.
     has_memory_budget = has_extension(phys_dev, "VK_EXT_memory_budget")
-    # Device-generated commands: a shader writes the command stream and the host
-    # issues one execute whose SEQUENCE COUNT comes from a device address. That
-    # is the only way either backend lets the device decide how much work runs —
-    # neither Vulkan nor Metal has device-side enqueue.
-    #
-    # It is NOT what `repeat!` lowers to, and the reason is worth recording here
-    # because the two extensions look interchangeable and are not: DGC sequences
-    # carry no barriers between them, so N sequences are N dispatches that may
-    # overlap. That expresses "do this independent thing N times"; it cannot
-    # express a loop whose iteration k+1 reads what k wrote, which is every
-    # bounce loop.
+    # Device-generated commands: one execute whose sequence count comes from a
+    # device address. Not what `repeat!` lowers to: sequences have no barriers
+    # between them, so they cannot express a loop where iteration k+1 reads
+    # what k wrote.
     has_dgc = has_extension(phys_dev, "VK_EXT_device_generated_commands")
-    # Conditional rendering: a 32-bit predicate in a device buffer, read at
-    # EXECUTION time, that discards the commands inside its scope. That is what
-    # `repeat!` lowers to — the body is recorded `maxiters` times with ordinary
-    # barriers between iterations, and the device decides how many of them run.
-    # Barriers still execute inside a discarded scope; only the work is skipped.
+    # Conditional rendering: a device-buffer predicate, read at execution,
+    # discards the commands in its scope. `repeat!` records the body `maxiters`
+    # times with barriers between iterations and lets the device skip the
+    # rest; barriers still execute inside a discarded scope.
     has_cond_render = has_extension(phys_dev, "VK_EXT_conditional_rendering")
-    # Cooperative matrix — subgroup-scope matrix multiply-accumulate (tensor
-    # cores). Probed once here; kernels pick a coopmat or a scalar
-    # instantiation from `ctx.coopmat_available` / `ctx.coopmat_shapes`.
-    #
-    # Uses the portable VK_KHR_cooperative_matrix. The FEATURE, not only the
-    # extension: lavapipe on a Mac lists the extension with `cooperative_matrix`
-    # off, and asking for it fails device creation with FEATURE_NOT_PRESENT.
+    # VK_KHR_cooperative_matrix. The feature, not only the extension: lavapipe
+    # on macOS lists the extension with `cooperative_matrix` off, and requesting
+    # it fails device creation with FEATURE_NOT_PRESENT.
     has_coopmat = has_extension(phys_dev, "VK_KHR_cooperative_matrix") &&
         VK.get_physical_device_features_2(phys_dev,
             VK.PhysicalDeviceCooperativeMatrixFeaturesKHR).next.cooperative_matrix
-    # VK_NV_cooperative_matrix2 layers per-element operations, row reductions,
-    # flexible dimensions and tensor addressing onto the KHR matrices. Which of
-    # its seven sub-features are actually on is read back below, after device
-    # creation, rather than assumed from the extension being present.
-    # NVIDIA-only; kernels keep their KHR path for everyone else.
+    # NVIDIA-only. Which sub-features exist is queried below, before device
+    # creation, not assumed from the extension.
     has_coopmat2 = has_coopmat && has_extension(phys_dev, "VK_NV_cooperative_matrix2")
-    # Matrix x vector at subgroup scope. Wanted for the shapes where a
-    # cooperative matrix wastes most of its tile. NVIDIA-only.
     has_coopvec = has_extension(phys_dev, "VK_NV_cooperative_vector")
-    # A defined reconvergence point (KHR, and RDNA3 has it). Needed before a
-    # kernel may spin on a shared flag, i.e. before producer/consumer staging.
     has_max_reconv = has_extension(phys_dev, "VK_KHR_shader_maximal_reconvergence")
     has_subgroup_ucf = has_extension(phys_dev, "VK_KHR_shader_subgroup_uniform_control_flow")
-    # OpGroupNonUniformRotateKHR: shuffle by a subgroup-uniform delta, which is
-    # the cheap form of a butterfly reduction. KHR, promoted to Vulkan 1.4.
     has_subgroup_rotate = has_extension(phys_dev, "VK_KHR_shader_subgroup_rotate")
-    # VK_EXT_mesh_shader. Probed, not assumed: it is an EXT, and the geometry
-    # front end it replaces is still the only one on hardware without it.
     has_mesh_shader = has_extension(phys_dev, "VK_EXT_mesh_shader")
 
-    # Device extensions. A swapchain only where there is one: a headless device —
-    # lavapipe on a Mac — has none, and a window on it is not something to ask
-    # for. A device that advertises `VK_KHR_portability_subset` must have it
-    # enabled (the spec's rule, not a choice).
+    # A swapchain only where offered (headless lavapipe on macOS has none). The
+    # spec requires enabling `VK_KHR_portability_subset` when advertised.
     extensions = String[]
     has_extension(phys_dev, "VK_KHR_swapchain") && push!(extensions, "VK_KHR_swapchain")
     has_extension(phys_dev, "VK_KHR_portability_subset") &&
@@ -1400,11 +1021,9 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     if has_atomic_float
         push!(extensions, "VK_EXT_shader_atomic_float")
     end
-    # Opt-in: pipeline executable properties (register count, scratch, vendor
-    # ISA) for the profiling API.  Off by default because enabling the
-    # extension changes pipeline-creation behavior on some drivers; user opts
-    # in via `enable_pipeline_executable_properties!()` BEFORE first
-    # device creation.
+    # Pipeline executable properties (registers, scratch, ISA) for profiling.
+    # Opt-in via `enable_pipeline_executable_properties!()` before device
+    # creation, because enabling it changes pipeline creation on some drivers.
     exec_props = has_pipeline_exec_props && PIPELINE_EXEC_PROPERTIES_REQUESTED[]
     if exec_props
         push!(extensions, "VK_KHR_pipeline_executable_properties")
@@ -1439,16 +1058,14 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     if has_mesh_shader
         push!(extensions, "VK_EXT_mesh_shader")
     end
-    # External-memory export (opaque fds for GL/other-API interop). Enabling
-    # the extension has no effect until an VulkanExternalImage is created.
+    # Opaque-fd export for GL interop; no effect until a `VulkanExternalImage` exists.
     has_external_memory = has_extension(phys_dev, "VK_KHR_external_memory_fd")
     if has_external_memory
         push!(extensions, "VK_KHR_external_memory")
         push!(extensions, "VK_KHR_external_memory_fd")
     end
-    # Host memory the device reads in place (`importhost`): weights mapped from
-    # a file, with no upload and no second copy. No effect until something is
-    # imported.
+    # Host memory the device reads in place (`importhost`), e.g. weights mapped
+    # from a file.
     host_import_alignment = 0
     if has_extension(phys_dev, "VK_EXT_external_memory_host")
         has_external_memory || push!(extensions, "VK_KHR_external_memory")
@@ -1456,7 +1073,6 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         host_import_alignment = Int(VK.get_physical_device_properties_2(phys_dev,
             VK.PhysicalDeviceExternalMemoryHostPropertiesEXT).next.min_imported_host_pointer_alignment)
     end
-    # Hardware video decode extensions (family already probed + queue requested above).
     if has_video_decode
         append!(extensions, ["VK_KHR_video_queue", "VK_KHR_video_decode_queue",
                              "VK_KHR_video_decode_h264"])
@@ -1464,23 +1080,23 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
             push!(extensions, "VK_KHR_video_decode_h265")
     end
 
-    # Chain required features — all Vulkan 1.2 promoted features go in Vulkan12Features
-    # (can't mix Vulkan12Features with separate promoted structs like BDA/VariablePointers)
+    # Vulkan 1.2 promoted features go in `Vulkan12Features`, which must not be
+    # chained with their individual structs (e.g. BDA). Variable pointers are
+    # 1.1 and chain separately.
     var_ptr_features = VK.PhysicalDeviceVariablePointersFeatures(
         true,   # variable_pointers_storage_buffer
         true,   # variable_pointers
     )
-    # Vulkan 1.2 features: BDA, VulkanMemoryModel, shaderInt8, scalarBlockLayout
     vulkan12_features = VK._PhysicalDeviceVulkan12Features(
         false,  # sampler_mirror_clamp_to_edge
         false,  # draw_indirect_count
         false,  # storage_buffer_8_bit_access
         false,  # uniform_and_storage_buffer_8_bit_access
         false,  # storage_push_constant_8
-        has_int64_atomics.buffer,  # shader_buffer_int_64_atomics ← the emitter declares Int64Atomics
-        has_int64_atomics.shared,  # shader_shared_int_64_atomics ← ditto, for @localmem
-        true,   # shader_float_16  ← REQUIRED (Float16 types in SPIR-V)
-        true,   # shader_int_8  ← REQUIRED (i8 types in SPIR-V)
+        has_int64_atomics.buffer,  # shader_buffer_int_64_atomics, the emitter declares Int64Atomics
+        has_int64_atomics.shared,  # shader_shared_int_64_atomics, same for @localmem
+        true,   # shader_float_16, required: Float16 in SPIR-V
+        true,   # shader_int_8, required: i8 in SPIR-V
         false,  # descriptor_indexing
         false,  # shader_input_attachment_array_dynamic_indexing
         false,  # shader_uniform_texel_buffer_array_dynamic_indexing
@@ -1503,17 +1119,17 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         false,  # descriptor_binding_variable_descriptor_count
         false,  # runtime_descriptor_array
         false,  # sampler_filter_minmax
-        true,   # scalar_block_layout  ← BDA struct layout
+        true,   # scalar_block_layout, BDA struct layout
         false,  # imageless_framebuffer
         false,  # uniform_buffer_standard_layout
-        has_subgroup_extended,  # shader_subgroup_extended_types ← 64-bit subgroup shuffles
+        has_subgroup_extended,  # shader_subgroup_extended_types, 64-bit subgroup shuffles
         false,  # separate_depth_stencil_layouts
         false,  # host_query_reset
-        true,   # timeline_semaphore  ← REQUIRED for explicit-queue cross-queue sync
-        true,   # buffer_device_address  ← REQUIRED (BDA)
+        true,   # timeline_semaphore, required: cross-queue sync
+        true,   # buffer_device_address, required
         false,  # buffer_device_address_capture_replay
         false,  # buffer_device_address_multi_device
-        true,   # vulkan_memory_model  ← REQUIRED (QueueFamily scope)
+        true,   # vulkan_memory_model, required: QueueFamily scope
         has_memory_model_device_scope,  # vulkan_memory_model_device_scope
         false,  # vulkan_memory_model_availability_visibility_chains
         false,  # shader_output_viewport_index
@@ -1521,19 +1137,9 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         false;  # subgroup_broadcast_dynamic_id
         next=var_ptr_features
     )
-    # Vulkan 1.3 core features, bundled.  We turn on the set that's
-    # guaranteed by the 1.3 core spec and useful for a compute/RT backend:
-    #   - synchronization2        (REQUIRED: we use vkQueueSubmit2 / cmd_pipeline_barrier_2)
-    #   - dynamic_rendering       (no VkRenderPass/VkFramebuffer boilerplate)
-    #   - maintenance4            (relaxes shader requirements, e.g. storage-buffer layout)
-    #   - subgroup_size_control   (query/set subgroup size)
-    #   - compute_full_subgroups  (FULL_SUBGROUPS flag in pipeline create)
-    #   - pipeline_creation_cache_control (pipeline-cache hints in create)
-    #   - shader_demote_to_helper_invocation (OpDemoteToHelperInvocation in SPIR-V)
-    #   - shader_terminate_invocation         (OpTerminateInvocation in SPIR-V)
-    #   - shader_integer_dot_product          (OpSDot / OpUDot in SPIR-V)
-    #   - shader_zero_initialize_workgroup_memory (zero-init shared mem)
-    #   - private_data            (VkPrivateDataSlot for driver-side tagging)
+    # Vulkan 1.3 core features, all guaranteed by 1.3. `synchronization2` is
+    # required (`vkQueueSubmit2`, `vkCmdPipelineBarrier2`); `dynamic_rendering`
+    # avoids render pass and framebuffer objects.
     vulkan13_features = VK.PhysicalDeviceVulkan13Features(
         :synchronization2,
         :dynamic_rendering,
@@ -1549,7 +1155,6 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         next=vulkan12_features,
     )
 
-    # Chain workgroup explicit layout if available
     feature_chain = vulkan13_features
     if has_wg_explicit
         wg_explicit_features = VK.PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR(
@@ -1562,7 +1167,6 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         feature_chain = wg_explicit_features
     end
 
-    # Chain pipeline-executable-properties features (opt-in profiling).
     if exec_props
         exec_props_features = VK.PhysicalDevicePipelineExecutablePropertiesFeaturesKHR(
             true;  # pipeline_executable_info
@@ -1571,14 +1175,14 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         feature_chain = exec_props_features
     end
 
-    # Chain atomic-float features (used by Lava native reductions via OpAtomicFAdd)
+    # Atomic float: Lava's reductions use OpAtomicFAdd.
     if has_atomic_float
         atomic_float_features = VK.PhysicalDeviceShaderAtomicFloatFeaturesEXT(
-            true,   # shader_buffer_float_32_atomics        — OpAtomicStore/Load/Exchange on f32 SSBO
-            true,   # shader_buffer_float_32_atomic_add     — REQUIRED: OpAtomicFAdd on f32 SSBO
+            true,   # shader_buffer_float_32_atomics, OpAtomicStore/Load/Exchange on f32 SSBO
+            true,   # shader_buffer_float_32_atomic_add, required: OpAtomicFAdd on f32 SSBO
             false,  # shader_buffer_float_64_atomics
             false,  # shader_buffer_float_64_atomic_add
-            true,   # shader_shared_float_32_atomics        — atomics on workgroup/shared memory
+            true,   # shader_shared_float_32_atomics, workgroup memory
             true,   # shader_shared_float_32_atomic_add
             false,  # shader_shared_float_64_atomics
             false,  # shader_shared_float_64_atomic_add
@@ -1591,7 +1195,6 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         feature_chain = atomic_float_features
     end
 
-    # Chain RT features if available
     if has_rt
         as_features = VK.PhysicalDeviceAccelerationStructureFeaturesKHR(
             true,   # acceleration_structure
@@ -1633,10 +1236,9 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         )
         feature_chain = cm_features
     end
-    # Ask the driver which sub-features it actually has before requesting them:
-    # `vkCreateDevice` fails outright if a feature struct turns on a bit the
-    # device does not support, and an advertised extension does not imply
-    # every bit. Everything below follows that shape.
+    # Each feature struct below is filled from what the device reports:
+    # `vkCreateDevice` fails on an unsupported bit, and an advertised extension
+    # does not imply every bit.
     coopmat2_caps = CoopMat2Caps()
     if has_coopmat2
         q = VK.get_physical_device_features_2(phys_dev,
@@ -1685,8 +1287,8 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         q = VK.get_physical_device_features_2(phys_dev,
             VK.PhysicalDeviceConditionalRenderingFeaturesEXT).next
         has_cond_render = q.conditional_rendering
-        # `inherited_conditional_rendering` is for secondary command buffers,
-        # which nothing here records into — asked for as reported, not as `true`.
+        # `inherited_conditional_rendering` (secondary command buffers, unused)
+        # is requested as reported.
         has_cond_render && (feature_chain = VK.PhysicalDeviceConditionalRenderingFeaturesEXT(
             true, q.inherited_conditional_rendering; next = feature_chain))
     end
@@ -1707,12 +1309,11 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     if has_mesh_shader
         q = VK.get_physical_device_features_2(phys_dev,
             VK.PhysicalDeviceMeshShaderFeaturesEXT).next
-        # `mesh_shader` is the one that decides it; the task stage is optional
-        # and a pipeline without one dispatches mesh workgroups directly, which
-        # is what the geometry lowering does.
+        # The task stage is optional: the geometry lowering dispatches mesh
+        # workgroups directly.
         has_mesh_shader = q.mesh_shader
         has_mesh_shader && (feature_chain = VK.PhysicalDeviceMeshShaderFeaturesEXT(
-            q.task_shader,       # asked for as REPORTED — nothing amplifies yet
+            q.task_shader,       # as reported, nothing amplifies
             true,                # mesh_shader
             false,               # multiview_mesh_shader
             false,               # primitive_fragment_shading_rate_mesh_shader
@@ -1730,7 +1331,6 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
                 next=feature_chain))
     end
 
-    # Enable shader int64, float64, geometry/tessellation shaders, wide lines
     core_features = VK.PhysicalDeviceFeatures(
         :shader_int_64, :shader_float_64,
         :shader_int_16,
@@ -1749,13 +1349,12 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     )
 
     queue = VK.get_device_queue(device, qf_idx, 0)
-    # Second queue for async compute/RT (falls back to same queue if only 1 available)
+    # Queue 1 of the primary family, or the primary queue if it has only one.
     compute_queue = n_queues >= 2 ?
         VK.get_device_queue(device, qf_idx, 1) : queue
     video_decode_queue = video_qf_idx === nothing ? nothing :
         VK.get_device_queue(device, video_qf_idx, 0)
 
-    # Query RT pipeline properties
     rt_props = nothing
     if has_rt
         props2 = VK.get_physical_device_properties_2(phys_dev,
@@ -1770,10 +1369,8 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         )
     end
 
-    # Query AS scratch alignment once and cache on the context — used by
-    # `bda_alignment_for(::VkContext, scratch::Bool)` to pick the right
-    # alignment for `LavaArray(...; scratch=true)` allocations.  Vulkan has no
-    # usage flag for "AS scratch", so callers signal via the `scratch` kwarg.
+    # Vulkan has no usage flag for AS scratch, so `LavaArray(...; scratch=true)`
+    # gets this alignment through `bda_alignment_for`.
     as_scratch_align = UInt64(1)
     if has_rt
         as_props2 = VK.get_physical_device_properties_2(phys_dev,
@@ -1792,9 +1389,7 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         @warn "Vulkan validation layers not found. Install vulkan-validationlayers for GPU error diagnostics."
     end
 
-    # Zero-alloc Vulkan function pointers for hot paths. Per device — see the
-    # field's comment on `VkContext`; a global here crashed the first two-device
-    # run. Kept in a local until the context exists, and assigned below.
+    # Per device (see the `VkContext` field); assigned once the context exists.
     cmd_barrier_fptr = VK.function_pointer(device, "vkCmdPipelineBarrier")
 
     mem_props = VK.get_physical_device_memory_properties(phys_dev)
@@ -1802,11 +1397,7 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     wgc = phys_props.limits.max_compute_work_group_count
     max_wg = (Int(wgc[1]), Int(wgc[2]), Int(wgc[3]))
 
-    # VkContext's inner constructor builds its own default_bq via `new()`-
-    # based two-phase init.  Pass the raw primary queue and all other ctx
-    # fields; the ctor wires SubmitChannel(device, queue, qfi, ctx) internally.
-    # The hardware implements a fixed set of (M, N, K, dtype) tiles; a kernel
-    # must choose one of these, it cannot pick an arbitrary tile size.
+    # The fixed set of (M, N, K, type) tiles a kernel may choose from.
     CMShape = eltype(fieldtype(VkContext, :coopmat_shapes))
     coopmat_shapes = CMShape[]
     if has_coopmat
@@ -1817,9 +1408,8 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
                                        scope=UInt32(p.scope)))
             end
         catch err
-            # "Treating as unsupported" on ANY error is how a real fault becomes a
-            # silently slower path. Only an actual absence of the feature is
-            # tolerated; anything else is this library's bug and must surface.
+            # Only a `VulkanError` means unsupported; anything else is a bug
+            # and rethrows rather than becoming a silently slower path.
             err isa VK.VulkanError || rethrow()
             @warn "cooperative-matrix property query failed; treating as unsupported" exception = err
         end
@@ -1853,9 +1443,6 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         has_video_decode, video_decode_queue, video_qf_idx,
         exec_props,
     )
-    # After construction, because it is resolved from THIS device and the inner
-    # constructor has no access to the local. Per device — a module-global one
-    # sent the first device's command buffers through the second device's driver.
     ctx.cmd_pipeline_barrier_fptr = cmd_barrier_fptr
     ctx.host_import_alignment = host_import_alignment
     ctx.validating = has_validation
@@ -1865,40 +1452,27 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         "The device has no host-visible memory left; this is not recoverable here."))
     unsafe_store!(Ptr{UInt32}(flag.mapped_ptr), UInt32(0))
     ctx.exception_flag = flag
-    # What device creation reported. GPU-assisted validation emits harmless
-    # "adjusting settings" warnings during vkCreateDevice that would otherwise
-    # block the first shader compilation. THIS context's: the no-argument form
-    # clears the bound one, which is another device or none, so a device built
-    # beside the default kept its creation messages and handed them to the
-    # first `validationmessages!` asked of it.
+    # Clear what device creation reported (GPU-AV's harmless "adjusting
+    # settings" warnings) so the first shader compile does not see it. This
+    # context's ring: the no-argument form clears the bound context's.
     clear_validation_messages!(ctx)
-    # The pool belongs to this context, so its debug setting is applied here
-    # rather than by the caller: a separate `mempolicy(ctx).disabled =` line
-    # after the reset is one a caller can forget, which leaves GPU-AV blind to
-    # exactly the sub-pool overruns it was turned on to find.
+    # Applied here, not by the caller: with the pool on, GPU-AV cannot see
+    # sub-pool overruns.
     mempolicy(ctx).disabled = debug.pool_disabled
     return ctx
 end
 
-# This backend has one; see `supports_batch_queue` in `graph/queue.jl` for why
-# that is a separate question from whether it can rasterise.
-#
-# Only the `VulkanAPI` method here. The `LavaBackend` one is in
-# `array/ka_backend.jl` beside the type: `LavaBackend` is defined seven includes
-# after this file, and a method signature needs its argument type to exist when
-# the method is DEFINED, not when it is called.
+# The `LavaBackend` method is in `array/ka_backend.jl`: `LavaBackend` is defined
+# after this file.
 supports_batch_queue(::VulkanAPI) = true
 
 """
     allocate_batch_queue!(ctx) -> SubmitChannel
 
-Create a new independent submit channel on a separate Vulkan queue (if available).
-Falls back to a separate command pool on the primary queue if all queues are taken.
-Used by Screen for isolated graphics rendering.
-
-The context holds the returned queue until [`release_batch_queue!`](@ref) gives
-it back. Call that when done — a caller that just drops the reference keeps the
-command pool, semaphore and slabs alive for the life of the device.
+A new submit channel on its own hardware queue of the primary family, or on the
+primary queue with its own command pool once all are taken. The context holds
+it until [`release_batch_queue!`](@ref); a dropped one stays alive with the
+device.
 """
 function allocate_batch_queue!(ctx::VkContext)
     idx = isempty(ctx.free_queue_indices) ? ctx.next_queue_index : pop!(ctx.free_queue_indices)
@@ -1906,7 +1480,7 @@ function allocate_batch_queue!(ctx::VkContext)
         queue = VK.get_device_queue(ctx.device, ctx.queue_family_index, UInt32(idx))
         idx == ctx.next_queue_index && (ctx.next_queue_index += 1)
     else
-        # All hardware queues taken — reuse primary queue with separate command pool
+        # All hardware queues taken: share the primary queue.
         queue = vkqueue(ctx.default_bq)
         idx = -1
     end
@@ -1918,17 +1492,10 @@ end
 """
     release_batch_queue!(bq::SubmitChannel{<:VulkanQueue})
 
-Give a queue from [`allocate_batch_queue!`](@ref) back: drain it, destroy what it
-still holds, and make its hardware slot available again.
-
-Must be called from the queue's owning thread, and only once nothing will record
-on it again — `flush!` below waits for everything already submitted. Releasing
-the context's primary queue is an error; it is not one of the handed-out ones.
-
-Dropping a queue without this is what made the finalizer crash possible: the
-context keeps it alive (see `extra_queues`), so an unreleased queue is a leak of
-a command pool, a semaphore and its argument slabs rather than a dangling
-handle.
+Give a queue from [`allocate_batch_queue!`](@ref) back: flush and drain it,
+drop it from the context and free its hardware slot. Call from the queue's
+owning thread once nothing will record on it again. Throws for the primary
+queue; a second release is a no-op.
 """
 function release_batch_queue!(bq::SubmitChannel{<:VulkanQueue})
     ctx = ctxof(bq)
@@ -1936,10 +1503,9 @@ function release_batch_queue!(bq::SubmitChannel{<:VulkanQueue})
         throw(LavaError("release_batch_queue!", "the context's primary queue cannot be released",
                         "Only queues from `allocate_batch_queue!` can be given back."))
     i = findfirst(q -> q === bq, ctx.extra_queues)
-    i === nothing && return nothing   # already released; releasing twice is a no-op
+    i === nothing && return nothing   # already released
 
-    # Drain before letting go. On a lost device there is nothing to wait for and
-    # every call would fail, so the queue is dropped as-is.
+    # On a lost device every call would fail, so the queue is dropped as is.
     if !device_lost(ctx)
         flush!(bq)
         drain!(bq)
@@ -1953,26 +1519,15 @@ end
 """
     queue_released(bq::SubmitChannel{<:VulkanQueue}) -> Bool
 
-Whether `bq` has been handed back by [`release_batch_queue!`](@ref).
-
-A released queue is not safe to QUERY. Its `timeline_sem` is a
-`VK.Semaphore` whose own finalizer destroys it, and a buffer's `last_write`
-names the queue, so buffer and queue can become garbage in the same GC cycle —
-where Julia runs finalizers in UNSPECIFIED order. If the semaphore goes first,
-`vk_free!`'s `query_timeline` reads a dangling handle and segfaults inside
-`run_finalizers`, with no Julia frame naming the buffer. Holding a reference
-cannot fix an ordering problem; the query itself has to be safe.
-
-It is, and semantically rather than defensively: `release_batch_queue!` flushes
-and drains BEFORE letting go, so a released queue has no in-flight work and any
-buffer still naming it can be destroyed immediately instead of waited on.
-
-Membership in `ctx.extra_queues` is already the liveness record, so this needs no
-flag — `release_batch_queue!` removing the entry IS the transition.
+Whether `bq` has been handed back by [`release_batch_queue!`](@ref), i.e. is no
+longer in `ctx.extra_queues`. A released queue must not be used or queried: a
+buffer's stamp may still name it while its `timeline_sem` has been finalized.
+It has no in-flight work (released after flush and drain), so nothing naming it
+needs a wait.
 """
 function queue_released(bq::SubmitChannel{<:VulkanQueue})
     ctx = ctxof(bq)
-    bq === ctx.default_bq && return false      # the primary queue is never released
+    bq === ctx.default_bq && return false
     return findfirst(q -> q === bq, ctx.extra_queues) === nothing
 end
 
@@ -1992,7 +1547,7 @@ function deviceinfos(phys_devs)
                t == VK.PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? :integrated :
                t == VK.PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU    ? :virtual :
                t == VK.PHYSICAL_DEVICE_TYPE_CPU            ? :cpu : :other
-        # `VK_KHR_driver_properties` is core since 1.2, which every device here is.
+        # `VK_KHR_driver_properties` is core in 1.2.
         driver = if props.api_version >= v"1.2"
             d = VK.get_physical_device_properties_2(pd, VK.PhysicalDeviceDriverProperties).next
             description = strip(String(filter(!=('\0'), collect(d.driver_name))) * " " *
@@ -2016,8 +1571,8 @@ this is asked before any device exists.
 function devices(::VulkanAPI)
     bound = VK_CONTEXT_REF[]
     bound === nothing || return deviceinfos(unwrap(VK.enumerate_physical_devices(bound.instance)))
-    # A throwaway instance at API 1.2 so `VK_KHR_driver_properties` (core since
-    # 1.2) answers; a 1.0 instance reports a blank driver for every device.
+    # API 1.2 so `VK_KHR_driver_properties` answers; a 1.0 instance reports a
+    # blank driver for every device.
     app = VK.ApplicationInfo(v"0.0.0", v"0.0.0", v"1.2.0")
     instance = VK.Instance(String[], String[]; application_info = app)
     return deviceinfos(unwrap(VK.enumerate_physical_devices(instance)))
@@ -2026,14 +1581,13 @@ end
 
 function find_graphics_compute_queue_family(phys_dev)
     qf_props = VK.get_physical_device_queue_family_properties(phys_dev)
-    # Prefer graphics+compute (needed for graphics pipeline support)
     for (i, qfp) in enumerate(qf_props)
         if (qfp.queue_flags & VK.QUEUE_COMPUTE_BIT) != 0 &&
            (qfp.queue_flags & VK.QUEUE_GRAPHICS_BIT) != 0
             return UInt32(i - 1)
         end
     end
-    # Fall back to any compute-capable queue (graphics won't work but compute will)
+    # Fall back to compute only; graphics pipelines will not work.
     for (i, qfp) in enumerate(qf_props)
         if (qfp.queue_flags & VK.QUEUE_COMPUTE_BIT) != 0
             return UInt32(i - 1)
@@ -2046,10 +1600,7 @@ function find_graphics_compute_queue_family(phys_dev)
 end
 
 """
-Find a secondary queue family distinct from `primary_qf_idx` that supports
-compute + transfer. On RDNA/RADV the primary family is graphics+compute with
-1 queue; the async family is compute-only with 4 queues — ideal for the
-upload/dispatch split. Returns `nothing` if no such family exists.
+A compute+transfer queue family other than `primary_qf_idx`, or `nothing`.
 """
 function find_async_compute_queue_family(phys_dev, primary_qf_idx::UInt32)
     qf_props = VK.get_physical_device_queue_family_properties(phys_dev)
@@ -2065,10 +1616,8 @@ function find_async_compute_queue_family(phys_dev, primary_qf_idx::UInt32)
 end
 
 """
-Find a queue family that supports hardware video decode
-(`VK_QUEUE_VIDEO_DECODE_BIT_KHR`, bit 0x20 — not surfaced as a named flag in
-VK.jl). Dedicated on NVIDIA (transfer + video-decode, no graphics/compute).
-Returns `nothing` if the device has none.
+A queue family with `VK_QUEUE_VIDEO_DECODE_BIT_KHR` (0x20, not named in VK.jl),
+or `nothing`. A dedicated transfer + decode family on NVIDIA.
 """
 function find_video_decode_queue_family(phys_dev)
     qf_props = VK.get_physical_device_queue_family_properties(phys_dev)
@@ -2080,7 +1629,7 @@ function find_video_decode_queue_family(phys_dev)
     return nothing
 end
 
-"""Check if the physical device supports the RT extensions we need."""
+"""Whether `phys_dev` advertises the device extension `ext_name`."""
 function has_extension(phys_dev, ext_name::String)
     available = unwrap(VK.enumerate_device_extension_properties(phys_dev))
     for ext in available
@@ -2090,6 +1639,7 @@ function has_extension(phys_dev, ext_name::String)
     return false
 end
 
+"""Whether `phys_dev` advertises the three extensions RT needs."""
 function has_rt_extensions(phys_dev)
     available = unwrap(VK.enumerate_device_extension_properties(phys_dev))
     names = Set{String}()
@@ -2101,16 +1651,12 @@ function has_rt_extensions(phys_dev)
            "VK_KHR_deferred_host_operations" in names
 end
 
-# ── Validation layer debug messenger ──
-
-# Async-safe Vulkan debug callback.  MUST NOT allocate, log, take locks, or
-# hit a scheduler yield/safepoint — it can run re-entrantly inside a blocking
-# driver ccall (GPU-AV readback during vkWaitSemaphores) with driver locks
-# held, where any of those deadlocks the runtime.  All it does is copy the
-# message bytes into the preallocated ring via raw ccalls + @inbounds stores.
-# Classification + logging happens later on the main thread in
-# `drain_validation_messages!`.  The flag args are received as raw UInt32 (the
-# C ABI for VkDebugUtilsMessageSeverity/TypeFlags) so no flag-wrapper is built.
+# Debug-utils callback. Runs re-entrantly inside blocking driver calls with
+# driver locks held (GPU-AV reads back its log during `vkWaitSemaphores`), so it
+# must not allocate, log, lock or yield: an `@error` here hung the process on an
+# RTX 4000 Ada. It only copies the message into the preallocated ring with raw
+# ccalls; `drain_validation_messages!` classifies and logs on the main thread.
+# Flags arrive as raw `UInt32` so no flag wrapper is built.
 function debug_callback(
     severity::UInt32,
     type::UInt32,
@@ -2118,10 +1664,9 @@ function debug_callback(
     p_user_data::Ptr{Cvoid},
 )
     (p_callback_data == C_NULL || p_user_data == C_NULL) && return UInt32(0)
-    # One isbits load, no allocation: which device's ring this messenger belongs
-    # to is the pointer the driver hands back, not a global.
+    # The ring of this messenger's device, from `pUserData`; one isbits load.
     r = unsafe_load(Ptr{ValidationRingRaw}(p_user_data))
-    data = unsafe_load(p_callback_data)        # isbits C struct → stack value, no heap alloc
+    data = unsafe_load(p_callback_data)        # isbits, no heap allocation
     msg_ptr = Ptr{UInt8}(data.pMessage)
     idx  = unsafe_load(r.write)
     slot = idx % VAL_RING_SLOTS
@@ -2136,35 +1681,28 @@ function debug_callback(
     unsafe_store!(r.sev, severity,  slot + 1)
     unsafe_store!(r.typ, type,      slot + 1)
     unsafe_store!(r.write, idx + 1)
-    # Return VK_FALSE — can't throw from a @cfunction callback (would corrupt
-    # Vulkan state).  Errors are surfaced via drain_validation_messages!.
+    # VK_FALSE; throwing from a @cfunction would corrupt Vulkan state.
     return UInt32(0)
 end
 
-# Classify one drained message and, for hard validation errors, capture it.
-# Runs ONLY on the main thread (called from drain), so logging/alloc is safe.
+# Classify one drained message and capture hard validation errors. Called from
+# `drain_validation_messages!` on the main thread, so it may allocate and log.
 function handle_validation_message(r::ValidationRing, message::String, sev_u::UInt32, type_u::UInt32)
-    # Message-type bits classify the source (Vulkan spec):
-    #   VALIDATION (0x2) — VK_LAYER_KHRONOS_validation + driver spec checks
-    #   GENERAL    (0x1) — driver runtime notes (not spec checks)
-    #   PERFORMANCE (0x4), DEVICE_ADDRESS_BINDING (0x8) — self-explanatory
-    # Only VALIDATION-typed errors are captured as hard failures.
+    # Only VALIDATION-typed (0x2) errors are captured; GENERAL (0x1) errors are
+    # driver notes, not spec checks.
     is_error = (sev_u & UInt32(VK.DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)) != 0
     is_warning = (sev_u & UInt32(VK.DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)) != 0
     is_validation = (type_u & UInt32(VK.DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT)) != 0
-    # Known-benign device-creation chatter that must NOT be captured as a hard
-    # validation error.  The "Device Layers have never worked" notice is a VVL
-    # deprecation (VUID-VkDeviceCreateInfo-ppEnabledLayerNames-12385) triggered
-    # because VK.jl's generated `_DeviceCreateInfo` always passes a non-null
-    # `ppEnabledLayerNames` even for an empty layer list (count is 0, so it is
-    # functionally ignored by the loader).  It is a dependency-side quirk with
-    # no runtime effect; log it as a warning but don't treat it as a failure.
+    # Benign device-creation messages: logged as warnings, never captured.
+    # "Device Layers have never worked" (VUID-VkDeviceCreateInfo-ppEnabledLayerNames-12385)
+    # fires because VK.jl passes a non-null `ppEnabledLayerNames` for an empty
+    # layer list.
     is_setup_noise = contains(message, "adjusting settings") ||
                      contains(message, "VALIDATION-SETTINGS") ||
                      contains(message, "Device Layers have never worked")
-    # @lava_printf output arrives at INFO severity. The Khronos layer wraps it as
-    #   "vkQueueSubmit2(): pSubmits[0] DebugPrintf:\n<user text>"
-    # Capture just the user text into `r.printf`, separate from validation.
+    # `@lava_printf` output (INFO severity), wrapped by the layer as
+    # "vkQueueSubmit2(): pSubmits[0] DebugPrintf:\n<user text>"; only the user
+    # text goes to `r.printf`.
     if contains(message, "DebugPrintf")
         marker = findlast("DebugPrintf:", message)
         text = marker === nothing ? message :
@@ -2183,9 +1721,8 @@ function handle_validation_message(r::ValidationRing, message::String, sev_u::UI
         push!(r.messages, message)
         @error "Vulkan validation error" message
     elseif is_error && !is_validation
-        # Driver-general error (e.g. chatty lavapipe SPIR-V notes). Log but
-        # don't capture — the authoritative signal is the VkResult of the
-        # surrounding API call, which @vk_checked already unwraps.
+        # Driver note (e.g. lavapipe SPIR-V notes): logged, not captured; the
+        # call's VkResult is the authoritative signal.
         @warn "Vulkan driver note (type=$(type_u), not a validation error)" message
     elseif is_warning || is_setup_noise
         @warn "Vulkan validation warning" message
@@ -2194,13 +1731,11 @@ function handle_validation_message(r::ValidationRing, message::String, sev_u::UI
 end
 
 """
-    drain_validation_messages!()
+    drain_validation_messages!(ctx = <bound context>)
 
-Convert any messages the async callback wrote into the ring into Strings,
-capture hard validation errors in `ctx.validation.messages`, and log them. Must be
-called on the main thread (it allocates + logs). Idempotent — only processes
-slots written since the last drain. Call this before reading
-`ctx.validation.messages` and while polling for a GPU-AV fault.
+Turn the ring slots written since the last drain into Strings, capture hard
+validation errors in `ctx.validation.messages` and log them. Main thread only
+(it allocates and logs). Call before reading `ctx.validation.messages`.
 """
 function drain_validation_messages!(ctx::Union{Nothing,VkContext} = VK_CONTEXT_REF[])
     ctx === nothing && return nothing
@@ -2225,18 +1760,16 @@ function drain_validation_messages!(ctx::Union{Nothing,VkContext} = VK_CONTEXT_R
     return nothing
 end
 
+# Keeps every `VkLayerSettingEXT` value alive for the process: `pValues` is a
+# raw pointer that `vkCreateInstance` reads.
+const LAYER_SETTING_STORAGE = Any[]
+
 """
     layer_setting_bool(name, value) -> VK.LayerSettingEXT
 
-One `VK_EXT_layer_settings` boolean for the Khronos validation layer.
-
-`VkLayerSettingEXT` takes a raw `pValues` pointer, so the storage has to outlive
-the `vkCreateInstance` call that reads it. `LAYER_SETTING_STORAGE` keeps every
-value alive for the process — a handful of bytes, set once at instance creation,
-and the alternative is a pointer into a collected `Ref`.
+One `VK_EXT_layer_settings` boolean for the Khronos validation layer, its value
+kept in `LAYER_SETTING_STORAGE`.
 """
-const LAYER_SETTING_STORAGE = Any[]
-
 function layer_setting_bool(name::AbstractString, value::Bool)
     r = Ref(VK.VkBool32(value))
     push!(LAYER_SETTING_STORAGE, r)
@@ -2256,21 +1789,14 @@ function setup_debug_messenger(instance::VK.Instance, ring::ValidationRing,
          Ptr{Cvoid})
     )
 
-    # Debug printf is delivered at INFO severity, so subscribe down to INFO when
-    # it's enabled; otherwise stay at WARNING to avoid info-level chatter.
-    #
-    # Read from the config this device was built with, not from the environment.
-    # An env read happening AFTER the instance exists moves the severity floor
-    # on a device whose instance has no printf feature — a subscription to messages
-    # that could never arrive.
+    # Debug printf arrives at INFO severity; otherwise WARNING and up. Read from
+    # this device's config, which matches the features its instance has.
     min_sev = debug.printf ?
         VK.DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT :
         VK.DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
-    # `user_data` is what makes the ring per-device: the driver hands this
-    # pointer back to every invocation, so the callback never has to guess which
-    # context it is reporting for.
     index = findfirst(==(min_sev), VK.message_severities)
     severity = |(VK.message_severities[index:end]...)
+    # `user_data` is handed back to every callback, which makes the ring per device.
     messenger = VK.DebugUtilsMessengerEXT(
         instance, severity,
         VK.DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
@@ -2283,50 +1809,48 @@ function setup_debug_messenger(instance::VK.Instance, ring::ValidationRing,
 end
 
 """
-    get_validation_messages() -> Vector{String}
+    get_validation_messages(ctx = <bound context>) -> Vector{String}
 
-Return recent validation layer messages. Useful for diagnosing DEVICE_LOST errors.
+Recent captured validation errors, after draining the ring.
 """
 get_validation_messages(ctx::Union{Nothing,VkContext} = VK_CONTEXT_REF[]) =
     ctx === nothing ? String[] :
         (drain_validation_messages!(ctx); copy(ctx.validation.messages))
 
 """
-    clear_validation_messages!()
+    clear_validation_messages!(ctx = <bound context>)
 
-Clear the validation message buffer. Drains the async ring first (so captured
-hard errors are logged), then empties the capture list.
+Drain the ring (so errors are logged), then empty the captured list.
 """
 clear_validation_messages!(ctx::Union{Nothing,VkContext} = VK_CONTEXT_REF[]) =
     ctx === nothing ? String[] :
         (drain_validation_messages!(ctx); empty!(ctx.validation.messages))
 
 """
-    get_printf_output() -> Vector{String}
+    get_printf_output(ctx = <bound context>) -> Vector{String}
 
-Return captured `@lava_printf` output since the last clear. Drains the async
-callback ring first. Requires a device built with `DebugConfig(printf = true)`.
+`@lava_printf` output since the last clear, after draining the ring. Needs a
+device built with `DebugConfig(printf = true)`.
 """
 get_printf_output(ctx::Union{Nothing,VkContext} = VK_CONTEXT_REF[]) =
     ctx === nothing ? String[] :
         (drain_validation_messages!(ctx); copy(ctx.validation.printf))
 
 """
-    clear_printf_output!()
+    clear_printf_output!(ctx = <bound context>)
 
-Drop captured `@lava_printf` output (drains the ring first).
+Drain the ring, then drop captured `@lava_printf` output.
 """
 clear_printf_output!(ctx::Union{Nothing,VkContext} = VK_CONTEXT_REF[]) =
     ctx === nothing ? String[] :
         (drain_validation_messages!(ctx); empty!(ctx.validation.printf))
 
 """
-    check_validation_errors!(context::String)
+    check_validation_errors!(context::String, ctx = <bound context>)
 
-Check if any validation errors were captured since the last check.
-Throws `LavaError` with the error messages if any errors are found.
-Call this after Vulkan operations that may trigger validation errors
-(shader module creation, pipeline creation, dispatch recording).
+Throw a `LavaError` listing up to five validation errors captured since the
+last check, and clear them. Call after operations that may trigger validation
+errors (shader module or pipeline creation, dispatch recording).
 """
 function check_validation_errors!(context::String,
                                  ctx::Union{Nothing,VkContext} = VK_CONTEXT_REF[])
@@ -2334,15 +1858,12 @@ function check_validation_errors!(context::String,
     drain_validation_messages!(ctx)
     msgs = ctx.validation.messages
     isempty(msgs) && return
-    # Separate true errors from warnings using the severity recorded by the callback.
-    # GPU-AV messages like "Unaligned pointer access" are errors, not warnings,
-    # even though their text may contain strings like "WARNING-Validation".
-    # We rely on the callback storing only ERROR-severity messages.
+    # `messages` holds only ERROR-severity validation messages
+    # (`handle_validation_message`), whatever their text says.
     errors = copy(msgs)
     isempty(errors) && return
     n = min(length(errors), 5)
     detail = join(["  [$i] $(first(errors[i], 1000))" for i in 1:n], "\n")
-    # Clear after reporting to avoid re-triggering
     empty!(msgs)
     throw(LavaError(
         context,
@@ -2351,36 +1872,24 @@ function check_validation_errors!(context::String,
     ))
 end
 
-# Mantle's device-idle wait, in Vulkan's terms. Declared in
-# `src/graph/queue.jl`; this is the method. The `LavaBackend` spelling — for a
-# caller who holds the KA backend and should not have to reach for the context
-# to get at the handle underneath it — is in `array/ka_backend.jl`, with the
-# type.
+# `Mantle.waitidle` (declared in `graph/queue.jl`); the `LavaBackend` method is
+# in `array/ka_backend.jl`.
 function waitidle(ctx::VkContext)
-    # Vulkan.jl returns a Result. Discarding it let a lost device look idle
-    # and blamed the next unrelated dispatch for the earlier GPU failure.
+    # Checked: a discarded Result let a lost device look idle.
     throw_if_error(ctx, "vkDeviceWaitIdle", VK.device_wait_idle(ctx.device))
     return nothing
 end
 waitidle(d::VK.Device) = VK.device_wait_idle(d)
 
-# Vulkan rasterizes. See `supports_graphics` in `src/graphics/commands.jl`.
 supports_graphics(::VkContext) = true
 
 """
     vulkan_available() -> Bool
 
-Whether this machine can actually give us a Vulkan device.
-
-`MantleVulkanExt` only loads when `using Vulkan` succeeded, and VulkanCore's own
-`__init__` raises when it cannot `dlopen` a loader — so reaching this function
-means a loader exists. What is still open is whether it exposes a device, and
-the only honest way to find out is to build the context, which `vk_context`
-caches, so the cost is paid once either way.
-
-The `catch` converts exactly two expected failures — no ICD, no suitable device
-— into "not available", which is the question being asked. Anything else is a
-real bug and is rethrown rather than reported as a missing GPU.
+Whether a Vulkan device can be created. A loader exists once this code is
+loaded; whether it exposes a device is found by building the default context
+(cached by `vk_context`). Only `LavaError` and `VK.VulkanError` (no ICD, no
+suitable device) mean "not available"; anything else rethrows.
 """
 function vulkan_available()
     VK_CONTEXT_REF[] === nothing || return true

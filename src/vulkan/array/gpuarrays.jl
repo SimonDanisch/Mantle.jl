@@ -1,16 +1,15 @@
-# Full GPUArrays.jl interface for LavaArray
-#
-# Provides broadcasting, scalar indexing, and the Adapt pipeline.
-# Device-side representation: LavaDeviceArray{T,N} (isbits, BDA pointer + dims).
+# GPUArrays interface for `LavaArray`: Adapt conversion, broadcast, transfers,
+# `resize!`, `norm` and `permutedims!`.
 
 import GPUArrays
 import Adapt
 
-# ── Adapt.jl integration ──
+"""
+    adapt_storage(::LavaAdaptor, a::LavaArray) -> LavaDeviceArray
 
-"""Convert LavaArray to a device address/dimensions value without lifetime effects.
-Launch/recording callers must holdleaves! the original arguments before adapting;
-the resulting descriptor does not retain its backing allocation."""
+The `(address, dims)` value of `a`. It retains nothing: callers `holdleaves!`
+the original arguments before adapting.
+"""
 function Adapt.adapt_storage(::LavaAdaptor, a::LavaArray{T,N}) where {T,N}
     return LavaDeviceArray{T,N}(Ptr{T}(bda_address(a)), a.dims)
 end
@@ -23,29 +22,24 @@ Adapt.adapt_storage(::Type{<:LavaArray{T}}, xs::AT) where {T, AT<:AbstractArray}
     isbitstype(AT) ? xs : convert(LavaArray{T}, xs)
 Adapt.adapt_storage(::Type{Array}, xs::LavaArray) = convert(Array, xs)
 
-# ── GPU-safe RefValue (isbits replacement for mutable Base.RefValue) ──
-
-"""LavaRefValue: isbits wrapper replacing Base.RefValue for GPU kernels."""
+"""Isbits stand-in for a `Base.RefValue` kernel argument."""
 struct LavaRefValue{T} <: Ref{T}
     x::T
 end
 Base.getindex(r::LavaRefValue) = r.x
 
-# Generic RefValue → LavaRefValue (isbits, GPU-safe)
 Adapt.adapt_structure(to::LavaAdaptor, r::Base.RefValue) = LavaRefValue(Adapt.adapt(to, r[]))
 
-# RefValue{Type/DataType} → zero-size type wrapper (types are not values on GPU)
+# A type is not a GPU value: carry it as a type parameter.
 struct LavaRefType{T} <: Ref{DataType} end
 Base.getindex(::LavaRefType{T}) where {T} = T
 Adapt.adapt_structure(::LavaAdaptor, r::Base.RefValue{<:Union{DataType, Type}}) =
     LavaRefType{r[]}()
 
-# Broadcasted with Type as function (e.g. T.(args...)) → lambda wrapper
+# `T.(args...)`: replace the type with a closure that calls it.
 Adapt.adapt_structure(to::LavaAdaptor,
                       bc::Base.Broadcast.Broadcasted{Style, <:Any, Type{T}}) where {Style, T} =
     Base.Broadcast.Broadcasted{Style}((x...) -> T(x...), Adapt.adapt(to, bc.args), bc.axes)
-
-# ── Broadcast style ──
 
 struct LavaArrayStyle{N} <: GPUArrays.AbstractGPUArrayStyle{N} end
 
@@ -53,23 +47,13 @@ LavaArrayStyle{M}(::Val{N}) where {M,N} = LavaArrayStyle{N}()
 
 Base.Broadcast.BroadcastStyle(::Type{<:LavaArray{T,N}}) where {T,N} = LavaArrayStyle{N}()
 
-# Promote structured matrix styles (Diagonal, Tridiagonal, etc.) to LavaArrayStyle
-# so that broadcasting with Diagonal{T, LavaArray{T,1}} runs on GPU.
+# Structured matrices (Diagonal, Tridiagonal, ...) over LavaArrays broadcast on the GPU.
 Base.Broadcast.BroadcastStyle(::LavaArrayStyle{N}, ::LinearAlgebra.StructuredMatrixStyle{T}) where {N,T} = LavaArrayStyle{N}()
 Base.Broadcast.BroadcastStyle(::LinearAlgebra.StructuredMatrixStyle{T}, ::LavaArrayStyle{N}) where {N,T} = LavaArrayStyle{N}()
 
-# Wrapped GPU arrays (Transpose, Adjoint, SubArray, PermutedDimsArray,
-# ReshapedArray) must use LavaArrayStyle. Without it the wrapper falls back to
-# DefaultArrayStyle, which iterates and therefore hits the scalar-indexing
-# guard — so `PermutedDimsArray(a, perm) .+ 1` threw rather than running.
-#
-# **Wrappers compose to arbitrary depth, so the check has to recurse.** Matching
-# on a *direct* `LavaArray` parent, or on a union one level deep, leaves anything
-# deeper on `DefaultArrayStyle`. That is not hypothetical: Kokoro's duration
-# encoder transposes on nearly every line, the graph converter folds each permute
-# into buffer metadata, and a layer norm arrived holding a **five-deep**
-# `PermutedDimsArray`. It reduced to a `MethodError` about ambiguity, which names
-# neither the depth nor the wrapper.
+# View wrappers over a LavaArray take `LavaArrayStyle` at any nesting depth;
+# `DefaultArrayStyle` iterates and hits the scalar-indexing guard. Graph
+# conversion produces deep stacks, such as a five-deep `PermutedDimsArray`.
 
 """
     lavabacked(T) -> Bool
@@ -85,8 +69,7 @@ lavabacked(::Type{<:LinearAlgebra.Transpose{<:Any, P}}) where {P} = lavabacked(P
 lavabacked(::Type{<:LinearAlgebra.Adjoint{<:Any, P}}) where {P} = lavabacked(P)
 lavabacked(::Type) = false
 
-# Non-Lava wrappers get exactly the answer Base would have given, so these add a
-# case rather than change one.
+# Non-Lava wrappers keep Base's `DefaultArrayStyle`.
 lavastyle(::Type{W}, ::Val{N}) where {W, N} =
     lavabacked(W) ? LavaArrayStyle{N}() : Base.Broadcast.DefaultArrayStyle{N}()
 
@@ -113,25 +96,15 @@ lavaroot(x::Union{PermutedDimsArray, SubArray, Base.ReshapedArray,
 """
     dense(x) -> LavaArray
 
-Materialise a wrapped device array into a dense one, on the device.
-
-**`Array(x)` does not work on a deeply wrapped device array, and this is why.**
-`Base.copyto!(::Array, ::PermutedDimsArray)` reaches `copyto_unaliased!`, which
-*iterates* the source — the scalar-indexing guard fires, and the message blames
-"an iterating implementation of a method" without naming the wrapper. GPUArrays
-covers `AbstractGPUArray`, and a `PermutedDimsArray` over a `PermutedDimsArray`
-over a `LavaArray` is not one.
-
-Broadcast, on the other hand, works at any depth (see `lavabacked`), so
-`y .= x` is the escape hatch and this wraps it. `Array(dense(x))` is the
-supported way to bring a graph output home; a non-wrapped array passes through
-untouched.
+Materialise a wrapped device array as a dense `LavaArray` by broadcast.
+`Array(x)` and `copyto!` iterate a nested wrapper and hit the scalar-indexing
+guard, so download with `Array(dense(x))`. Other arrays pass through unchanged.
 """
 dense(x::LavaArray) = x
 function dense(x::AbstractArray)
     lavabacked(typeof(x)) || return x
     y = similar(lavaroot(x), eltype(x), size(x))
-    y .= x                      # broadcast, NOT copyto! — copyto! iterates too
+    y .= x                      # not copyto!, which iterates
     return y
 end
 
@@ -142,43 +115,11 @@ const AnyLavaArray{T} = Union{LavaArray{T},
                               LinearAlgebra.Transpose{T, <:LavaArray},
                               LinearAlgebra.Adjoint{T, <:LavaArray}}
 
-# ── broadcast: always launch over a flat index space ──
-#
-# GPUArrays' `_copyto!` launches with `ndrange = size(dest)`, so an N-D
-# destination gets an N-D index space and KernelAbstractions partitions it into
-# N-D workgroups — at which point consecutive lanes no longer walk consecutive
-# memory. The cost is not subtle. `D .= A .+ B` over 16.7M Float16:
-#
-#   dest 1-D          315 GB/s     (CUDA.jl: 325)
-#   dest (512,512,64)  54 GB/s     (CUDA.jl: 204)
-#
-# Same kernel, same data, same card — only the launch geometry differs. CUDA.jl
-# never sees this because it overrides broadcast with its own flat grid-stride
-# loop rather than going through the KA path.
-#
-# So: flatten the range, and recover the Cartesian index inside the kernel when
-# the broadcast genuinely needs one. That div/mod chain is far cheaper than
-# losing coalescing. This is the single largest thing in Lava for anything
-# elementwise — `add`, `relu`, `sigmoid`, `_to_copy`, `cat` and every kernel
-# epilogue in DNNKernels were all running at a quarter of the achievable bandwidth.
-# Each thread handles `U` elements, `WG` apart, which is `contig_copy.comp`'s
-# shape from `reference/llama.cpp-vulkan` (128 threads x 4, "num_threads *
-# num_iter must equal 512"). The stride is what keeps it coalesced: iteration `u`
-# has the whole workgroup on one contiguous run, so all `U` runs are wide loads,
-# not a per-thread gather of `U` neighbours.
-#
-# It buys memory-level parallelism, not fewer instructions — one thread with 8
-# loads in flight hides latency a thread with 1 cannot. Measured on the encoder's
-# permuted copies (interleaved, 2265 MHz, bit-exact), against the same kernel at
-# one element per thread:
-#
-#     (72,8,256,16)      104 -> 114 GB/s
-#     (72,4,16,1024)     113 -> 123
-#     (576,16,4,16,4,1)   73 ->  76
-#     (256,256,144,1)     45 -> 125
-#
-# Raising the *workgroup* instead does nothing (64 and 256 measure the same); the
-# ceiling is the device's `maxComputeWorkGroupInvocations`, see `DeviceCaps`.
+# Broadcasts launch over a flat index space: an N-D `ndrange` gets N-D
+# workgroups whose consecutive lanes do not touch consecutive memory, about 6x
+# slower for `D .= A .+ B` into a 3-D destination. Each thread handles `U`
+# elements `WG` apart, so every iteration reads one contiguous run per workgroup
+# and keeps more loads in flight; a larger workgroup does not help.
 function lava_broadcast_flat!(dest, bc, n, ::Val{U}, ::Val{WG}) where {U, WG}
     l = KI.get_local_id().x
     g = KI.get_group_id().x
@@ -195,24 +136,10 @@ end
 """
     broadcastlaunch(n; wg, maxunroll, mingroups) -> (workgroupsize, Val(U), ndrange)
 
-Launch geometry for a flat broadcast over `n` elements.
-
-`maxunroll` is elements per thread; 1 restores one-element-per-thread. An
-argument and not a process-wide setting, so the two sides can be compared
-**inside one session**, which is the only comparison this project accepts: an
-isolated benchmark reads 5-11% here and a dispatch-timing profile reads the
-elementwise bucket dropping 18 ms, while the free-running encode does not move
-at all across sessions. Each new value recompiles the broadcast kernels, so warm
-up after each flip before timing.
-
-`U` is backed off while the grid would be too small to occupy the device — 8
-elements per thread over a 4096-element array is 2 workgroups, and a kernel that
-cannot fill the card is slow however well it reads memory. `mingroups` is a few
-per SM (48 here), so the back-off only triggers on arrays small enough that the
-whole launch is noise anyway.
-
-`ndrange` is rounded up to a whole number of workgroups; the kernels bound every
-access with `n` themselves, so the tail threads simply do nothing.
+Launch geometry for a flat broadcast over `n` elements. `U` starts at
+`maxunroll` elements per thread and halves while the grid would have fewer than
+`mingroups` workgroups. `ndrange` is rounded up to whole workgroups; the kernels
+bound every access by `n`. Each distinct `U` compiles its own kernel.
 """
 @inline function broadcastlaunch(n::Int; wg::Int = 256, maxunroll::Int = 8,
                                  mingroups::Int = 192)
@@ -238,7 +165,7 @@ function lava_broadcast_flat_cartesian!(dest, bc, sz, n,
     return nothing
 end
 
-"""Destination dense, source not: index `dest` linearly and only `bc` by index."""
+"""Linear-indexed `dest`, Cartesian-indexed `bc`: only the source pays the decomposition."""
 function lava_broadcast_flat_mixed!(dest, bc, sz, n,
                                                       ::Val{U}, ::Val{WG}) where {U, WG}
     l = KI.get_local_id().x
@@ -253,79 +180,35 @@ function lava_broadcast_flat_mixed!(dest, bc, sz, n,
     return nothing
 end
 
-# ── the permuted-copy path is bandwidth-bound, not index-bound ───────────────
-#
-# `dest .= PermutedDimsArray(a, perm)` is **203 of 203** dispatches on this path
-# for SAM 2's encoder — 40.1 ms, the third-largest kernel family, moving ~2.4 GB
-# at 60 GB/s where a plain copy of the same bytes runs at 150-270. In 178 of
-# them `perm[1] == 1` (Hiera's window partition `(1,2,4,3,5,6)`, attention's
-# head/token swap `(1,3,2,4)`), so the copy is a permutation of whole contiguous
-# rows and the general kernel's per-element `cart32` decomposition plus
-# `PermutedDimsArray` re-indexing looks like pure overhead.
-#
-# It is not. A kernel that decomposes only the *row* index and adds the column —
-# written, bit-exact on every shape the encoder uses, and verified firing on 90
-# dispatches per encode — is worth **-0.5 ms end to end**, which is noise. Both
-# kernels touch memory in the same order, and that order is what the time is.
-#
-# Recorded rather than kept: the addressing is not the cost, so anything that
-# helps has to change the access pattern — a tiled staging transpose, as
-# `DNNKernels`' `toLE_tiled` does — rather than the index arithmetic.
-# `ctx.diag.broadcast_probe` below is what identified the shapes.
-
+# `dest .= PermutedDimsArray(a, perm)` on the mixed kernel is bound by access
+# order, not index arithmetic: decomposing only the row index when
+# `perm[1] == 1` gained nothing. A faster permute must change the access
+# pattern, such as a tiled transpose.
 
 """
-Can every operand be read with the destination's own linear index?
+    flatok(dest, x) -> Bool
 
-`IndexStyle(::Broadcasted)` is too conservative for the case that dominates a
-DNN — every operand the same dense shape as the destination, no extrusion — and
-answering it directly is what gets those onto the linear kernel. Operands are
-inspected before `preprocess` wraps them in `Extruded`; the `Extruded` method is
-there for when one is passed anyway.
+Whether every operand can be read with `dest`'s linear index: same size and
+`IndexLinear`. `IndexStyle(::Broadcasted)` is too conservative for this case.
 """
 flatok(dest, x) = true                                  # scalars, refs, functions
 flatok(dest, x::AbstractArray) =
     size(x) == size(dest) && IndexStyle(x) === IndexLinear()
-# A Tuple is a broadcast *container* with its own axes, not a scalar, so it must
-# not fall through to the `true` above. `flat1` reshapes array leaves to vectors
-# of `length(dest)` but leaves a tuple at its own length, so flattening a tree
-# containing one produces `OneTo(length(dest))` against `OneTo(length(tuple))`:
-#
-#   broadcast!(f, out, arr, (a, b, c))   # out 3x10
-#   DimensionMismatch: a has axes OneTo(30) and b has axes OneTo(3)
-#
-# Tuples are never the destination's shape in any useful case here, so the flat
-# path simply does not apply; the general paths below handle them correctly.
+# A tuple is a broadcast container with its own axes; `flat1` keeps its length,
+# so flattening would throw `DimensionMismatch`.
 flatok(dest, x::Tuple) = false
 flatok(dest, x::Broadcast.Extruded) = flatok(dest, x.x)
 flatok(dest, x::Broadcast.Broadcasted) = all(a -> flatok(dest, a), x.args)
 
 """
-Rebuild a broadcast tree over 1-D reshapes of its operands.
+    flat1(x)
 
-Launching over a flat range is not enough on its own: `getindex(::Broadcasted,
-::Integer)` on an N-D tree is defined as `bc[CartesianIndices(bc)[i]]`, so the
-div/mod chain comes back per element even inside a linear kernel. Reshaping the
-leaves to vectors makes the tree genuinely 1-D and the index arithmetic
-disappears. Only valid when every leaf already has the destination's shape,
-which is what `flatok` establishes.
+Rebuild a broadcast tree over 1-D reshapes of its leaves, so integer indexing
+does not go through `CartesianIndices`. Valid only where `flatok` holds.
 """
 flat1(x) = x
 flat1(x::AbstractArray) = reshape(x, length(x))
 flat1(bc::Broadcast.Broadcasted) = Broadcast.broadcasted(bc.f, map(flat1, bc.args)...)
-
-"""
-    ctx.diag.broadcast_probe :: Union{Nothing,Dict}
-
-Set to a dict to record which broadcast kernel each `.=` takes, keyed by
-`(path, dest size, leaf sizes)`. Off by default and free when off.
-
-The three paths differ by roughly 3x in achieved bandwidth and which one a
-broadcast lands on is decided by operand *shapes*, invisibly. On SAM 2's encoder
-`lava_broadcast_flat_mixed!` — the one that pays a `cart32` division chain per
-element — is 203 dispatches and 40 ms, the third-largest kernel family, and this
-is how to find out what is feeding it.
-"""
 
 leafsizes(x) = Any[]
 leafsizes(x::AbstractArray) = Any[(size(x), nameof(typeof(x)), IndexStyle(x) === IndexLinear())]
@@ -333,9 +216,14 @@ leafsizes(x::PermutedDimsArray{T,N,perm}) where {T,N,perm} = Any[(size(parent(x)
 leafsizes(x::Broadcast.Extruded) = leafsizes(x.x)
 leafsizes(bc::Broadcast.Broadcasted) = reduce(vcat, map(leafsizes, bc.args); init = Any[])
 
+"""
+    probe_broadcast!(path, dest, bc)
+
+When `ctx.diag.broadcast_probe` is a `Dict` (default `nothing`), count the
+broadcast under `(path, dest size, leaf sizes)`. The paths differ by about 3x
+in bandwidth and are chosen by operand shapes.
+"""
 function probe_broadcast!(path, dest, bc)
-    # `dest` is a LavaArray, so the device that owns this broadcast is reachable
-    # without asking which one happens to be global.
     p = vk_context(dest).diag.broadcast_probe
     p === nothing && return
     key = (path, size(dest), Tuple(unique(leafsizes(bc))))
@@ -343,19 +231,14 @@ function probe_broadcast!(path, dest, bc)
     return
 end
 
-# `fastdiv` is optional and defaulted, so GPUArrays' own two-argument call is
-# unchanged — but a test can drive both index paths without a global. It was
-# `BROADCAST_FASTDIV[]`, set and restored around the comparison.
+# `fastdiv` is a keyword so tests can compare both index paths.
 function GPUArrays._copyto!(dest::AnyLavaArray, bc::Broadcast.Broadcasted;
                             fastdiv::Bool = BROADCAST_FASTDIV_DEFAULT)
     axes(dest) == axes(bc) || Broadcast.throwdm(axes(dest), axes(bc))
     isempty(dest) && return dest
     n = length(dest)
-    # `KA.get_backend(dest)`, NOT `LavaBackend()`. An unpinned backend resolves
-    # its queue through `vk_context()`, so on a second device this dispatches on
-    # whichever context happens to be global — the work lands on the wrong GPU
-    # and the buffer's own device never sees it. `get_backend` derives the
-    # context from the array's buffer, which has always carried it.
+    # The array's backend, not `LavaBackend()`: an unpinned backend dispatches
+    # on the global `vk_context()`, which may be another GPU.
     backend = KernelAbstractions.get_backend(dest)
     wg, u, nd = broadcastlaunch(n)
     if ndims(dest) > 1 && IndexStyle(dest) === IndexLinear() && flatok(dest, bc)
@@ -368,9 +251,8 @@ function GPUArrays._copyto!(dest::AnyLavaArray, bc::Broadcast.Broadcasted;
     end
     linear = ndims(dest) == 1
     bc = Broadcast.preprocess(dest, bc)
-    # Extents as magic numbers, so `cart32` multiplies instead of dividing. Built
-    # per launch on the host: three `UInt32` per axis and one `÷` each, against
-    # the ~15 us per axis a real division costs across a 2.4 M-element dispatch.
+    # Extents as magic numbers, built on the host per launch, so `cart32`
+    # multiplies instead of dividing.
     sz = broadcastextents(size(dest); fastdiv)
     if linear
         probe_broadcast!(:linear1d, dest, bc)
@@ -388,13 +270,8 @@ function GPUArrays._copyto!(dest::AnyLavaArray, bc::Broadcast.Broadcasted;
     return dest
 end
 
-# GPUArrays implements `repeat` for `AnyGPUArray` (host/base.jl `repeat_inner`
-# / `repeat_outer`), but `AnyGPUArray` only recognises a *single* layer of
-# wrapping, so a `ReshapedArray{PermutedDimsArray{LavaArray}}` misses it and
-# falls back to `Base._RepeatInnerOuter.repeat_outer`, which indexes
-# elementwise and trips the scalar-indexing guard. Detaching the wrapper first
-# gets it back onto the device kernels; `repeat` allocates its output anyway, so
-# the copy costs nothing that was not already being paid.
+# GPUArrays' `repeat` covers `AnyGPUArray`, one wrapper layer deep; two layers
+# fall back to Base's scalar-indexing `repeat`. Densify first.
 const NestedLavaWrapper = Union{
     Base.ReshapedArray{<:Any, <:Any, <:Union{SubArray{<:Any, <:Any, <:LavaArray},
                                              PermutedDimsArray{<:Any, <:Any, <:Any, <:Any, <:LavaArray}}},
@@ -410,10 +287,8 @@ function Base.repeat(x::NestedLavaWrapper; inner=nothing, outer=nothing)
     repeat(dense; inner, outer)
 end
 
-# Allocate broadcast output, on the device the inputs live on. The style carries
-# no device, so the first device array in the argument tree decides: a broadcast
-# over arrays on a second device would otherwise allocate its result on the
-# default device and record the kernel reading the inputs on the result's queue.
+# Broadcast output goes on the device of the first device array in the tree,
+# since the style carries no device.
 firstdevicearray(x::LavaArray) = x
 firstdevicearray(bc::Base.Broadcast.Broadcasted) = firstdevicearray(bc.args)
 firstdevicearray(x::Base.Broadcast.Extruded) = firstdevicearray(x.x)
@@ -427,12 +302,8 @@ firstdevicearray(x::Base.ReshapedArray) = firstdevicearray(parent(x))
 firstdevicearray(x::PermutedDimsArray) = firstdevicearray(parent(x))
 firstdevicearray(x::LinearAlgebra.Transpose) = firstdevicearray(parent(x))
 firstdevicearray(x::LinearAlgebra.Adjoint) = firstdevicearray(parent(x))
-# A wrapper this walk does not know is not an error: GPUArrays' own suite
-# broadcasts over ad-hoc wrapper types, and the walk cannot enumerate every one.
-# When no device array is found the result lands on the default device — exactly
-# what this did before it grew device awareness — so a wrapper we cannot see
-# through costs correctness only across devices, which is where the caller should
-# be unwrapping anyway.
+# Unknown wrappers fall back to the default device instead of throwing:
+# GPUArrays' suite broadcasts over ad-hoc wrapper types.
 firstdevicearray(::Any) = nothing
 function Base.similar(bc::Base.Broadcast.Broadcasted{LavaArrayStyle{N}}, ::Type{T}, dims) where {T,N}
     a = firstdevicearray(bc)
@@ -441,18 +312,9 @@ function Base.similar(bc::Base.Broadcast.Broadcasted{LavaArrayStyle{N}}, ::Type{
     LavaArray{T}(undef, map(Base.to_dim, dims); bq)
 end
 
-# Let GPUArrays choose between linear (1D) and cartesian (multi-D) broadcast kernels.
-# LavaDeviceArray supports both linear and CartesianIndex indexing.
-
-# ── Scalar indexing ──
-# GPUArrays.jl provides Base.getindex(::AbstractGPUArray, ::Int) and
-# Base.setindex!(::AbstractGPUArray, v, ::Int) which delegate to copyto!.
-# Our copyto! implementations (below) handle the actual data transfer.
-
-# ── copyto! variants for CPU↔GPU transfers ──
-
-# Host copies pass pointers/byte counts directly; GC.@preserve protects host storage.
-# copy_buffer! owns native mapping/staging and queue synchronization.
+# GPUArrays' scalar `getindex`/`setindex!` go through these `copyto!` methods.
+# `upload_typed!` and `copy_buffer!` handle mapping, staging and queue
+# synchronization.
 Base.copyto!(dest::LavaArray{T}, doffs::Integer,
              src::Array{T}, soffs::Integer, n::Integer) where {T} =
     copyhost!(dest,doffs,src,soffs,n)
@@ -469,8 +331,8 @@ function Base.copyto!(dest::Array{T}, doffs::Integer,
                       src::LavaArray{T}, soffs::Integer, n::Integer) where T
     n == 0 && return dest
     doffs,soffs,n = copybounds(dest,doffs,src,soffs,n)
-    # The copy is recorded on whichever channel last named `src.buf[]`, so the
-    # host waits on one timeline instead of two.
+    # Recorded on the channel that last named `src.buf[]`, so the host waits on
+    # one timeline.
     GC.@preserve dest src copy_buffer!(:download, src.buf[],
                                    Ptr{UInt8}(pointer(dest, doffs)), n * sizeof(T);
                                    offset = src.offset + (Int(soffs) - 1) * sizeof(T))
@@ -487,19 +349,18 @@ function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
                       src::LavaArray{T}, soffs::Integer, n::Integer) where T
     n == 0 && return dest
     doffs,soffs,n = copybounds(dest,doffs,src,soffs,n)
-    # Cross-device copies currently use a synchronous host transfer.
+    # Cross-device copies go through host memory, synchronously.
     if (src.buf[].ctx::VkContext) !== (dest.buf[].ctx::VkContext)
         staging = Vector{T}(undef, n)
         copyto!(staging, 1, src, soffs, n)
         copyto!(dest, doffs, staging, 1, n)
         return dest
     end
-    # Same-device copies use the native transfer command.
     src_offset = pool_offset(src.buf[]) + src.offset + (Int(soffs) - 1) * sizeof(T)
     dst_offset = pool_offset(dest.buf[]) + dest.offset + (Int(doffs) - 1) * sizeof(T)
     nbytes = n * sizeof(T)
     bq = (dest.buf[].ctx::VkContext).default_bq
-    # Retain DataRef-owning arrays until completion, as well as native buffers.
+    # Hold the arrays, not just their buffers, until the copy completes.
     oneshot!(bq; tag = :copy) do e
         hold!(e, src)
         hold!(e, dest)
@@ -510,38 +371,20 @@ function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
     return dest
 end
 
-# ── fill! ──
-
 function Base.fill!(a::LavaArray{T}, val) where T
     length(a) == 0 && return a
     v = convert(T, val)
-    # `fill_kernel!` is core's, beside `d2dcopy_kernel!`, for the same reason.
-    # From the array, not the global context. `fill!` on an array belonging to a
-    # second device was dispatching on whichever context was global: the write
-    # landed on the wrong queue, the array read back as zeros, and Lava's own
-    # cross-context guard caught it later as "a buffer was last used on a channel
-    # from a DIFFERENT VkContext" — a long way from the cause.
+    # The array's backend, not the global context, which may be another GPU.
     k = KI.Kernel(KernelAbstractions.get_backend(a), fill_kernel!)
     k(a, v; ndrange=length(a))
     return a
 end
 
-# ── resize! ──
-#
-# Capacity-aware resize for LavaArrays, both 1-D (standard Base.resize! shape)
-# and N-D (non-standard but the natural extension; textures are 2-D/3-D and
-# `copyto_texture!` needs it).  Invariants:
-#
-# * The backing VkManagedBuffer is pool-allocated with rounded-up capacity.
-#   If the new element count still fits, we just update `dims` — no Vulkan
-#   alloc, no copy.  Elements beyond old length are left undefined, matching
-#   `Base.resize!(::Vector, n)` semantics.
-# * On genuine growth, allocate a fresh pool chunk, copy the first min(old,new)
-#   elements, and retire the old DataRef via `GPUArrays.unsafe_free!`.  The
-#   retirement is RECORDED (core's `retire!`) and run once the submission that
-#   named the old bytes has passed — the caller does NOT need a `synchronize` to
-#   make it safe w.r.t. in-flight work.
-# * Throws on a freed DataRef (surfaces caller bugs; no self-heal).
+# Capacity-aware `resize!`, 1-D and N-D (textures). If the new size fits the
+# buffer only `dims` changes, and new elements are undefined as for `Vector`.
+# Otherwise the common prefix is copied into a new pool buffer and the old one is
+# `unsafe_free!`d; core retires it after in-flight use, so callers need no
+# `synchronize`. Throws on a freed array.
 
 function Base.resize!(a::LavaArray{T,N}, new_dims::Dims{N}) where {T,N}
     all(>=(0), new_dims) || throw(ArgumentError("new size must be non-negative"))
@@ -570,11 +413,8 @@ function Base.resize!(a::LavaArray{T,N}, new_dims::Dims{N}) where {T,N}
             cmd_copy_buffer!(e, buf, new_buf, copy_len;
                              src_off=src_off, dst_off=pool_offset(new_buf))
         end
-        # The copy pinned `buf` and stamped its `last_write` at the submit that
-        # closed the one-shot, so the `unsafe_free!` below sees the buffer as in
-        # use and records the destroy with `retire!`. The flush that stood here
-        # closed a window the open batch had, between a recorded pin and a
-        # submit that had not happened yet.
+        # The one-shot's submit stamps `buf` as in use, so `unsafe_free!` below
+        # defers its destroy with `retire!`; no flush is needed.
     end
     new_ref = GPUArrays.DataRef(new_buf) do b
         vk_free!(b)
@@ -587,19 +427,15 @@ function Base.resize!(a::LavaArray{T,N}, new_dims::Dims{N}) where {T,N}
     return a
 end
 
-# Variadic / scalar dispatch forwarders (N-D and 1-D calling conventions).
 Base.resize!(a::LavaArray{T,N}, new_dims::Vararg{Integer,N}) where {T,N} =
     resize!(a, Dims{N}(Int.(new_dims)))
 Base.resize!(a::LavaArray{T,1}, n::Integer) where T = resize!(a, (Int(n),))
-
-# ── append! ──
 
 function Base.append!(a::LavaArray{T,1}, items::AbstractVector) where T
     items_arr = collect(T, items)
     old_len = length(a)
     new_len = old_len + length(items_arr)
     resize!(a, new_len)
-    # Upload the new items to the end
     if !isempty(items_arr)
         bytes = Vector{UInt8}(reinterpret(UInt8, vec(items_arr)))
         upload!(a.buf[], bytes; offset=old_len * sizeof(T))
@@ -607,14 +443,12 @@ function Base.append!(a::LavaArray{T,1}, items::AbstractVector) where T
     return a
 end
 
-# ── norm override ──
-# GPUArrays' norm uses closures that capture variables as Core.Box (non-isbits),
-# causing compilation failures in the rescaling branch. Override with separate
-# helper functions to ensure all captured variables are isbits.
+# GPUArrays' `norm` captures variables in `Core.Box` closures, which fail to
+# compile for the GPU; these helpers capture only isbits values.
 
 import LinearAlgebra
 
-# Float16/Float32: accumulate in Float64 to avoid overflow entirely (no rescaling needed)
+# Float16/Float32: accumulate in Float64, which cannot overflow, so no rescaling.
 function lava_norm_p2_widen(v::LavaArray{T}) where T
     s = sum(x -> Float64(abs(x))^2, v; init=Float64(0))
     return typeof(float(LinearAlgebra.norm(zero(T))))(sqrt(s))
@@ -631,21 +465,9 @@ function lava_norm_pp_widen(v::LavaArray{T}, spp::Float64) where T
     return typeof(float(LinearAlgebra.norm(zero(T))))(exp2(inv(spp) * log2(s)))
 end
 
-# Float64: rescale by maxabs to avoid overflow.
-#
-# Subtlety: writing `abs(x) / maxabs` in the source is NOT enough. GPU drivers
-# (and LLVM's `arcp` fast-math) lower a Float64 `x / m` to `x * (1/m)`, so when
-# `maxabs` is near `floatmax(Float64)` the reciprocal `1/maxabs` is a subnormal
-# (~1.1e-308, below the 2.2e-308 normal floor). Under flush-denormals-to-zero —
-# the default on lavapipe AND RDNA3 (RADV) — that reciprocal becomes 0, then
-# `abs(x) * 0 = 0`, `sum = 0`, and the rescaled norm collapses to 0. (Verified:
-# `sum(x -> x/m, v)` returns exactly 0.0 iff `1/m` is subnormal, 2.0 otherwise.)
-#
-# Fix: divide by `sqrt(maxabs)` TWICE instead of by `maxabs` once.
-# `(x / √m) / √m == x / m`, but `1/√m` is always normal (even for m == floatmax,
-# `1/√floatmax ≈ 7.5e-155`), so no subnormal reciprocal is ever formed. This is
-# correct for the overflow case (maxabs near floatmax), the underflow case
-# (maxabs near floatmin), and normal magnitudes alike.
+# Float64: rescale by `maxabs`, dividing by `sqrt(maxabs)` twice. Drivers lower
+# `x / m` to `x * (1/m)`; for `m` near `floatmax` that reciprocal is subnormal
+# and flushed to zero (lavapipe, RADV), and the norm comes out 0.
 function lava_norm_p2_rescale(v::LavaArray{T}, maxabs::Float64) where T
     sm = sqrt(maxabs)
     s = sum(x -> ((abs(x) / sm) / sm)^2, v; init=Float64(0))
@@ -661,30 +483,25 @@ end
 function LinearAlgebra.norm(v::LavaArray{T}, p::Real=2) where T
     RT = typeof(float(LinearAlgebra.norm(zero(T))))
     isempty(v) && return zero(RT)
-    # `Base.count`, spelled out: this module imports Mantle's `count` (a
-    # resource's element count, for `Buffer`, `GPURef` and `Attr`), so the bare
-    # name here was Mantle's and the 0-norm of every `LavaArray` was a
-    # `MethodError` — the GPUArrays testsuite's `0-norm` cases, 60 of them.
+    # `Base.count`: the bare name is Mantle's resource element `count`.
     p == 0 && return convert(RT, Base.count(!iszero, v))
     p == Inf && return convert(RT, maximum(abs, v))
     p == -Inf && return convert(RT, minimum(abs, v))
-    # Non-trivial p-norms rely on transcendental math in the reduction path.
-    # These are currently not numerically stable across Vulkan drivers (e.g. RDNA3.5),
-    # so use CPU fallback for correctness/portability.
+    # Other p-norms need transcendental math that is inaccurate on some Vulkan
+    # drivers (RDNA3.5), so they run on the host.
     (p != 1 && p != 2) && return convert(RT, LinearAlgebra.norm(Array(v), p))
 
-    # Float16/Float32/ComplexF16/ComplexF32: accumulate in Float64 (no overflow possible)
+    # Float16/Float32 and their complex types: accumulate in Float64.
     if RT === Float32 || RT === Float16
         p == 2 && return lava_norm_p2_widen(v)
         p == 1 && return lava_norm_p1_widen(v)
         return lava_norm_pp_widen(v, Float64(p))
     end
 
-    # Float64/ComplexF64: rescale by max to avoid overflow
     maxabs = convert(Float64, maximum(abs, v))
     (iszero(maxabs) || isinf(maxabs)) && return convert(RT, maxabs)
 
-    # Try without rescaling first (faster, only when no overflow AND no underflow)
+    # Unscaled when the sum of squares can neither overflow nor underflow.
     if p == 2 && isfinite(length(v) * maxabs^2) && !iszero(maxabs^2)
         s = sum(abs2, v; init=Float64(0))
         return convert(RT, sqrt(s))
@@ -695,35 +512,14 @@ function LinearAlgebra.norm(v::LavaArray{T}, p::Real=2) where T
     return lava_norm_pp_rescale(v, maxabs, Float64(p))
 end
 
-# ── permutedims: superseded, and the reasoning is why ──
-#
-# There was a `lava_permutedims_kernel!` here: an N-D ndrange so the grid hands
-# the kernel its Cartesian coordinates and the `ndims - 1` integer divisions
-# GPUArrays' generic kernel pays per element disappear. The premise was that the
-# permute is bound by that division chain.
-#
-# **It is not, and removing the divisions made it slower.** Measured against the
-# ordinary broadcast — which pays the full `cart32` chain *and* re-indexes a
-# `PermutedDimsArray` — the division-free kernel lost by 2.6-5.9x on every shape
-# SAM 2's encoder runs (table in `lavapermutedims!` below). What it bought in
-# arithmetic it gave back many times over in geometry: an N-D ndrange gets an N-D
-# workgroup, consecutive lanes stop walking consecutive memory, and that is the
-# same effect the note at the top of this file measures at 54 GB/s against 315.
-#
-# Access order is the cost. Anything that beats the broadcast has to change the
-# order — tile it, or widen what one workgroup covers — and it belongs in the
-# broadcast path so both spellings get it.
-
+# Two methods, matching GPUArrays' `NTuple` and general signatures to avoid ambiguity.
 """
     permutedims!(dest::AnyLavaArray, src::AnyLavaArray, perm)
 
-`dest[I...] = src[I[perm]...]`, one thread per destination element.
-
-More specific than GPUArrays' method, which this exists to replace; see the note
-above for why.
+`dest[I...] = src[I[perm]...]`, computed as `dest .= PermutedDimsArray(src, perm)`.
+Overrides GPUArrays' method. An N-D launch without index divisions is 2.6-5.9x
+slower than the flat broadcast: access order dominates, not index arithmetic.
 """
-# Two methods, matching GPUArrays' own signatures so neither is ambiguous with
-# them: it defines one for `NTuple` and one for the general case.
 Base.permutedims!(dest::AnyLavaArray, src::AnyLavaArray, perm::NTuple{N, T}) where {N, T} =
     lavapermutedims!(dest, src, perm)
 Base.permutedims!(dest::AnyLavaArray, src::AnyLavaArray, perm::AbstractVector) =
@@ -742,29 +538,7 @@ function lavapermutedims!(dest::AnyLavaArray, src::AnyLavaArray, perm::Tuple)
                                     "source axis $(perm[d]) is $(size(src, perm[d]))"))
     end
     N == 0 && return dest
-    # One path, not two spellings. `dest .= PermutedDimsArray(src, perm)` and
-    # `permutedims!(dest, src, perm)` are the same operation, and until now they
-    # ran different kernels: the broadcast flattens the launch and recovers the
-    # Cartesian index with `cart32`, this one launched an N-D ndrange with an
-    # N-D workgroup. That is precisely the geometry the note at the top of this
-    # file measures at a quarter of the achievable bandwidth — consecutive lanes
-    # stop walking consecutive memory — and the dedicated kernel lost to the
-    # generic one on every shape SAM 2's encoder runs:
-    #
-    #   src shape              perm             bcast   permutedims!
-    #   (72, 8, 256, 16)       (1,3,2,4)         34.3     13.2 GB/s
-    #   (72, 4, 16, 1024)      (1,3,2,4)         35.8      9.6
-    #   (576,16,4,16,4,1)      (1,2,4,3,5,6)     33.2      5.6
-    #   (288,4,32,4,32,1)      (1,2,4,3,5,6)     19.0      4.7
-    #   (256,256,144,1)        (3,1,2,4)         17.8     16.9
-    #
-    # (interleaved, one session, bit-exact both ways). 2.6-5.9x, for deleting a
-    # kernel rather than writing one. It also retires two traps that were only
-    # ever this launch's: the rank-6 miscompile that made `permutedims!` write a
-    # fraction of its output, and the rank-18 `staticgroup` hang.
-    #
-    # Anything faster than the broadcast belongs *in* the broadcast path, where
-    # both spellings get it.
+    # One kernel for both spellings; a faster permute belongs in the broadcast path.
     dest .= PermutedDimsArray(src, perm)
     return dest
 end

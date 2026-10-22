@@ -1,31 +1,25 @@
-# RayCore-compatible hardware ray tracing interface for Lava.jl
-#
-# Provides HardwareAccel and trace_closest_hits!() as a drop-in replacement
-# for Raycore's software BVH traversal closest_hit().
+# Raycore-compatible hardware tracing: `HardwareAccel` and `trace_closest_hits!`
+# stand in for Raycore's software `closest_hit`.
 
-# Use Raycore's RTRay and RTHitResult (same memory layout, single definition)
+# Raycore's ray and hit layouts, shared with the shaders below.
 using Raycore: RTRay, RTHitResult
 
 """HardwareAccel{TriVec}
 
-Legacy Raycore import/RT context: native TLAS, CPU primitive lookup tables,
-portable shader templates and the submit channel used for tracing.
+Raycore import and tracing context: native TLAS, host primitive lookup tables,
+portable shader templates and the submit channel traces run on.
 """
 mutable struct HardwareAccel{TriVec <: AbstractVector}
     tlas::LavaTLAS
-    triangle_data::TriVec           # CPU primitives for lookup
+    triangle_data::TriVec           # host primitives for lookup
     blas_offsets::Vector{UInt32}
-    # Per-instance triangle-array offset, indexed by `gl_InstanceID`.
-    # `per_instance_tri_offsets[iid+1]` = offset into `triangle_data` where
-    # that instance's BLAS triangles start.  This removes the old
-    # `off_gpu[custom_index + 1]` lookup, freeing `custom_index` to carry
-    # the interface override instead of the BLAS index.
+    # `per_instance_tri_offsets[iid+1]`: where instance `iid`'s BLAS triangles
+    # start in `triangle_data`, so `custom_index` stays free for the caller.
     per_instance_tri_offsets::Vector{UInt32}
     rt_pipeline::RayTracingPipeline
-    # Optional any-hit pipeline (lazy — created on first use via set_anyhit_pipeline!)
+    # Set by `set_anyhit_pipeline!`.
     anyhit_pipeline::Union{Nothing, RayTracingPipeline}
-    # submit channel this accel's RT dispatches run on.  Stored explicitly so
-    # callers don't reach for an implicit `vk_context().default_bq`.
+    # Channel this accel's traces run on.
     bq::SubmitChannel{<:VulkanQueue}
 end
 
@@ -84,15 +78,9 @@ end
     trace_closest_hits!(results, rays, accel::HardwareAccel, n_rays::Integer;
                         cull_mask::UInt32 = UInt32(0xFF))
 
-Trace `n_rays` rays against the hardware acceleration structure.
-Results are written to `results` buffer (one RTHitResult per ray).
-
-`results` and `rays` can be `LavaArray{RTHitResult}`/`LavaArray{RTRay}`,
-or any type accepted by `trace_rays!`.
-
-`cull_mask` is ANDed against each instance's instance_mask in the HWTLAS.
-An instance is visible to a ray only when `(cull_mask & instance_mask) != 0`.
-Default `0xFF` matches all instances (backward-compatible).
+Trace `n_rays` rays and write one `RTHitResult` each into `results`
+(`LavaArray{RTRay}` / `LavaArray{RTHitResult}`, or anything `trace_rays!` accepts).
+An instance is visible to a ray only when `cull_mask & instance_mask != 0`.
 """
 function trace_closest_hits!(results, rays, accel::HardwareAccel, n_rays::Integer;
                               cull_mask::UInt32 = UInt32(0xFF))
@@ -104,10 +92,7 @@ end
     trace_closest_hits_indirect!(results, rays, accel::HardwareAccel, n_rays::LavaArray{Int32};
                                   cull_mask::UInt32 = UInt32(0xFF))
 
-Indirect RT trace -- reads ray count from GPU buffer. No CPU readback.
-
-`cull_mask` is ANDed against each instance's instance_mask in the HWTLAS.
-Default `0xFF` matches all instances (backward-compatible).
+[`trace_closest_hits!`](@ref) with the ray count read from `n_rays` on the device.
 """
 function trace_closest_hits_indirect!(results, rays, accel::HardwareAccel, n_rays::LavaArray{Int32};
                                        cull_mask::UInt32 = UInt32(0xFF))
@@ -117,13 +102,9 @@ end
 """
     trace_closest_hits_anyhit!(results, rays, accel, n_rays, extra_args...)
 
-RT trace with any-hit shader. `extra_args` are passed after (rays, results) to the
-raygen and any-hit functions via the shared BDA arg buffer.
-
-TODO(P3-followup): cull_mask plumbing for the anyhit variants is deferred.
-The anyhit raygen functions have separate signatures (extra_args at position 3+);
-adding cull_mask requires coordinated changes to those raygen signatures.
-For now cull_mask is hardcoded 0xFF inside the respective raygen functions.
+Trace with the pipeline from `set_anyhit_pipeline!`; `extra_args` follow
+`(rays, results)` in the raygen and any-hit arguments. There is no `cull_mask`:
+the any-hit raygen functions pick their own.
 """
 function trace_closest_hits_anyhit!(results, rays, accel::HardwareAccel, n_rays::Integer, extra_args...)
     pipeline = accel.anyhit_pipeline
@@ -135,9 +116,7 @@ end
 """
     trace_closest_hits_anyhit_indirect!(results, rays, accel, n_rays_buf, extra_args...)
 
-Indirect RT trace with any-hit shader -- reads ray count from GPU buffer.
-
-TODO(P3-followup): cull_mask plumbing deferred -- see trace_closest_hits_anyhit!.
+[`trace_closest_hits_anyhit!`](@ref) with the ray count read on the device.
 """
 function trace_closest_hits_anyhit_indirect!(results, rays, accel::HardwareAccel, n_rays::LavaArray{Int32}, extra_args...)
     pipeline = accel.anyhit_pipeline
@@ -145,7 +124,7 @@ function trace_closest_hits_anyhit_indirect!(results, rays, accel::HardwareAccel
     trace_rays_indirect!(accel.bq, pipeline, accel.tlas, rays, results, extra_args...; n_rays=n_rays)
 end
 
-# ── Built-in RT Shaders ──
+# Built-in shaders. Payload slots: hit, t, primitive id, custom index, u, v, instance id.
 
 function hw_raygen(rays::LavaDeviceArray{RTRay,1},
                    results::LavaDeviceArray{RTHitResult,1},
@@ -160,7 +139,7 @@ function hw_raygen(rays::LavaDeviceArray{RTRay,1},
 
     lava_rt_trace_ray(
         UInt32(0),    # flags
-        cull_mask,    # cull mask (caller-supplied; default 0xFF matches all instances)
+        cull_mask,    # cull mask
         UInt32(0),    # sbt offset
         UInt32(0),    # sbt stride
         UInt32(0),    # miss index

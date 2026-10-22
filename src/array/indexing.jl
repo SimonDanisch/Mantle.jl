@@ -1,9 +1,5 @@
-# Backend-independent launch geometry and integer index decomposition.
-#
-# These helpers are used by portable kernels in DNNKernels and by Mantle's
-# Vulkan array implementations.  Keeping them in the Vulkan extension made the
-# same kernels fail at graph construction on Metal, even though every operation
-# here is ordinary integer arithmetic.
+# Backend-independent launch geometry and integer index decomposition, used by
+# portable kernels in DNNKernels and by Mantle's array kernels on every backend.
 
 struct FastDiv32
     d::UInt32
@@ -109,33 +105,13 @@ end
 """
     apair(loader, A, m, k, lda) -> GemmV2
 
-The staged kernels' whole A-operand read: the pair `A[m, k]`, `A[m+1, k]`, with
+The staged GEMM kernels' A-operand read: the pair `A[m, k]`, `A[m+1, k]`, with
 `m` zero-based and even and `lda` the leading dimension. `nothing` is a plain
-column-major matrix and is what every GEMM passes.
-
-**The hook exists so a convolution does not have to materialise im2col.** The
-matrix a 3x3 convolution multiplies is nine times its own input, and building it
-costs a write plus a read of that: for the Qwen-Image VAE's `288 -> 288` over
-1024x1024 the operand is 5.4 GB against a 0.6 GB image, and measured against the
-GEMM's own rate on the same shape it is 85 ms of a 168 ms convolution. A loader
-that reads the image where the kernel would have read the matrix removes the
-buffer, the pass that fills it and that traffic, and changes nothing else about
-the schedule. This is llama.cpp's `conv2d_mm.comp`, which gathers its B operand
-out of the image inside the k-loop for the same reason.
-
-The pair is along `m`, which for a convolution is the pixel axis, so the two
-elements are adjacent output pixels and normally adjacent input pixels too.
-
-Only the :gather staged GEMM schedule takes a loader today.
-
-**Declared here, in portable code, and not beside the kernel that calls it.**
-`src/vulkan/` is `@static include`d — on a Mac `src/metal/` is loaded instead
-and nothing in `src/vulkan/` exists. A loader is written by the CALLER, and a
-caller extends `Mantle.apair` at top level, so defining it beside the Vulkan
-kernel made `DNNKernels` fail to PRECOMPILE on any platform without Vulkan
-rather than simply decline the path at runtime. Every other Vulkan-only name
-that caller uses sits inside a function body and resolves lazily; this one did
-not.
+column-major matrix, which every GEMM passes. A caller's loader lets a
+convolution read the image inside the k-loop instead of materialising im2col
+(nine times the input for 3x3), as llama.cpp's `conv2d_mm.comp` does; only the
+`:gather` schedule takes one. Declared in portable code because callers extend
+it at top level and `src/vulkan/` is not loaded on a Mac.
 """
 @inline apair(::Nothing, A, m, k, lda) =
     @inbounds (VecElement(A[1 + m + k * lda]), VecElement(A[2 + m + k * lda]))

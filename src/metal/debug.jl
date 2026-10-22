@@ -1,23 +1,7 @@
-# What `DebugConfig` is on Metal, and how the validation layer's reports reach
-# `validationmessages!`.
-#
-# Metal decides validation per PROCESS. `MTL_DEBUG_LAYER=1` in the environment a
-# process starts with wraps every device in `MTLDebugDevice` (measured on macOS 27,
-# an M5: the device, its queues and their command buffers all report `MTLDebug…`
-# classes, and the framework logs "Metal API Validation Enabled" before Julia has
-# run a line); set later, it does nothing. `MTL_SHADER_VALIDATION=1` is the same
-# for instrumented shaders. So a device cannot be built "with validation" in a
-# process that did not start with it, and `checkdebug` refuses rather than build
-# one that silently does not check.
-#
-# A failure the layer finds goes to `MTLReportFailure`, which by default asserts
-# and aborts the process. `MTLSetReportFailureBlock` replaces that with a block,
-# and the block here records the message instead: the process lives, and the
-# message is what `validationmessages!` drains. Measured: an `offset(128) must be
-# < [buffer length](64)` on `setBuffer:offset:atIndex:` reaches the block on the
-# thread that made the call, with the formatted message, and the process goes on.
-# `MTLSetReportFailureBlock` is exported by Metal.framework and is not in its
-# public headers; it is the one way to receive the layer's messages in-process.
+# Metal validation is per process: `MTL_DEBUG_LAYER=1` (wraps every device in
+# `MTLDebugDevice`) and `MTL_SHADER_VALIDATION=1` act only in the environment the
+# process starts with, so `checkdebug` refuses rather than build a device that
+# silently does not check.
 
 """
     debugenv(::MetalDevice / ::MetalBackend, cfg) -> environment pairs
@@ -28,8 +12,8 @@ debugenv(::Union{MetalDevice,Metal.MetalBackend}, cfg::DebugConfig) =
     Pair{String,String}[(cfg.validation ? ["MTL_DEBUG_LAYER" => "1"] : Pair{String,String}[])...,
                         (cfg.gpu_av ? ["MTL_SHADER_VALIDATION" => "1"] : Pair{String,String}[])...]
 
-"""The Objective-C class of `dev`: `MTLDebugDevice` when the process loaded the
-API validation layer, the driver's own (`AGXG17GDevice`) when it did not."""
+"""The Objective-C class of `dev`: `MTLDebugDevice` under the API validation
+layer, otherwise the driver's own (`AGXG17GDevice`)."""
 classname(dev::MTL.MTLDevice) =
     unsafe_string(ccall(:object_getClassName, Cstring, (id{MTL.MTLDevice},), dev))
 
@@ -38,9 +22,8 @@ validating(d::MetalDevice) = startswith(classname(d.dev), "MTLDebug")
 """
     checkdebug(mtldev, cfg)
 
-Refuse a configuration this process cannot honour, before a device is built
-with it: a setting Metal has no counterpart for, or a layer the process did not
-load at start. Installs the report block when `validation` is asked for.
+Throw `ArgumentError` for a setting Metal has no counterpart for, or a layer the
+process did not load at start. Installs the report block when `validation` is set.
 """
 function checkdebug(mtldev::MTL.MTLDevice, cfg::DebugConfig)
     unsupported = String[]
@@ -70,9 +53,12 @@ function checkdebug(mtldev::MTL.MTLDevice, cfg::DebugConfig)
 end
 
 """
-Install the block that records what the validation layer reports, once per
-process. The block runs on whichever thread made the failing call, which is a
-Julia thread for every call Mantle and Metal.jl make, and only appends.
+    capturereports!()
+
+Once per process, replace `MTLReportFailure`'s default abort with a block that
+appends the message to `METAL.reports`. `MTLSetReportFailureBlock` is exported by
+Metal.framework but not in its public headers. The block runs on the thread that
+made the failing call (a Julia thread for Mantle's and Metal.jl's calls).
 """
 function capturereports!()
     METAL.reporter === nothing || return nothing
@@ -92,8 +78,8 @@ function capturereports!()
     return nothing
 end
 
-"""The reports the layer made since the last call — the process's, since Metal
-reports to one block: on Metal, validation is a property of the process."""
+"""Drain the validation reports since the last call. They are the process's, not
+this device's: Metal reports to one block."""
 function validationmessages!(::MetalDevice)
     lock(METAL.reportlock) do
         msgs = copy(METAL.reports)

@@ -1,18 +1,18 @@
 # H.265 Main, 8-bit 4:2:0 frame pictures; feeds start at a closed IRAP GOP.
 # Short-term reference sets and tiles are supported; scaling lists and long-term
-# references are refused. Session and streaming policy live in video_common.jl.
+# references are refused.
 
-# ---------- H.265 bitstream parsing ----------
 h265naltype(nal) = Int((nal[1] >> 1) & 0x3f)
 const H265_VCL_MAX = 21          # nal types 0..21 are slices
 h265isirap(t) = 16 <= t <= 23
 h265isidr(t) = t == 19 || t == 20
-# _N types (sub-layer non-reference); with one temporal layer they are never referenced
+# Even types below 16 are sub-layer non-reference; with one temporal layer
+# nothing references them.
 h265isref(t) = t >= 16 || isodd(t)
 
 split_nals_h265(d) = split_nals(d, nal -> (h265naltype(nal),nal))
 
-# profile_tier_level(1, maxsub): general block + per-sub-layer blocks
+# profile_tier_level(1, maxsub): general block, then per-sub-layer blocks.
 function parse_ptl(b, maxsub)
     rbn(b, 2); tier = rb1(b); profile = rbn(b, 5)
     rbn(b, 32)                                    # compatibility flags
@@ -32,9 +32,9 @@ function parse_ptl(b, maxsub)
     (; profile, tier, level, prog, inter, nonpacked, frameonly)
 end
 
-# st_ref_pic_set(idx): explicit or inter-set-predicted; `sets` are the already
-# parsed sets. Returns (s0 = cumulative NEGATIVE deltas in decoding order,
-# u0 = used flags, s1 = positive, u1, pred, sign, absdelta, refidx).
+# st_ref_pic_set(idx), explicit or predicted from the already parsed `sets`.
+# Returns cumulative negative POC deltas `s0` and positive `s1`, nearest first,
+# their used flags `u0`/`u1`, and the prediction fields `pred, sign, absd, refidx`.
 function parse_strps(b, idx, sets, nsets)
     pred = idx != 0 ? rb1(b) == 1 : false
     if pred
@@ -143,19 +143,13 @@ function parse_pps_h265(nal)
     if tiles == 1
         ntilec = ue(b); ntiler = ue(b); uniform = rb1(b)
         if uniform == 0
-            # 7.3.2.3.1: the explicit geometry sits between `uniform_spacing_flag`
-            # and `loop_filter_across_tiles_enabled_flag`. Skipping it does not
-            # merely lose the tile widths — it leaves the reader misaligned for
-            # the whole rest of the PPS, so the deblocking parameters and
-            # `log2_parallel_merge_level` are read out of the wrong bits and the
-            # `StdVideoH265PictureParameterSet` handed to the driver is nonsense.
-            # A phone's HEVC does this routinely: three columns of 24/24/12 CTBs
-            # across 1920 is what surfaced it.
+            # 7.3.2.3.1: explicit tile sizes precede the loop-filter flag. Skipping
+            # them misaligns the rest of the PPS (deblocking, parallel merge level).
             colw = UInt16[ue(b) for _ in 1:ntilec]
             rowh = UInt16[ue(b) for _ in 1:ntiler]
         end
-        # The Std struct carries 19 columns and 21 rows, which is what the
-        # profiles allow; a stream past that would silently lose its last tiles.
+        # The Std struct holds 19 column widths and 21 row heights, the profile
+        # maximum; refuse more rather than drop tiles.
         (ntilec <= 19 && ntiler <= 21) || error(
             "decode_h265: $(ntilec + 1)x$(ntiler + 1) tiles exceeds the " *
             "19x21 the Vulkan video parameter set can carry")
@@ -175,8 +169,8 @@ function parse_pps_h265(nal)
        dbctl, dbovr, dbdis, beta, tc, listmod, log2pml, shext)
 end
 
-# First slice segment of a picture: POC lsb + the RPS actually in effect, plus
-# the exact bit count of an inline st_ref_pic_set (the driver re-parses it).
+# First slice segment of a picture: POC lsb, the RPS in effect, and the exact bit
+# count of an inline st_ref_pic_set, which the driver needs.
 function parse_slice_h265(nal, sps, pps)
     t = h265naltype(nal)
     b = BR(unescape(nal[3:end]), 0)
@@ -208,7 +202,6 @@ function parse_slice_h265(nal, sps, pps)
        stype, poclsb, rps, spsflag, rpsbits, refnd)
 end
 
-# ---------- Std struct builders ----------
 function std_strps(s)
     fl = packflags((s.pred ? 1 : 0, s.sign))
     d0 = zeros(UInt16, 16); d1 = zeros(UInt16, 16)
@@ -231,7 +224,7 @@ function std_ptl(p)
         C.StdVideoH265ProfileIdc(p.profile), C.StdVideoH265LevelIdc(levelidx265(p.level)))
 end
 
-# general_level_idc = 30 × level number; the Std enum counts known levels upward
+# general_level_idc is 30 × the level number; the Std enum indexes this list.
 const H265LEVELS = [30, 60, 63, 90, 93, 120, 123, 150, 153, 156, 180, 183, 186]
 levelidx265(lv) = something(findfirst(==(lv), H265LEVELS), length(H265LEVELS)) - 1
 
@@ -307,7 +300,6 @@ function video_profile_h265(w)
     (hp, pr, pl)
 end
 
-# ---------- the decoder ----------
 decoderprofile(::Type{H265Decoder}) = video_profile_h265(nothing)
 codeccapabilities(::Type{H265Decoder}) = C.VkVideoDecodeH265CapabilitiesKHR(
     C.VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_CAPABILITIES_KHR, C_NULL, C.StdVideoH265LevelIdc(0))
@@ -329,7 +321,8 @@ function distinctoutput(::Type{H265Decoder}, flags)
     return false
 end
 
-"""Persistent H.265 Main/8-bit/4:2:0 session; feed closed GOPs starting at an IRAP."""
+"""Open a persistent H.265 Main 8-bit 4:2:0 session from the SPS/PPS in `data`. Feed
+closed GOPs starting at an IRAP; close when done."""
 H265Decoder(ctx, data::AbstractVector{UInt8}; chroma::Bool=false) =
     videodecoder(H265Decoder, ctx, data; chroma)
 
@@ -353,7 +346,7 @@ function codecparameters(dec::H265Decoder)
         C_NULL, UInt32(1), UInt32(1), UInt32(1), rp(add))))
 end
 
-# The shared caller supplies a decode-target index; COINCIDE uses the DPB slot.
+# The decode-target index is unused: H.265 requires COINCIDE, so the target is the DPB slot.
 function decodeau!(dec::H265Decoder, au, bufbase::Integer, ::Integer = 1)
     w = dec.ctx; sps = dec.sps; pps = dec.pps
     SESSION = dec.SESSION; PARAMS = dec.PARAMS; PIN = dec.PIN; imgs = dec.imgs
@@ -366,7 +359,7 @@ function decodeau!(dec::H265Decoder, au, bufbase::Integer, ::Integer = 1)
         for (slot, _) in dpb; push!(freeslots, slot); end; empty!(dpb)
         dec.prevmsb = 0; dec.prevlsb = 0; dec.gop += 1
     end
-    # POC (8.3.1): same lsb/msb wrap arithmetic as h264 poc type 0
+    # POC (8.3.1): the lsb/msb wrap of H.264 POC type 0.
     if sh.idr
         poc = 0
     else
@@ -374,8 +367,7 @@ function decodeau!(dec::H265Decoder, au, bufbase::Integer, ::Integer = 1)
         poc = pmsb + sh.poclsb
         dec.prevmsb = pmsb; dec.prevlsb = sh.poclsb
     end
-    # RPS-driven DPB: the slice DECLARES every reference that stays alive —
-    # anything else frees its slot before this decode
+    # The RPS lists every reference that stays; free all other slots before decoding.
     rpspocs = Int[]
     if sh.rps !== nothing
         append!(rpspocs, poc + d for d in sh.rps.s0)
@@ -390,8 +382,8 @@ function decodeau!(dec::H265Decoder, au, bufbase::Integer, ::Integer = 1)
     outvimg, outviewhl = imgs[outslot]
     outimg = outvimg.image.vks; outview = outviewhl.vks; outlay = outvimg.layout
     sliceoffs, bitrange = uploadbitstream!(bmap+bufbase, au, dec.bsalign)
-    # reference slots in DPB order; the Std picture info lists RPS entries as
-    # positions into this array
+    # Reference slots in DPB order. The Std picture info's RPS lists hold DPB slot
+    # indices, mapped from POC by `pocpos`.
     refpr = Ref{C.VkVideoPictureResourceInfoKHR}[]; refri = Ref{C.StdVideoDecodeH265ReferenceInfo}[]; refds = Ref{C.VkVideoDecodeH265DpbSlotInfoKHR}[]
     decref = C.VkVideoReferenceSlotInfoKHR[]; begref = C.VkVideoReferenceSlotInfoKHR[]
     pocpos = Dict{Int, Int}()
@@ -403,7 +395,7 @@ function decodeau!(dec::H265Decoder, au, bufbase::Integer, ::Integer = 1)
         push!(refpr, pr); push!(refri, ri); push!(refds, ds)
         push!(decref, C.VkVideoReferenceSlotInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR, pc(ds), Int32(slot - 1), rp(pr)))
         push!(begref, C.VkVideoReferenceSlotInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR, C_NULL, Int32(slot - 1), rp(pr)))
-        pocpos[p] = slot - 1              # RPS entries carry the DPB slotIndex
+        pocpos[p] = slot - 1
     end
     fill8(pocs) = ntuple(i -> UInt8(i <= length(pocs) ? get(pocpos, pocs[i], 0xff) : 0xff), 8)
     before = sh.rps === nothing ? Int[] : [poc + d for (d, u) in zip(sh.rps.s0, sh.rps.u0) if u == 1]
@@ -456,8 +448,7 @@ end
 """
     decode_h265(ctx, annexb; maxframes=typemax(Int), chroma=false)
 
-Hardware-decode an H.265 Annex-B stream on the GPU — the batch form of
-[`H265Decoder`](@ref), mirroring [`decode_h264`](@ref): feed everything, drain
-once in display order, free the session.
+Batch form of [`H265Decoder`](@ref), like [`decode_h264`](@ref): return
+`(width, height, ys, uvs)` in display order and close the session.
 """
 decode_h265(ctx, annexb::Vector{UInt8}; kw...) = decodevideo(H265Decoder,ctx,annexb;kw...)

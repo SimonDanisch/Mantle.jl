@@ -1,44 +1,27 @@
-# Persistent resources. One implementation, every backend.
-#
-# One type and not a concrete one per backend holding that backend's array type:
-# nothing in them is backend-specific except where the bytes come from, and once
-# that is the device's `Pool` the difference disappears.
-#
-# The lifetime is what separates these from a transient, not the ownership. A
-# transient's region is scoped to a plan and reclaimed with it; a persistent
-# resource's is held until the user drops it. Both come from the same pool, which
-# is the point: a model's weights and an editor's frame buffers are then visible
-# to one allocator instead of two.
+# Persistent resources, one implementation for every backend. They differ from
+# transients only by lifetime (held until the user drops them) and come from the
+# same pool, so weights and frame buffers are visible to one allocator.
 
 """
     Buffer(dev, data; capacity = length(data)) -> Buffer
     Buffer(dev, T, n) -> Buffer
     Buffer(dev, T, dims) -> Buffer
 
-A device array. `N` is one unless `dims` says otherwise.
-
-`len` and `capacity` are separate so a count that changes every frame never
-reallocates: `store` is always at capacity, `len` is what a draw covers. For
-`N > 1` they are both `prod(dims)`: an image-shaped buffer is not a list with a
-count, and `resize!` and `update!` are `N == 1` for exactly that reason.
-
-`N` exists because a renderer's own buffers are not all vectors — a framebuffer,
-an albedo layer and a depth layer are matrices, and flattening them here would
-push the width back into every kernel that indexes them.
+A device array of rank `N`. For `N == 1`, `store` is always at `capacity` and
+`len` is what a draw covers, so a per-frame count change does not reallocate.
+For `N > 1` both are `prod(dims)` and `resize!` does not apply.
 """
 mutable struct Buffer{T,N} <: Resource
     store::DeviceArray{T,N}
     len::Int
     capacity::Int
     dev::Any
-    # Stores made through `setindex!` and not yet landed — `(range, data)`, in
-    # the order they were made — and the flag a run reads before touching the
-    # list. See `setindex!` below.
+    # Stores made through `setindex!` and not yet landed, `(range, data)` in
+    # store order, and the flag a run reads before taking the lock.
     pending::Vector{Tuple{UnitRange{Int},Vector{T}}}
     pendinglock::ReentrantLock
     @atomic dirty::Bool
-    # Whether the region has been handed back, so the finalizer and an explicit
-    # `free!` cannot both do it. See [`retireonce!`](@ref).
+    # Set once the region is handed back; see [`retireonce!`](@ref).
     @atomic retired::Bool
 end
 
@@ -52,31 +35,16 @@ end
 """
     GPURef(dev, x) -> GPURef{T}
 
-One value, on the device, at an address that never moves.
-
-The thing a plan is given when the value has to change between runs. A dispatch
-is packed with the ref's ADDRESS — once, at `record!`, like every other argument
-— and the value behind it is written by a store, `ref[] = x`, which lands as a
-command in the run's own submission. So changing it costs one small transfer however many
-dispatches read it, and nothing rewrites the plan's argument memory, which is
-what let the argument ring go.
-
-Passing the value directly instead says the opposite, and that is the whole of
-the distinction: what a dispatch is given by value is resolved when the plan
-records and is that value for the plan's life.
-
-A distinct type rather than a length-1 `Buffer`: "one value shared by every
-element" is a claim about meaning rather than a length that happens to be one,
-and it is what `stride` reads to bind a vertex attribute at stride zero.
-
-Named for what it is, which is the storage a per-run value lives in, and not
-for the attribute binding it can also be used as.
+One value on the device at an address that never moves. A dispatch is packed
+with the address once, at `record!`; `ref[] = x` writes the value as a command
+in the next run's submission, so a change costs one small transfer and never
+rewrites argument memory. A value passed directly is fixed for the plan's life.
+Its `stride` is 0, so it binds as a vertex attribute shared by every element.
 """
 mutable struct GPURef{T} <: Resource
     store::DeviceArray{T,1}
     dev::Any
-    # The value of the last store, and the seqlock a run reads it under. See
-    # `setindex!` below.
+    # The last stored value and the seqlock a run reads it under; see `setindex!`.
     pending::Base.RefValue{T}
     @atomic seq::UInt64
     @atomic dirty::Bool
@@ -92,55 +60,43 @@ end
 """
     upload!(dev, dst::DeviceArray, first, data)
 
-Write `data` into `dst` starting at element `first`.
-
-The one genuinely backend-shaped thing a persistent resource needs: getting host
-bytes onto the device. Everything else about `Buffer` — length, capacity, resize,
-rename — is arithmetic over a region.
+Write host `data` into `dst` starting at element `first`. Backend-supplied.
 """
 function upload! end
 
 """
     download(dev, src::DeviceArray) -> Vector
 
-`src`'s contents on the host. The inverse of [`upload!`](@ref), and the only
-other place bytes cross.
+`src`'s contents on the host; the inverse of [`upload!`](@ref).
 """
 function download end
 
 """
     deviceview(dev, a::DeviceArray)
 
-What the backend wants handed to a kernel or a library for `a`.
-
-Two shapes exist and both are normal: a kernel takes a plain `(ptr, dims)` device
-struct, while a library or a copy wants the backend's host-side array handle —
-non-owning, since the `Block` owns the memory. `unsafe_wrap(…, own = false)` is
-that hatch on CUDA and Metal; on a backend we control it is a view built by hand.
+What the backend hands a kernel or library for `a`: a `(ptr, dims)` device
+struct for a kernel, or a non-owning host-side array handle for a library or a
+copy (the `Block` owns the memory).
 """
 function deviceview end
 
 """
     hostspan(dev, memory) -> (Ptr{UInt8}, nbytes)
 
-Where a block of this backend's memory begins in the HOST address space, and how
-many bytes there are.
-
-This is what a backend the CPU can address directly answers: Metal from a
-`Shared` `MTLBuffer`'s `contents`. Everything over it — [`hostview`](@ref)
-and the three transfer verbs below — is then one implementation.
-
-A backend whose device memory is not mapped does not answer, and writes
-`upload!`, `download` and `devicecopy!` itself: Vulkan stages through a transfer
-queue, which is a different operation and not a longer version of this one.
+Where a block begins in the host address space, and its size, for a backend the
+CPU addresses directly (Metal: a `Shared` `MTLBuffer`'s `contents`).
+[`hostview`](@ref) and the `host*` transfer verbs build on it. A backend with
+unmapped memory (Vulkan) does not answer and implements the transfers itself.
 """
 function hostspan end
 
-"""hostview(T, base, nbytes, offset, dims) -> Array{T}
+"""
+    hostview(T, base, nbytes, offset, dims) -> Array{T}
     hostview(dev, a::DeviceArray) -> Array{T}
 
-Borrow a bounded host span without copying, including padded plain-bit elements.
-The caller must keep its backing pool region alive while using the returned Array."""
+A bounds-checked host `Array` over device memory, without copying; padded bits
+types are allowed. The caller must keep the backing region alive while using it.
+"""
 function hostview(::Type{T}, base::Ptr{UInt8}, nbytes::Integer, offset::Integer,
                   dims::Dims) where {T}
     checkspan(nbytes,offset,checkedbytes(T,dims))
@@ -158,15 +114,10 @@ end
     hostdevicecopy!(dev, dst, src, n) -> dst
 
 `upload!`, `download` and `devicecopy!` for a backend the CPU addresses
-directly: a `copyto!` over [`hostview`](@ref), and on the two that READ device
-memory a wait first. A backend forwards its three vocabulary methods here.
-
-The wait is [`awaitwrites`](@ref) and it is not optional. Unified memory means
-the CPU and the GPU address the same bytes; it does NOT mean a kernel writing
-them has finished. Reading without waiting returns whatever was there before the
-launch — silently, and correctly often enough to look fine in a test that
-uploads and reads straight back. `upload!` does not wait: the graph orders a
-write against the passes that read it.
+directly, as `copyto!` over [`hostview`](@ref). The two that read device memory
+first call [`awaitwrites`](@ref): shared memory does not mean the writing kernel
+has finished, and an unwaited read silently returns stale bytes. `upload!` does
+not wait; the graph orders writes before readers.
 """
 function hostupload!(dev, a::DeviceArray, first::Integer, data::AbstractVector)
     copyto!(hostview(dev, a), first, data, 1, length(data))
@@ -188,13 +139,9 @@ end
 """
     bufferusage(dev, T) -> constraint
 
-What memory a persistent buffer of `T` needs, as whatever [`compatible`](@ref)
-consumes.
-
-Element types can demand more than the ordinary bits — a buffer of draw commands
-is read by the command processor, and one without `INDIRECT_BUFFER_BIT` is a
-validation error at the draw rather than at the allocation. That is a
-backend's vocabulary, so the backend answers.
+What memory a persistent buffer of `T` needs, in the form [`compatible`](@ref)
+reads. Some element types need more than the ordinary bits: draw commands need
+`INDIRECT_BUFFER_BIT`, or the draw fails validation.
 """
 function bufferusage end
 
@@ -202,9 +149,8 @@ function bufferusage end
 a long-lived allocation does not fragment the space plans reuse every frame."""
 struct Persistent end
 
-# `todevice` on the way in, so a caller holding the KA backend it named — which
-# is what a downstream package has — gets a buffer whose stored device is a real
-# one. Without it the failure surfaced two calls deep as `no method pool(::MetalBackend)`.
+# `todevice` so a caller passing a KA backend gets a buffer holding a real
+# device; otherwise `pool(::MetalBackend)` fails two calls later.
 function Buffer(dev, data::AbstractVector{T}; capacity::Integer = length(data)) where {T}
     d = todevice(dev)
     cap = max(Int(capacity), length(data))
@@ -223,22 +169,15 @@ Buffer(dev, ::Type{T}, n::Integer) where {T} = Buffer(dev, T, (Int(n),))
 """
     indexbuffer(dev, indices::AbstractVector{UInt32}) -> Buffer
 
-`indices` on the device, usable as an indexed draw's index buffer.
-
-Its own name and not `Buffer`, because the two APIs genuinely differ: Vulkan
-requires `BUFFER_USAGE_INDEX_BUFFER_BIT` at allocation and refuses a buffer that
-lacks it, while Metal's `drawIndexedPrimitives` takes any buffer. So the default
-here is what Metal needs and the Vulkan backend overrides it.
-
-Not expressed through `extrausage`, which dispatches on the ELEMENT type: an
-index happens to be a `UInt32` and so is half the data in a renderer, so giving
-every `UInt32` buffer the bit would be granting a capability to answer a question
-nobody asked.
+`indices` on the device, usable as an indexed draw's index buffer. The default
+suits Metal, which takes any buffer; Vulkan needs
+`BUFFER_USAGE_INDEX_BUFFER_BIT` at allocation and overrides this. Not
+`extrausage`, which keys on the element type and would give every `UInt32`
+buffer the bit.
 """
 indexbuffer(dev::Device, indices::AbstractVector{UInt32}) = Buffer(dev, indices)
-# Normalised before dispatch and not inside, because the Vulkan device OVERRIDES
-# this: a backend handed in raw would have missed its own method and got the
-# generic buffer, which on Vulkan is a buffer without INDEX_BUFFER_BIT.
+# Converted to a `Device` before dispatch so the Vulkan override is reached; a
+# raw backend would get a buffer without INDEX_BUFFER_BIT.
 indexbuffer(b::KernelAbstractions.Backend, indices::AbstractVector{UInt32}) =
     indexbuffer(Device(b), indices)
 
@@ -255,18 +194,10 @@ GPURef(dev, x::T) where {T} =
     (d = todevice(dev); s = GPURef{T}(persistentarray(d, T, (1,)), d);
      upload!(d, s.store, 1, [x]); s)
 
-"""A region of `dims` elements of `T`, from the device's pool.
-
-`bufferusage(dev, T)` is threaded through as the block's constraint, and it was
-not: `allocate` passed `nothing`, so the hook was declared, documented,
-implemented by both backends — and never called. Every persistent `Buffer` got
-the ordinary usage bits whatever its element type asked for.
-
-Nothing failed visibly, because the two types that ask for more were only ever
-reached by other paths. `Predicate` found it immediately: a conditional-rendering
-predicate read from a buffer without `CONDITIONAL_RENDERING_BIT` is undefined,
-and the two drivers here disagree about what undefined means — RADV returned the
-right answer and NVIDIA hung the GPU, with `vkQueueWaitIdle` never returning.
+"""
+A region of `dims` elements of `T` from the device's persistent arena, with
+`bufferusage(dev, T)` as the block constraint. Without it a conditional-rendering
+predicate lacks `CONDITIONAL_RENDERING_BIT`, which hangs the GPU on NVIDIA.
 """
 persistentarray(dev, ::Type{T}, dims::Dims) where {T} =
     allocate(pool(dev), dev, Persistent(), T, dims;
@@ -274,61 +205,40 @@ persistentarray(dev, ::Type{T}, dims::Dims) where {T} =
              constraint = bufferusage(dev, T))
 
 """
-A resource's leaf is its REGION, not the device it was allocated on.
-
-`holdleaves!`'s generic walker is documented as being for "a plain Julia value
-tree", and a `Buffer` is not one: it carries `dev` so it can free itself, and
-walking that reaches the `VkContext` and the `Vulkan.Instance`, whose
-`destructor` captures the `Instance` back. `DeviceArray`'s own method stops the
-other route into the driver; this one stops this route.
-
-Holding the store is also the right answer on the merits. What a launch must
-keep alive is the memory its commands name, and that is the region; the device
-outlives every resource on it by construction.
+A resource's leaf is its region. The generic walker would follow `dev` into the
+`VkContext` and `Vulkan.Instance`, whose `destructor` captures the instance
+back. A launch must keep alive the memory its commands name; the device
+outlives its resources.
 """
 @inline holdleaves!(holder, r::Union{Buffer,GPURef}) = holdleaves!(holder, r.store)
 
 Base.length(b::Buffer) = b.len
 Base.size(b::Buffer) = size(b.store)
-# The per-dimension form, which `Base` gives an `AbstractArray` for free and a
-# `Buffer` is not one. `1` past the rank, as Base does, so shape arithmetic that
-# indexes a fixed number of axes works on a resource of any rank.
+# Per-dimension `size`, `1` past the rank as Base does.
 Base.size(b::Buffer, d::Integer) = d <= ndims(b) ? size(b)[d] : 1
 Base.ndims(::Buffer{T,N}) where {T,N} = N
-# Element-wise verbs forward to the region. A `Buffer` is a container of `len`
-# elements of `T` — it answers `size`, `length` and `eltype` — so a caller that
-# has one should not have to reach for `storage` to write to it.
 Base.fill!(b::Buffer, v) = (fill!(storage(b), v); b)
-# `similar` answers a BUFFER, not a bare array: the allocation verb on a
-# resource should give back the same kind of thing, owned by the same `free!`.
+# `similar` returns a `Buffer`, freed by the same `free!`.
 Base.similar(b::Buffer{T,N}) where {T,N} = Buffer(b.dev, T, size(b))
 Base.similar(b::Buffer, ::Type{T}) where {T} = Buffer(b.dev, T, size(b))
 Base.similar(b::Buffer{T}, dims::Dims) where {T} = Buffer(b.dev, T, dims)
 Base.similar(b::Buffer, ::Type{T}, dims::Dims) where {T} = Buffer(b.dev, T, dims)
-# The varargs spellings too, which is how most callers write it.
 Base.similar(b::Buffer{T}, dims::Integer...) where {T} = Buffer(b.dev, T, Dims(dims))
 Base.similar(b::Buffer, ::Type{T}, dims::Integer...) where {T} = Buffer(b.dev, T, Dims(dims))
-# `reshape` and `view` answer an ARRAY while `similar` answers a `Buffer`, and
-# the difference is the point: both of the first two are a second reading of the
-# SAME bytes and own nothing, while `similar` allocates and must be freed.
-#
-# `view` here is `Base.view` and has nothing to do with Mantle's `ResourceView`,
-# which is a descriptor a PASS binds — a different function with a different
-# name, reached only through `viewfor`.
+# `reshape` and `view` return arrays over the same bytes and own nothing;
+# `similar` allocates. This is `Base.view`, unrelated to Mantle's
+# `ResourceView` (a pass binding, made by `viewof`).
 Base.reshape(b::Buffer, dims::Dims) = reshape(storage(b), dims)
 Base.reshape(b::Buffer, dims::Integer...) = reshape(storage(b), dims)
 Base.view(b::Buffer, I...) = view(storage(b), I...)
-# `Base.strides`, which is NOT Mantle's own `stride` below — that one answers
-# "elements to advance per index" for a binding and is a different question
-# with a confusingly similar name. A dense region's strides are its shape's.
+# `Base.strides`, not Mantle's binding `stride` below.
 Base.strides(b::Buffer) = strides(storage(b))
 Base.copyto!(dst::Buffer, src) = (copyto!(storage(dst), src); dst)
 Base.copyto!(dst::AbstractArray, src::Buffer) = copyto!(dst, storage(src))
 Base.length(::GPURef) = 1
-# `stride` zero means "one value shared by every element", so a `GPURef` and a
-# per-element `Buffer` take the same shader path and the same pipeline — see
-# `stride`'s docstring in runtime/api.jl. `count` is what a draw covers, taken
-# from the binding so it cannot disagree with it.
+# `stride` 0 means one value shared by every element, so a `GPURef` and a
+# per-element `Buffer` share shader path and pipeline (see `stride` in
+# runtime/api.jl). `count` is what a draw covers.
 stride(::Buffer) = 1
 stride(::GPURef) = 0
 count(b::Buffer) = b.len
@@ -339,8 +249,7 @@ Base.eltype(::GPURef{T}) where {T} = T
 capacity(b::Buffer) = b.capacity
 storage(b::Buffer) = deviceview(b.dev, b.store)
 storage(s::GPURef) = deviceview(s.dev, s.store)
-# `len` is a vector's notion — the prefix a draw covers — so only the vector
-# form trims. An `N > 1` buffer comes back with its shape.
+# Only the vector form trims to `len`; an `N > 1` buffer keeps its shape.
 Base.Array(b::Buffer{T,1}) where {T} = download(b.dev, b.store)[1:b.len]
 Base.Array(b::Buffer) = download(b.dev, b.store)
 
@@ -352,9 +261,8 @@ function update!(b::Buffer{T,N}, r::AbstractUnitRange, data::AbstractVector) whe
     b.len = max(b.len, last(r))
     return b
 end
-# The immediate write, for a ref that is not in a graph. Inside one, `ref[] = x`
-# is the route: it lands in the run's submission instead of stalling for a
-# staged upload, and it is ordered against the dispatches that read it.
+# Immediate staged write, for a ref outside a graph. Inside one, `ref[] = x`
+# lands in the run's submission, ordered against its readers.
 update!(s::GPURef{T}, x) where {T} = (upload!(s.dev, s.store, 1, T[x]); s)
 
 """
@@ -362,16 +270,12 @@ update!(s::GPURef{T}, x) where {T} = (upload!(s.dev, s.store, 1, T[x]); s)
     buf[range] = data
     buf[:] = data
 
-Pend a store for the next plan that reads the resource. Setters may run on any
-thread and never submit commands. GPURef converts one value; the latest wins,
-including stores equal to the old value. Buffers/transients retain ordered linear
-range stores, converting data to Vector{T} when needed. A Vector{T} is retained
-without copying: pass copy(data) if the caller will mutate it before the run.
-Transient stores require hostwritten=true at declaration so placement covers them.
-
-The update pass lands stores before readers in the run's own submission;
-overlapping ranges preserve store order. buf[:] means 1:length(data).
-update! uploads immediately. Array(buf) explicitly downloads device contents.
+Queue a store for the next plan that reads the resource; callable from any
+thread, never submits. A `GPURef` keeps the latest value. Buffers and transients
+keep linear range stores in order (`buf[:]` is `1:length(data)`); a `Vector{T}`
+is kept without copying, so pass `copy(data)` if it changes before the run. A
+transient must be declared `hostwritten = true`. The run lands stores before
+readers in its own submission. `update!` uploads immediately.
 """
 function Base.setindex!(r::GPURef{T}, x) where {T}
     v = convert(T, x)
@@ -436,17 +340,16 @@ end
     landstores!(f, r)
     landstores!(f, rs::Tuple)
 
-Consume pending stores; a clean resource reads only its dirty flag.
-GPURef calls f(r,ptr::Ptr{T}) under its seqlock and may repeat the callback.
-Buffers/transients call f(resource,data,first) in store order under their lock;
-a throwing callback leaves the pending list dirty for retry. The tuple form
-walks a plan's hostwritten resources.
+Consume pending stores; a clean resource costs one flag read. A `GPURef` calls
+`f(r, ptr::Ptr{T})` under its seqlock, possibly more than once. Buffers and
+transients call `f(resource, data, first)` in store order under their lock; if
+`f` throws, the list stays dirty for a retry. The tuple form walks a plan's
+`hostwritten` resources.
 """
 function landstores!(f, r::GPURef{T}) where {T}
     isdirty(r) || return nothing
-    # Cleared BEFORE the read. A store that lands after this line sets the flag
-    # again and is landed by the next run whichever value this read saw; cleared
-    # after the read, a store made between the two would be dropped.
+    # Cleared before the read: a later store sets it again for the next run,
+    # whereas clearing after the read would drop a store made in between.
     @atomic :release r.dirty = false
     while true
         s1 = @atomic :acquire r.seq
@@ -497,18 +400,12 @@ end
 end
 
 """
-Grow to `n` elements, keeping what fits.
+    resize!(b::Buffer{T,1}, n) -> b
 
-The old region goes back AFTER the copy, so growth never trips over its own
-source — and it is retired rather than released, because that copy is a DEVICE
-copy: it has been recorded, not necessarily run, and handing those bytes to the
-next caller on the strength of having recorded a read of them is the same
-use-after-free in a different costume.
-
-The store MOVING is announced (`notify_move!`): a recorded plan packed with
-the old address is patched, not re-recorded — its next run writes the new
-address into the plan's argument memory as a command in that run's own
-submission. So a plan survives its buffers resizing.
+Grow to `n` elements, keeping the contents; shrinking only lowers `len`. The old
+region is retired, not released, because the device copy out of it is recorded
+but may not have run. `notify_move!` patches recorded plans with the new address
+in their next run, so they survive the resize without re-recording.
 """
 function Base.resize!(b::Buffer{T,1}, n::Integer) where {T}
     n = Int(n)
@@ -524,18 +421,11 @@ function Base.resize!(b::Buffer{T,1}, n::Integer) where {T}
 end
 
 """
-    retireonce!(r::Buffer) / retireonce!(r::GPURef)
+    retireonce!(r::Union{Buffer,GPURef})
 
-Hand the region back, at most once, from anywhere — including a finalizer.
-
-The CAS is the whole of it: a resource that is dropped AND explicitly freed
-retires once, and the second caller is a no-op. Without it the same region could
-be pushed onto `pending` twice and handed to two owners, which is worse than
-leaking it.
-
-`retire!` is the only thing this calls, and it appends under a lock and does
-nothing else — no free list, no driver, nothing a GC thread may not touch. The
-release itself is [`reclaim!`](@ref), on the owning thread.
+Hand the region back at most once, from anywhere including a finalizer. The CAS
+keeps a dropped and explicitly freed resource from being retired twice and
+handed to two owners. Calls only the finalizer-safe [`retire!`](@ref).
 """
 function retireonce!(r::Union{Buffer,GPURef})
     _, won = @atomicreplace r.retired false => true
@@ -545,37 +435,19 @@ function retireonce!(r::Union{Buffer,GPURef})
 end
 
 """
-    free!(r::Buffer) / free!(r::GPURef)
+    free!(r::Union{Buffer,GPURef})
 
-Give a persistent resource's region back to the pool, now rather than whenever
-the GC gets to it.
-
-**Optional.** Every `Buffer` and `GPURef` carries a finalizer that does exactly
-this, so a resource that is simply dropped comes back on its own and forgetting
-`free!` is not a leak. What calling it buys is timing: the region is retired at
-a point you chose, which matters when the next allocation is large and you would
-rather not wait for a GC to notice.
-
-**No precondition either way.** The region is RETIRED, not released: it goes back
-on a free list only once [`passed`](@ref) says the device is finished with it,
-which [`reclaim!`](@ref) checks. So there is no "the GPU must be idle" rule to
-get wrong, and no reason to reach for a synchronize first.
-
-Using the resource afterwards is what it always was — the region may already
-belong to somebody else.
-
-One method for both because they are one thing, a region and a length, and a
-caller that owns a mix should not have to remember which is which.
+Retire a persistent resource's region now instead of at finalization. Optional,
+since the finalizer does the same. No precondition: [`reclaim!`](@ref) releases
+the region only once the device is done with it. The resource must not be used
+afterwards; its region may belong to someone else.
 """
 free!(r::Union{Buffer,GPURef}) = retireonce!(r)
 
 """
     devicecopy!(dev, dst::DeviceArray, src::DeviceArray, n)
 
-`n` elements from one region to another, device-side. Used by `resize!`, and the
-third and last thing a backend has to supply for persistent resources.
-
-Not `copy!`: `Mantle.copy!` already means "a copy as a graph pass", which is a
-different verb with the same spelling.
+Copy `n` elements between regions on the device, as `resize!` does.
+Backend-supplied. Not `copy!`, which is the graph copy pass.
 """
 function devicecopy! end

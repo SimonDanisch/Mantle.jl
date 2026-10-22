@@ -1,39 +1,13 @@
-# Mantle's Vulkan backend.
-#
-# The split it implements: **Lava is a Julia→SPIR-V compiler and nothing else.**
-# Memory, queues, state, pipelines and the graph are Mantle's, so a second
-# backend implements one interface instead of copying a runtime. Lava's half
-# names no Vulkan type at all, which
-# `Lava/test/test_compiler_runtime_split.jl` asserts from the source.
-#
-# The four things that cross the line: `DeviceCaps` is `KernelInterface`'s, the
-# emitter reads `Lava.TargetFeatures` (pushed from here by `bind_context!`)
-# rather than a context ref, `spirv_content_hash` is the compiler's, and the
-# kernel cache is split — the SPIR-V, kept with each `CodeInstance`, is the
-# compiler's (`compile_or_lookup`), the pipelines built from it are this one's.
-#
-# These files are included INTO `Mantle` rather than a submodule, because the
-# methods in them are methods on Mantle's own functions — `caps`, `upload!`,
-# `draw!`, `release!` — and a submodule would mean re-exporting every one. The
-# four names that exist on both sides all took distinct signatures and merged
-# into one function each, which is what they should have been.
+# Mantle's Vulkan backend. Lava is only the Julia→SPIR-V compiler and names no
+# Vulkan type (`Lava/test/test_compiler_runtime_split.jl`); the emitter reads
+# `Lava.TargetFeatures`, set by `bind_context!`, and SPIR-V lives in Lava while
+# pipelines live here. Included into `Mantle`, not a submodule, because these
+# files add methods to Mantle's own functions.
 
-# The compiler. Lava exports the user-facing half; everything below is reached by
-# name because it is internal to the compiler and this is its one consumer.
-#
-# The list is long and it is exact — every name was found by asking which
-# identifiers this code uses that only Lava defines, not by guessing. Forty-three
-# of them are the DEVICE INTRINSICS (`lava_local_invocation_id_x` and friends),
-# which a syntactic scan misses entirely because they are generated in an `@eval`
-# loop; those only surfaced when a kernel refused to compile.
-#
-# What is NOT here any more: the shader builtins a body writes. `vertex_index`,
-# the `frag_coord` family and the `rt_*` intrinsics are KernelInterface's names,
-# which this package reaches through `using KernelInterface` in
-# `Mantle.jl` — Lava OVERRIDES them for this target rather than defining names
-# of its own. `gfx_input`/`gfx_output`/`set_position!` and the two stage
-# wrappers stay, because they are the lowering the wrappers compile a stage's
-# NamedTuple into and nobody outside writes them.
+# Compiler internals this backend reaches by name, including device intrinsics
+# Lava generates in an `@eval` loop. Shader builtins (`vertex_index`,
+# `frag_coord`, `rt_*`) are KernelInterface's, through `using KernelInterface`
+# in `Mantle.jl`.
 using Lava
 using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             CoopMatrix, FragmentWrapper, GeometryConfig,
@@ -58,15 +32,13 @@ using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             lava_ray_query_get_primitive_index, lava_ray_query_get_t,
             lava_ray_query_get_type, lava_ray_query_init,
             lava_ray_query_proceed,
-            # Procedural geometry: answering an AABB candidate with a solve of
-            # one's own. See `raytracing/accel.jl`.
+            # Procedural geometry: commit an AABB candidate's own hit
+            # (`raytracing/hwtlas.jl`).
             lava_ray_query_generate_intersection,
             lava_ray_query_get_object_ray_origin,
             lava_ray_query_get_object_ray_direction,
-            # The four RT intrinsics KernelInterface does not declare — the set
-            # there is what CALLERS use, and these are called only by this
-            # backend's own raygen and closest-hit shaders
-            # (`raytracing/raycore_compat.jl`).
+            # Not in KernelInterface: only this backend's raygen and
+            # closest-hit shaders call them (`raytracing/raycore_compat.jl`).
             lava_rt_payload_load_f32_at, lava_rt_payload_store_f32_at,
             lava_rt_terminate_ray, lava_rt_trace_ray,
             lava_workgroup_barrier,
@@ -77,7 +49,7 @@ using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             wg_compute_type_alignment, wg_compute_type_size
 
 
-# Include order is Lava's, unchanged: it encodes real type dependencies.
+# Include order encodes type dependencies.
 include("runtime/vkerrors.jl")
 include("runtime/coretypes.jl")
 include("runtime/device.jl")
@@ -110,40 +82,24 @@ include("raytracing/pipeline.jl")
 include("raytracing/shaders.jl")
 include("raytracing/raycore_compat.jl")
 include("raytracing/hwtlas.jl")
-# `runtime/video_h265.jl` is not listed: `runtime/video.jl` includes it itself,
-# beside the `decodeprofile` hook it implements.
+# `runtime/video_h265.jl` is included by `runtime/video.jl`.
 
-# The Vulkan lowering — stages, access masks, image layouts — and the graph, plan
-# and pass machinery over it. These were `MantleVulkanExt` and `MantleLavaExt`;
-# both stopped being extensions when Vulkan and Lava became hard dependencies.
-# Last, because they are written against everything above.
+# The Vulkan lowering (stages, access masks, image layouts) and the graph, plan
+# and pass machinery; last because they use everything above.
 include("lowering.jl")
 include("graph.jl")
-# After `graph.jl`: the access analysis names `LavaDevice`, `adaptor` and the
-# iteration plan, all of which are declared there.
+# Both after `graph.jl`, which declares `LavaDevice` and `adaptor`.
 include("access.jl")
-# After `graph.jl`: the hand-recorded pass opens a one-shot on a `LavaDevice`,
-# which is declared there.
 include("graphics/record.jl")
 
-# ── No exports here ───────────────────────────────────────────────────────────
-#
-# These files are an EXTENSION of `Mantle`, and an extension cannot export into
-# its parent no matter what it writes, so there are no `export` lines here.
-#
-# That is not a loss of surface, it is where the surface belongs. Every name a
-# caller needs — `Texture2D`, `HWTLAS`, `begin_pass!`, `trace_rays!` — is declared
-# and exported by Mantle, and what is defined below are the Vulkan METHODS on
-# them. `test_no_stale_exports.jl` covers the parent; nothing needs to cover an
-# export list that cannot exist.
+# No `export`s: public names (`Texture2D`, `HWTLAS`, `begin_pass!`,
+# `trace_rays!`, ...) are declared and exported by Mantle; these files add the
+# Vulkan methods.
 
-# ── What this backend does once, at load ──────────────────────────────────────
-#
-# Declared by core in `graph/backend.jl`; the body is here because every name in
-# it is this backend's.
+# Load-time setup; `initbackend!` is declared in `graph/backend.jl`.
 function initbackend!(::VulkanAPI)
-    # Not a candidate for the default on a Mac, where Metal is the GPU and a
-    # Vulkan device is a CPU driver asked for by name.
+    # Never the default on a Mac: Metal is the GPU there, Vulkan a CPU driver
+    # chosen by name.
     @static Sys.isapple() || register_backend!(; name = :vulkan, priority = 100) do
         vulkan_available() ? LavaBackend() : nothing
     end

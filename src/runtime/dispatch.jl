@@ -68,15 +68,13 @@ graphof(h) = h.graph
 Register x with the graph. Transient specializations also extend its live interval."""
 touch!(g, x) = (resourceid(g, x); x)
 
-# Graphs declare work before placement and scheduling.
-
 # Declared copies/fills use these kernels; eager array operations choose native transfers.
 
 """
     d2dcopy_kernel!(dst, src, doff, soff, n)
 
 `n` elements from `src` at `soff` into `dst` at `doff`, as a dispatch. Offsets
-are ZERO-based, so a caller passes `first - 1`.
+are zero-based, so a caller passes `first - 1`.
 """
 function d2dcopy_kernel!(dst, src, doff::Int64, soff::Int64, n::Int64)
     i = KI.get_global_id().x
@@ -86,7 +84,7 @@ function d2dcopy_kernel!(dst, src, doff::Int64, soff::Int64, n::Int64)
     return nothing
 end
 
-"""    fill_kernel!(a, v)
+"""fill_kernel!(a, v)
 
 `v` into every element of `a`, as a dispatch."""
 function fill_kernel!(a, v)

@@ -1,59 +1,47 @@
-# Rasterization commands.
-#
-# These were `vk_begin_pass!`, `vk_draw_in_pass!`, `vk_set_viewport!` and the
-# rest: Mantle verbs with a driver's name bolted on the front. Beginning a
-# render pass and issuing a draw are not things Vulkan invented, and a caller
-# writing `vk_draw_in_pass!` on a Mac would be naming the wrong API for the
-# hardware it is running on.
-#
-# Declared here, implemented per backend, and unprefixed: one verb, not a
-# `vk_`/`mtl_` pair a call site has to choose between.
+# Rasterization commands: declared here without a `vk_`/`mtl_` prefix,
+# implemented by a backend.
 
 """
-    begin_pass!(target; clear = nothing)
+    begin_pass!(emitter, color_views, color_images, extent; clear_color, depth_view, ...)
 
-Begin a render pass against `target`, a [`RenderTarget`](@ref).
-
-Must be matched by [`end_pass!`](@ref). Draws issued between the two go to this
-target; draws issued outside a pass are an error, not a no-op, because a driver
-that accepts them produces nothing and says nothing.
+Begin a render pass on `emitter`; must be matched by [`end_pass!`](@ref). A draw
+outside a pass is an error, since a driver that accepts one draws nothing and
+reports nothing.
 """
 function begin_pass! end
 
 """
-    end_pass!(target)
+    end_pass!(emitter)
 
 End the render pass begun by [`begin_pass!`](@ref).
 """
 function end_pass! end
 
 """
-    draw_in_pass!(pipeline, vertices; instances = 1)
+    draw_in_pass!(emitter, pipeline, count; instances = 1)
 
 Issue a non-indexed draw inside an open pass.
 """
 function draw_in_pass! end
 
 """
-    draw_indexed_in_pass!(pipeline, indices; instances = 1)
+    draw_indexed_in_pass!(emitter, pipeline, count; indices_buffer, instances = 1)
 
 Issue an indexed draw inside an open pass.
 """
 function draw_indexed_in_pass! end
 
 """
-    draw_indirect_in_pass!(pipeline, buffer)
+    draw_indirect_in_pass!(emitter, pipeline, commands; first = 1, count = 1)
 
-Issue a draw whose parameters the device reads from `buffer`, as
-[`DrawIndirectCommand`](@ref) records.
-
-The count comes from the device too, which is the reason to use this at all: a
-culling pass can decide how much to draw without a round trip to the host.
+Issue draws whose parameters the device reads from `commands`, as
+[`DrawIndirectCommand`](@ref) records, so a culling pass can set the vertex
+counts without a host round trip.
 """
 function draw_indirect_in_pass! end
 
 """
-    set_viewport!(target, x, y, width, height)
+    set_viewport!(emitter, x, y, width, height)
 
 Set the viewport rectangle for subsequent draws.
 """
@@ -62,27 +50,20 @@ function set_viewport! end
 """
     present_frame!(device, window)
 
-Show what was drawn, once the work behind it completes.
-
-**The device, never a channel.** Which channel a frame submits on, and when, is
-Mantle's to decide; a backend answers this from its device and finds its own.
-
-Ordered behind the frame rather than issued immediately: presenting an image the
-GPU has not finished writing shows a torn frame, and nothing reports it.
+Show what was drawn, ordered behind the frame's work: presenting an image the
+GPU has not finished writing shows a torn frame and reports nothing. Takes the
+device, not a channel; the backend picks the channel.
 """
 function present_frame! end
 
 """
     acquire_next_image!(window)
 
-Take the image the next frame renders into.
-
-After [`beginframe!`](@ref) and before `refit!`, both from `beforeframe!`: on
-both backends this can BLOCK — it is where the frame rate comes from — and it is
-the last place a resize is noticed, so the attachments that follow the surface
-are refit after it. Acquiring later, with the frame already refit, rebuilt a
-swapchain under a depth target sized for the old one: a lost device two frames
-later, on NVIDIA, one resize in three.
+Take the image the next frame renders into. Called by `beforeframe!` after
+[`beginframe!`](@ref) and before `refit!`: it can block (it paces the frame
+rate) and is the last place a resize is noticed. Acquiring after the refit
+rebuilds the swapchain under a depth target sized for the old one, which loses
+the device on NVIDIA.
 """
 function acquire_next_image! end
 
@@ -90,14 +71,10 @@ function acquire_next_image! end
     checkacquirable(acquirer)
 
 Refuse a second image while `acquirer`, the task holding the window's image, has
-not presented it; `nothing` is a window between frames.
-
-A window lends ONE image at a time, on every backend. Recording is not atomic
-against the scheduler: compiling a kernel mid-frame yields, so a second task
-rendering the same window can arrive between the acquire and the present. On
-Vulkan its acquire then waits on the fence the missing present would signal, a
-blocking foreign call that leaves the process unkillable; on Metal it took a
-second drawable and two frames drew at once. The error names which case it is.
+not presented it; `nothing` is a window between frames. Compiling a kernel
+mid-frame yields, so a second task can arrive between acquire and present. On
+Vulkan its acquire would block forever in a foreign call; on Metal two frames
+would draw at once.
 """
 checkacquirable(::Nothing) = nothing
 function checkacquirable(acquirer::Task)
@@ -112,35 +89,28 @@ end
 """
     transition_image!(image, from, to)
 
-Move `image` between usage states.
-
-Explicit because the graph derives these automatically for anything it knows
-about; this is the escape hatch for an image it does not, such as one shared
-with another API through an [`ExternalImage`](@ref).
+Move `image` between usage states. The graph derives transitions for images it
+knows; this is for one it does not, such as an [`ExternalImage`](@ref) shared
+with another API.
 """
 function transition_image! end
 
 """
     readback_framebuffer(fb) -> Array
 
-Read a [`Framebuffer`](@ref)'s colour attachment back to the host.
-
-Synchronises: there is no way to read pixels the device has not finished
-writing, so unlike the rest of the frame loop this one waits.
+Read a [`Framebuffer`](@ref)'s colour attachment back to the host. Waits for the
+device to finish writing it.
 """
 function readback_framebuffer end
 
 """
     readback_window(window) -> Array
 
-Read an image of `window` back to the host, BETWEEN frames: it acquires one,
-copies it and gives it back. Which image the platform hands out is its own
-choice, so it holds an earlier frame — after a few frames of a still scene,
-what is on the window. An image no frame has drawn since a resize holds no
-frame at all; the Vulkan backend hands such an image back and acquires again.
-Inside a frame the image is the frame's, and the copy
-would have to ride in a submission the frame owns; [`checkreadable`](@ref)
-refuses that.
+Read an image of `window` back to the host between frames: acquire one, copy it,
+give it back. The platform picks the image, so it holds an earlier frame; the
+Vulkan backend hands back an image not drawn since a resize and acquires again.
+Inside a frame [`checkreadable`](@ref) refuses, since the copy would have to go
+in the frame's own submission.
 """
 function readback_window end
 
@@ -158,21 +128,11 @@ checkreadable(::Task) =
 """
     readback_target(plan, target) -> Matrix
 
-Read a render target `plan` placed back to the host after a run, as a `Matrix{T}`
-of its element type.
-
-The counterpart to [`readback_framebuffer`](@ref) for a
-[`Transient.Image`](@ref): a framebuffer is a resource the CALLER made and can
-keep in host-visible memory, while a transient lives wherever the placer put it
-— on a backend that is device-only memory, so this goes through a copy.
-
-The plan is an argument because it is what knows what the target was last doing.
-Between runs a Vulkan image rests in the layout of its last usage, and the copy
-has to move it out of that layout and back into it; nothing on the image records
-which one it is.
-
-Synchronises, for the same reason the other two do. Inside a frame, a `copy!`
-pass into a [`Transient.Buffer`](@ref) is the way to read a target.
+Read a render target `plan` placed back to the host after a run, as a `Matrix`
+of its element type, through a copy since a transient may live in device-only
+memory. Takes the plan because between runs the image rests in the layout of its
+last usage, which only the plan records. Synchronises; inside a frame, use a
+`copy!` pass into a [`Transient.Buffer`](@ref).
 """
 function readback_target(pl::Plan, t)
     rest = restingusage(pl, t)
@@ -193,10 +153,8 @@ readback_target(dev::Device, t, ::Type) = throw(ArgumentError(
 """
     restingusage(plan, r) -> Union{Type,Nothing}
 
-What `r` is left doing after a run of `plan`: the destination of the last
-transition the plan makes on it, in scheduled order. An image changes layout only
-through a transition, so this is the layout it rests in between runs. `nothing`
-when the plan never touches `r`.
+The destination of the last transition `plan` makes on `r`, in scheduled order:
+the layout `r` rests in between runs. `nothing` when the plan never touches `r`.
 """
 function restingusage(pl::Plan, r)
     id = get(pl.graph.ids.ids, r, nothing)
@@ -211,36 +169,13 @@ end
 """
     supports_graphics(backend) -> Bool
 
-Whether `backend` can rasterize: render passes, graphics pipelines, and the
-vertex/fragment stages the verbs above record into.
+Whether `backend` can rasterize: render passes, graphics pipelines, vertex and
+fragment stages. `false` by default so a backend opts in. Callers that can
+degrade ask; RayMakie takes its direct-readback path when it is `false`.
 
-`false` by default, so a backend opts in rather than inheriting a claim it
-cannot honour. Both GPU backends now say `true` — Metal.jl compiles graphics
-stages (see `metal/graphics.jl`), which it did not when this default was
-written.
-
-Callers that can degrade should ask. RayMakie composites its overlays through a
-graphics pipeline and has a direct-readback path for scenes with none, so it
-asks here and takes the readback path rather than failing on a Mac.
-
-## Ask it of a device or of a backend; core routes
-
-The `::Device` forwarder below is not a convenience. The default here is
-UNTYPED, so it matches anything a caller holds — and a handle no backend wrote a
-method for therefore gets a wrong ANSWER instead of a `MethodError`, which is
-the inverse of this package's rule about missing capabilities.
-
-That is not hypothetical: methods existed for `LavaBackend`, `VkContext`,
-`MetalBackend` and `MetalDevice`, and none for `LavaDevice` — so
-`supports_graphics(Device(VulkanAPI()))`, the portable spelling, answered
-`false` on a device that rasterises, and every caller that can degrade took the
-degrade path. `waitidle` had the same hole in the other direction and is
-documented in `vulkan/graph.jl`.
-
-One forwarder in core closes it for every backend at once and for every future
-one: a backend answers for its backend object, and the device question routes
-there. A backend that wants to answer differently for its device still can —
-its own method is more specific than this.
+The untyped default would answer `false` for a device nobody wrote a method for,
+so the `::Device` method routes to the device's backend. A backend may still
+define a more specific method for its device.
 """
 supports_graphics(backend) = false
 supports_graphics(dev::Device) = supports_graphics(backend(dev))
@@ -249,123 +184,66 @@ supports_graphics(dev::Device) = supports_graphics(backend(dev))
     supports_geometry_stage(backend) -> Bool
     supports_tessellation(backend) -> Bool
 
-Whether this backend has the stage at all.
-
-`false` by default, so a backend opts in — and both defaults are the honest
-answer for Metal, which has no geometry stage and no tessellation.
-
-They exist because `GraphicsPipeline` HAS a `geometry` field and a
-`tess_control`/`tess_eval` pair, so a caller can build one that a device cannot
-run — and the only way to find out was to compile it and read the error. A
-capability a caller cannot ask about is one they find out about from a shader
-compile, which is the wrong place and the wrong time.
-
-`supports_geometry_stage` answering `false` does not mean a geometry pipeline
-cannot be drawn: a backend with a mesh pipeline runs it through
-[`lower_geometry_to_mesh`](@ref), which is what Metal's `compile_draw` does. So
-this asks which STAGE a device has, and [`supports_mesh_pipeline`](@ref) is the
-question a caller holding a geometry body should ask instead.
+Whether this backend has the stage, so a caller learns it before a shader
+compile fails. `false` by default (Metal has neither). Without the stage a
+geometry pipeline can still be drawn through [`lower_geometry_to_mesh`](@ref),
+as Metal's `compile_draw` does; [`supports_mesh_pipeline`](@ref) asks that.
 """
 supports_geometry_stage(backend) = false
 @doc (@doc supports_geometry_stage) supports_tessellation(backend) = false
 
-# The `::Device` forwarders, for the reason spelled out under
-# `supports_graphics`: an untyped default answers a handle nobody wrote a method
-# for, so the portable spelling has to reach the backend's answer rather than
-# fall through to `false`.
+# Route a device to its backend's answer; see `supports_graphics`.
 supports_geometry_stage(dev::Device) = supports_geometry_stage(backend(dev))
 supports_tessellation(dev::Device) = supports_tessellation(backend(dev))
 
 """
     supports_mesh_pipeline(backend) -> Bool
 
-Whether this backend can run a [`MeshPipeline`](@ref).
-
-The pair to compare against [`supports_geometry_stage`](@ref), and the reason
-that one answering `false` is not the end of the sentence. Metal has no geometry
-stage, but Apple's replacement for it is the mesh pipeline, and Khronos arrived
-at the same two stages under different names in `VK_EXT_mesh_shader` — so this
-is the capability a caller with a geometry body actually wants to ask about. A
-geometry stage is expressible on a mesh pipeline; the reverse is not, and
-[`lower_geometry_to_mesh`](@ref) is that expression.
-
-`false` by default, so a backend opts in.
+Whether this backend can run a [`MeshPipeline`](@ref) (Metal mesh pipelines,
+`VK_EXT_mesh_shader`). A geometry stage is expressible on a mesh pipeline through
+[`lower_geometry_to_mesh`](@ref), so this is the question for a caller holding a
+geometry body. `false` by default.
 """
 supports_mesh_pipeline(backend) = false
 supports_mesh_pipeline(dev::Device) = supports_mesh_pipeline(backend(dev))
 
 """
-    use_bindings!(bq, pipeline, bindings)
+    use_bindings!(handle, compiled, bindings)
 
-Make `bindings` — the resource set built by [`bind_textures`](@ref) — the one
-the next draw on `bq` reads from.
-
-Separate from `bind_textures` because that one BUILDS a set and this one
-SELECTS it: a set is built once when the textures change and selected once per
-draw. Keeping the two apart is what lets a renderer rebuild an atlas without
-re-recording every draw that samples it.
+Select `bindings`, a set built by [`bind_textures`](@ref), for the next draw on
+`handle`. Separate from building so a set is built once when its textures change
+and selected per draw; an atlas rebuild does not re-record the draws sampling it.
 """
 function use_bindings! end
 
-# ── executing a render pass on a KernelAbstractions backend ──────────────────
-#
-# The graph already carries everything a render pass is: `Pass.targets` and
-# `Pass.loads` are the colour attachments and what to do with them,
-# `Pass.depth` / `Pass.depth_load` the depth one, and `Pass.draws` the draws in
-# order. What was missing is a way to EXECUTE that on a backend which records
-# per draw rather than into a batch queue.
-#
-# So these four verbs, and nothing more. Mantle decides which pass runs, in what
-# order, with which attachments and which draws; a backend opens a pass, records
-# what it is handed, and closes it. Anything shaped like scheduling belongs on
-# this side of the line, which is why `begin_render_pass!` takes the attachments
-# already resolved rather than the `Pass`.
-#
-# The Vulkan backend does NOT go through these: it records whole frames onto its
-# own `SubmitChannel` and has its own path in `src/vulkan/graph.jl`. These exist
-# for backends that record a pass per draw rather than into such a channel.
+# Per-pass verbs for a backend that records pass by pass. Mantle decides which
+# pass runs, in what order, with which attachments and draws; the backend opens
+# a pass, records what it is handed and closes it, so `begin_render_pass!` takes
+# resolved attachments rather than the `Pass`.
 
 """
     compile_draw(device, pipeline, color_formats, depth_format, vert_args, frag_args;
                  bindings = nothing)
 
-Compile a [`GraphicsPipeline`](@ref) for the attachments it will be drawn into.
+Compile a [`GraphicsPipeline`](@ref) for the attachments it draws into. Called
+once per draw at compile time, not per frame; a backend is expected to cache.
 
-Called once per draw at COMPILE time, not per frame: the formats and the
-arguments are fixed by then, and they are the whole of what a compiled pipeline
-is specialised on. A backend is expected to cache.
-
-`color_formats` are ELEMENT TYPES, the same vocabulary a caller names a
-`Transient.Image` in; the backend lowers them the way it lowers every other
-format. `vert_args`/`frag_args` are the RESOLVED arguments — the values, not
-their types — because what a stage's device signature is differs per backend:
-one derives it by adapting each value the way a kernel launch would, and only
-the value can answer that.
-
-`bindings` is the texture table the draws will sample from — what
-[`bind_textures`](@ref) answered — or `nothing`. It is here rather than only at
-[`bindings!`](@ref) because on one backend a pipeline that samples is COMPILED
-differently: Vulkan builds the pipeline layout around the descriptor set layout,
-and a set bound against a pipeline that was not built for it is invalid. Metal
-binds a texture to an argument slot and ignores this.
-
-What it answers holds the compiled pipeline in a `pipeline` field, which is what
-[`npipelines`](@ref) counts: the rest of a compiled draw may be per draw (Metal
-keeps each draw's stage arguments beside it), and counting the whole thing counted
-draws.
+`color_formats` are element types, as a `Transient.Image` is named.
+`vert_args`/`frag_args` are the resolved values, not their types, because a
+backend derives a stage's device signature by adapting each value as a launch
+would. `bindings` is the texture table from [`bind_textures`](@ref) or `nothing`;
+Vulkan builds the pipeline layout around its descriptor set layout, Metal ignores
+it. The result holds the compiled pipeline in a `pipeline` field, which
+[`npipelines`](@ref) counts.
 """
 function compile_draw end
 
 """
     checkdepthtarget(depth, hasdepth::Bool)
 
-Refuse a depth test against a render target that has no depth attachment.
-
-Whether a pipeline declares a depth attachment is a property of the TARGET, not of
-the depth mode, and a test with nothing to test against is not a draw with the test
-off: refused by name rather than drawn untested. Every backend's `compile_draw` asks
-this before it builds a pipeline, so the refusal is the same on all of them; Metal
-skipped the depth state instead and drew.
+Refuse a depth test against a render target without a depth attachment instead
+of drawing untested. Every backend's `compile_draw` calls it, so the refusal is
+the same everywhere.
 """
 function checkdepthtarget(depth, hasdepth::Bool)
     depth isa DepthOff || hasdepth || throw(ArgumentError(
@@ -377,108 +255,64 @@ end
 """
     begin_render_pass!(device, targets, loads, depth, depth_load) -> handle
 
-Open a render pass over the given attachments and hand back whatever the backend
-needs to record into.
-
-`targets` and `loads` are parallel, one [`LoadOp`](@ref) per colour attachment;
-`depth` is `nothing` when the pass has none. The handle is opaque to Mantle and
-is passed straight back to `record_draw!` and `end_render_pass!`.
+Open a render pass over the given attachments. `targets` and `loads` are
+parallel, one [`LoadOp`](@ref) per colour attachment; `depth` is `nothing` when
+the pass has none. The handle is opaque to Mantle and goes back to
+`record_draw!` and `end_render_pass!`.
 """
 function begin_render_pass! end
 
 """
     record_draw!(handle, compiled, args, count; instances = 1, indices = nothing)
 
-Record one draw into an open pass.
-
-`count` is what `drawover` resolved: a number, or a `Commands` naming a buffer of
-`DrawIndirectCommand` the GPU wrote — in which case the backend must issue an
-INDIRECT draw, because the whole point of that form is that the host never
-learns the count.
+Record one draw into an open pass. `count` is a number, or a `Commands` naming a
+buffer of `DrawIndirectCommand` the GPU wrote, for which the backend must issue
+an indirect draw because the host never learns the count.
 """
-# `instances` and `indices` are keywords with defaults, so the graph — which never
-# uses either — calls this exactly as it did. They are here because a
-# hand-recorded pass does: RayMakie's overlay draws instanced sprites and indexed
-# line strips, and those were `draw_in_pass!`/`draw_indexed_in_pass!`, a second
-# verb family only one backend implemented. One primitive with two options beats
-# two primitives, and beats a family.
 function record_draw! end
 
 """
     argidentity(x)
 
-What a recorded draw BAKED about `x`, or `nothing` if it bakes nothing.
-
-`record_draw!` packs a draw's arguments and bakes the address of the packed
-block into a push constant, so a device array that has been REALLOCATED — which
-is what `resize!` does past its capacity — is invisible to a plan that was
-recorded before. A caller that caches plans needs one value per argument that
-changes exactly then, and this is it.
-
-`nothing` for everything that is not a device array, deliberately: a uniform
-rebinds through the draw's cell, and folding its VALUE in here would rebuild a
-plan for every camera move — which is the cost the cell exists to avoid.
-
-!!! note
-    Backends implement it for their array type; the fallback covers the rest.
+What a recorded draw baked about `x`, or `nothing`. `record_draw!` bakes the
+address of the packed argument block, so a device array that `resize!`
+reallocated is invisible to an older plan; a caller caching plans compares this
+value, which changes exactly then. Everything but a device array answers
+`nothing`: a uniform rebinds through the draw's cell, and keying on its value
+would rebuild a plan per camera move. Backends implement it for their array type.
 """
 argidentity(@nospecialize(x)) = nothing
 
-# ── The frame, for a graph that reaches a window ─────────────────────────────
-#
-# Three verbs, called by `run!` around the passes for every surface the graph
-# has. The SEQUENCE is Mantle's — poll, acquire, record, present, in that order
-# and no other — and what each step means is the backend's: a swapchain image
-# and two semaphores on one, a `CAMetalDrawable` on the other.
-#
-# The Vulkan backend does not come through here either; it records whole frames
-# itself. These exist so a backend without a batch queue can still drive a
-# window, which until now it could not: the shared `run!` walked passes and
-# nothing else, so a `Surface` in the graph was an attachment nobody acquired.
-
+# Frame verbs, called by `run!` around the passes for every surface the graph
+# has, in the order poll, acquire, record, present. What each step means is the
+# backend's: a swapchain image and two semaphores, or a `CAMetalDrawable`.
 
 """
     beginframe!(window)
 
-Bring `window` up to date before anything is recorded: pump the platform's
-event queue, and pick up a resize.
-
-Once per frame and HERE rather than inside `isopen`, because a predicate that
-also pumps events is a surprise, and a frame loop that has to remember to poll
-is one that stops responding the day someone forgets.
+Bring `window` up to date before anything is recorded: pump the platform's event
+queue and pick up a resize. Here rather than inside `isopen`, so a predicate does
+not pump events and no frame loop has to remember to poll.
 """
 function beginframe! end
 
-# `acquire_next_image!` and `present_frame!` are the other two, and they are
-# NOT declared here — they are older than this block, up beside `blit!`. This
-# file briefly declared an `acquire!`/`present!` pair beside them, which was two
-# portable APIs for one operation, and `acquire!` is worse than redundant: it is
-# the POOL's verb (`acquire!(pool, dev, kind, transients, bytes)`), so a window
-# and an allocator shared a name in one exported namespace.
+# `acquire_next_image!` and `present_frame!` above are the other two. Not
+# `acquire!`: that is the pool's verb.
 
 """
-    copy_target!(device, dst, src)
+    copy_target!(device, dst, src; region = nothing)
 
-Copy a render target's pixels into a buffer, on the device.
-
-The body of a `copy!` pass. `src` is an attachment the graph placed and `dst` a
-[`Transient.Buffer`](@ref) of its element type, sized `width * height` — the
-graph checked both when the pass was declared, so this only has to move bytes.
-
-It exists as a verb because a render target is not addressable memory on either
-backend: Vulkan needs `vkCmdCopyImageToBuffer` and Metal a blit encoder, and a
-deferred renderer reads its whole g-buffer this way once per frame. No host
-round-trip is involved and none is allowed — the destination is device memory a
-compute pass reads next.
+Copy a render target's pixels into a buffer on the device, the body of a `copy!`
+pass. `src` is an attachment the graph placed, `dst` a
+[`Transient.Buffer`](@ref) of its element type sized `width * height`; the graph
+checked both when the pass was declared. `region` limits the copy to the pass's
+viewport. A verb because a render target is not addressable memory on any
+backend; no host round trip is allowed.
 """
 function copy_target! end
 
-# The fallback every other hook in this file's neighbourhood has, and the reason
-# is not politeness: `test_core_names_no_backend.jl` reads a bare
-# `function f end` as a name only a backend defines, because a declaration
-# carries no method. A core method — even one that only explains itself — is what
-# says "this is core's vocabulary, answered by a backend" rather than "core
-# reached into a backend".
+# A core method rather than a bare declaration: `test_core_names_no_backend.jl`
+# reads a bare `function f end` as a name only a backend defines.
 copy_target!(dev::Device, dst, src) = throw(ArgumentError(
     "copy_target!: $(typeof(dev)) does not implement the `copy!` pass. A render " *
     "target is not addressable memory, so each backend moves those bytes its own " *

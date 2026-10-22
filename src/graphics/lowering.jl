@@ -1,72 +1,18 @@
-# Turning a geometry stage into a mesh pipeline.
-#
-# ── Why it is needed ─────────────────────────────────────────────────────────
-#
-# A `GraphicsPipeline` with a `GeometryShader` runs natively on Vulkan and cannot
-# run at all on Metal: Apple removed the geometry stage and replaced it with the
-# mesh pipeline (object + mesh stages). Everything a geometry shader does is
-# expressible on a mesh stage — one invocation reads a primitive's vertices and
-# emits new ones — so the translation is mechanical, and doing it once here means
-# a shader author never writes it twice.
-#
-# What is affected today, in tree: RayMakie's `scatter` and `lines` overlays, the
-# only two `GeometryShader` construction sites. Scatter is also the sprite path,
-# so text goes through it. Without this, a Metal figure has no axis grid, no
-# ticks, no labels, and no scatter or line plot.
-#
-# ── One mesh threadgroup per input primitive, one thread ─────────────────────
-#
-# That single thread evaluates the vertex body once per input vertex of its
-# primitive — `inputvertices(topology)` times, in a plain loop — gathers the
-# results into the `prim` NamedTuple the geometry body already reads
-# (`prim.world_pos[1]` and so on: one field per declared output, each an NTuple
-# over the primitive's vertices), builds a `MeshEmitter` over the output object,
-# and calls the geometry body unchanged.
-#
-# An earlier reading of this had one thread PER INPUT VERTEX, with the vertex
-# outputs meeting in threadgroup memory behind a barrier. That was forced by a
-# constraint that does not exist: it is the only arrangement in which
-# `vertex_index()` — a zero-argument builtin — can answer correctly for each
-# vertex, because the answer has to come from the thread's own identity. Pass the
-# index to the vertex body INSTEAD and one thread can evaluate it at as many
-# indices as it likes. Then there is no threadgroup memory, no barrier, and no
-# special handling for the overlapping primitives of a strip or adjacency
-# topology — `MeshEmitter` already turns strip emission into explicit indices.
-#
-# So the contract is `KernelInterface.VertexIndex`: a vertex body may declare a
-# leading `::VertexIndex` parameter, and one that does is passed the index rather
-# than calling `vertex_index()`. Opt-in per shader; a body that does not declare
-# it is untouched on either backend, and a body that declares BOTH spellings runs
-# natively where the geometry stage exists and lowers where it does not.
-#
-# ── Why one thread is also why nothing has to be padded ──────────────────────
-#
-# `MeshEmitter` reserves a fixed slot range per invocation because a mesh
-# threadgroup declares ONE output count for all of them, so an invocation that
-# emits fewer primitives than it reserved leaves slots inside the count — which
-# `finish!` fills with primitives that draw nothing. With one invocation per
-# threadgroup there is no such gap: what it wrote IS the threadgroup's count, so
-# the lowering declares exactly `nprimitives(e)` and never pads. A body that
-# culled everything declares zero, and the driver eliminates the threadgroup.
-#
-# The cost of one thread is that a threadgroup uses one lane of a SIMD group. It
-# is the right trade for the overlays this exists for — an axis's ticks and
-# labels are a handful of primitives against a fragment-bound sprite pass — and
-# widening it is not free: `threads > 1` needs `set_mesh_outputs!` called once
-# with the group's total, which is a barrier and a reduction, or `finish!`'s
-# padding and the wasted slots that come with it. Measure before paying either.
+# Lowers a geometry stage onto a mesh pipeline, for backends without one (Metal).
+# One mesh threadgroup of one thread per input primitive: the thread evaluates the
+# vertex body once per input vertex, passing the index as a leading
+# `KernelInterface.VertexIndex` since a zero-argument `vertex_index()` cannot
+# answer per call. The emitter's count is then the threadgroup's, so nothing is
+# padded; `threads > 1` would need a reduction before `set_mesh_outputs!`.
 
 """
     GeometryPipeline
 
-A [`GraphicsPipeline`](@ref) that HAS a geometry stage, as a type a backend can
-dispatch on — which is what lets one whose geometry stage does not exist route the
-whole draw through the lowering instead of branching on a field.
-
-The two leading bounds are not decoration. `GraphicsPipeline` declares
-`V<:VertexShader` and `F<:FragmentShader`, and spelling those positions `<:Any`
-builds a type that is not a subtype of `GraphicsPipeline` at all: the method is
-then simply never selected, silently, and the general one runs instead.
+A [`GraphicsPipeline`](@ref) with a geometry stage, as a type a backend without
+that stage dispatches on to route the draw through the lowering. The leading
+bounds must repeat `GraphicsPipeline`'s `<:VertexShader`/`<:FragmentShader`:
+`<:Any` there builds a type that is not a subtype, and the method silently never
+matches.
 """
 const GeometryPipeline =
     GraphicsPipeline{<:VertexShader, <:FragmentShader, <:GeometryShader}
@@ -74,43 +20,33 @@ const GeometryPipeline =
 """
     GeometryAsMesh{IT,OT,NP,FN,IX}(vertexbody, geometrybody)
 
-A mesh stage that runs a vertex body and a geometry body, in one invocation.
-
-`IT` is the DRAW's input topology and `OT` what the geometry body emits, `NP` the
-output primitive bound, `FN` the `Flat`-declared output names, and `IX` whether
-the draw is indexed — in which case the last argument is the index buffer and
-everything before it is what the two bodies take.
-
-Built by [`lower_geometry_to_mesh`](@ref), which is where the shape of the
-argument list is decided; nothing else should construct one.
+A mesh stage that runs a vertex body and a geometry body in one invocation. `IT`
+is the draw's input topology, `OT` what the geometry body emits, `NP` the output
+primitive bound, `FN` the `Flat` output names, and `IX` whether the draw is
+indexed, in which case the last argument is the index buffer. Only
+[`lower_geometry_to_mesh`](@ref) constructs one.
 """
 struct GeometryAsMesh{IT<:Topology, OT<:Topology, NP, FN, IX, VF, GF}
     vertex::VF
     geometry::GF
 end
 
-# The two bodies' types are inferred and the five that describe the lowering are
-# given, which the default constructor cannot do — it takes all seven or none.
+# Infers the two body types; the default constructor takes all seven or none.
 GeometryAsMesh{IT,OT,NP,FN,IX}(vertex::VF, geometry::GF) where {IT,OT,NP,FN,IX,VF,GF} =
     GeometryAsMesh{IT,OT,NP,FN,IX,VF,GF}(vertex, geometry)
 
-# A backend names the compiled stage after the function it compiled, and a
-# callable struct has no name of its own. The geometry body's is the one worth
-# seeing: it is what the author wrote, and `_as_mesh` says which of the two
-# lowerings produced the program in a shader dump or a compiler error.
+# Backends name a compiled stage after its function; this names the program in
+# shader dumps and compiler errors after the geometry body the author wrote.
 Base.nameof(m::GeometryAsMesh) = Symbol(nameof(m.geometry), :_as_mesh)
 
 """
     splatcall(f, lead::Tuple, args::Tuple)
 
 `f(lead..., args...)` with every element written out, and the call inlined.
-
-Inference resolves a splat of at most 32 elements, and a stage can take more
-arguments than that: RayMakie's mesh shader takes 51. Past the bound `args...` is
-a dynamic `_apply_iterate`, which no GPU compiler accepts, so the lowering
-carries the stage's arguments as ONE tuple and expands them here, at the body.
-Inlined because the geometry body is handed the mutable `MeshEmitter`; see
-`emitprimitive`.
+Inference resolves a splat of at most 32 elements and a stage can take more
+(RayMakie's mesh shader takes 51); past that `args...` is a dynamic
+`_apply_iterate` no GPU compiler accepts. Inlined because the geometry body
+receives the mutable `MeshEmitter`; see `emitprimitive`.
 """
 @generated function splatcall(f, lead::Tuple, args::Tuple)
     call = Expr(:call, :f, (:(lead[$i]) for i in 1:fieldcount(lead))...,
@@ -121,12 +57,9 @@ Inlined because the geometry body is handed the mutable `MeshEmitter`; see
     end
 end
 
-# Which input primitive this threadgroup is for is the ONLY thing the mesh stage
-# reads from a builtin, so it is the only thing that stops the whole lowering from
-# running on the host. `runprimitive` takes it as an argument for exactly that
-# reason: over `KernelInterface.HostMeshOutput` the emitted vertices, indices and
-# per-primitive values can be read back and diffed against what the GPU produced,
-# which is what makes this worth more than a per-backend rewrite.
+# The primitive index is the only builtin the mesh stage reads. `runprimitive`
+# takes it as an argument instead, so the lowering also runs on the host over
+# `KernelInterface.HostMeshOutput` for comparison against the GPU's output.
 function (m::GeometryAsMesh)(out, args::Vararg{Any,N}) where {N}
     return primitivewith(m, out, mesh_group_index(), args)
 end
@@ -135,9 +68,8 @@ end
     runprimitive(m::GeometryAsMesh, out, primitive::Integer, args...)
 
 Run one input primitive of a lowered geometry stage into the output object `out`.
-
-`primitive` counts from one. On a mesh stage it is `mesh_group_index()`; on the
-host it is whichever primitive is being checked.
+`primitive` counts from one: `mesh_group_index()` on a mesh stage, the checked
+primitive on the host.
 """
 runprimitive(m::GeometryAsMesh, out, primitive::Integer, args::Vararg{Any,N}) where {N} =
     primitivewith(m, out, primitive, args)
@@ -145,24 +77,17 @@ runprimitive(m::GeometryAsMesh, out, primitive::Integer, args::Vararg{Any,N}) wh
 # `args` as one tuple from here to the bodies; see `splatcall`.
 function primitivewith(m::GeometryAsMesh{IT,OT,NP,FN,false}, out, primitive::Integer,
                        args::Tuple) where {IT,OT,NP,FN}
-    # A NON-INDEXED draw: the vertex index IS the position in the stream.
+    # Non-indexed: the vertex index is the position in the stream.
     base = firstinputvertex(IT(), Int32(primitive))
     vs = ntuple(k -> splatcall(m.vertex, (VertexIndex(base + Int32(k) - Int32(1)),), args),
                 Val(inputvertices(IT())))
     return emitprimitive(m, out, vs, args)
 end
 
-# An INDEXED draw. `vertex_index()` on a real vertex stage is the value FETCHED
-# from the index buffer, not the position in the draw, so the lowered stage has
-# to do the fetch itself — which is why the index buffer becomes one of the mesh
-# stage's own arguments and why `lines` is not simply `scatter` again.
-#
-# The buffer holds what a driver's index buffer holds, counting vertices from
-# ZERO, and `VertexIndex` carries what `vertex_index()` would answer, counting
-# from one. The `+ 1` is that conversion and nothing else.
-#
-# `ntuple` rather than `Base.front` for everything before the index buffer:
-# `front` recurses by splatting, which is the bound `splatcall` exists for.
+# Indexed: `vertex_index()` on a vertex stage is the value fetched from the index
+# buffer, so the lowered stage fetches it from its last argument. The buffer
+# counts from zero, `VertexIndex` from one, hence the `+ 1`. `ntuple` rather than
+# `Base.front`, which recurses by splatting; see `splatcall`.
 function primitivewith(m::GeometryAsMesh{IT,OT,NP,FN,true}, out, primitive::Integer,
                        args::NTuple{N,Any}) where {IT,OT,NP,FN,N}
     indices = args[N]
@@ -178,26 +103,18 @@ end
 """
     emitprimitive(m::GeometryAsMesh, out, vs::Tuple, args::Tuple)
 
-Run the geometry body over the gathered vertices and declare what it wrote.
-
-Separate from the two `primitivewith` methods because it is everything they
-share: the only difference between an indexed draw and a direct one is where the
-vertex index comes from.
+Run the geometry body over the gathered vertices and declare what it wrote; the
+part both `primitivewith` methods share.
 """
 @inline function emitprimitive(m::GeometryAsMesh{IT,OT,NP,FN}, out, vs::Tuple,
                                args::Tuple) where {IT,OT,NP,FN}
     e = MeshEmitter{OT,FN}(out, 1, 1, NP)
-    # Inlined at the CALL, and it is load-bearing. `MeshEmitter` is mutable —
-    # `emit!` advances its cursors — so an emitter handed to a function that is
-    # not inlined ESCAPES, and an escaping mutable is a heap allocation, which no
-    # GPU has: the shader fails to compile with `gc_pool_alloc` in the trace and
-    # nothing pointing at the emitter. Inlined, it is a handful of registers.
-    # `splatcall` inlines both itself and the body.
+    # Must inline: `MeshEmitter` is mutable, so passing it to a call that is not
+    # inlined makes it escape into a heap allocation and the shader fails to
+    # compile with `gc_pool_alloc` in the trace. `splatcall` inlines the body.
     splatcall(m.geometry, (e, transposeprimitive(vs)), args)
-    # Once, and with the emitter's own counts: one invocation per threadgroup
-    # means its count is the threadgroup's, so there is nothing to pad and
-    # nothing to reduce over. Zero primitives is a real answer — the body culled
-    # the primitive — and the threadgroup is then eliminated whole.
+    # One invocation per threadgroup, so the emitter's counts are the
+    # threadgroup's. Zero primitives (the body culled) eliminates the threadgroup.
     set_mesh_outputs!(out, nvertices(e), nprimitives(e))
     return nothing
 end
@@ -206,12 +123,9 @@ end
     transposeprimitive(vs::Tuple) -> NamedTuple
 
 The primitive's vertex outputs, from one NamedTuple per vertex to one tuple per
-field.
-
-`prim.position[2]` is the second vertex's clip position — which is how a geometry
-body already reads its input, so this is the shape the lowering has to produce
-and not a choice. `@generated` because it is pure type arithmetic and sits in the
-one loop a mesh stage runs.
+field, the shape a geometry body reads: `prim.position[2]` is the second vertex's
+clip position. `@generated` because it is type arithmetic inside the mesh stage's
+loop.
 """
 @generated function transposeprimitive(vs::Tuple)
     n = fieldcount(vs)
@@ -237,21 +151,12 @@ end
 """
     lower_geometry_to_mesh(p::GraphicsPipeline; indexed = false) -> MeshPipeline
 
-Rewrite a pipeline's vertex + geometry stages as a mesh stage.
-
-`indexed` is whether the DRAW supplies an index buffer, which is a property of
-the draw and not of the pipeline: an indexed draw's lowered mesh stage reads the
-index buffer as its last argument, so the two are different shaders and a backend
-asks for the one its draw needs.
-
-The mesh stage's `outputs` are the geometry stage's verbatim, so the fragment
-stage is compiled against the same interface either way and
-[`fragmentinputs`](@ref) answers the same thing for both pipelines.
-
-A backend with no geometry stage runs a geometry pipeline by lowering it, which
-is why `supports_geometry_stage` is not a question a renderer has to branch on.
-The vertex body must accept a leading `KernelInterface.VertexIndex`; see the top
-of `src/graphics/lowering.jl` for why the index cannot come from a builtin here.
+Rewrite a pipeline's vertex + geometry stages as a mesh stage. `indexed` is
+whether the draw supplies an index buffer; the indexed stage reads it as its last
+argument, so the two are different shaders. The mesh stage's `outputs` are the
+geometry stage's, so the fragment stage and [`fragmentinputs`](@ref) match for
+both pipelines. The vertex body must accept a leading
+`KernelInterface.VertexIndex` (see the top of this file).
 """
 function lower_geometry_to_mesh(p::GraphicsPipeline; indexed::Bool = false)
     g = p.geometry
@@ -269,10 +174,8 @@ end
 
 function _lower(p::GraphicsPipeline, g::GeometryShader, indexed::Bool)
     cfg = stageconfig(g)
-    # The assembler's topology decides the WALK — how many vertices a primitive
-    # is and how far the next one starts along — and the geometry stage declares
-    # what it expects to see. Vulkan requires the two to agree; here a
-    # disagreement would silently gather the wrong vertices, so it is checked.
+    # The assembler's topology decides how vertices are walked, the geometry
+    # stage what it expects; a mismatch would silently gather the wrong vertices.
     inputvertices(p.topology) == inputvertices(cfg.input_topology) || throw(ArgumentError(
         "lower_geometry_to_mesh: the draw assembles $(p.topology), which is " *
         "$(inputvertices(p.topology)) vertices per primitive, and the geometry " *
@@ -285,9 +188,8 @@ function _lower(p::GraphicsPipeline, g::GeometryShader, indexed::Bool)
         "body is would have to reach it as a builtin, and there is no portable " *
         "name for that yet — nothing in tree amplifies, so the name comes with " *
         "the first thing that does rather than being guessed at now."))
-    # An upper bound, and it has to be one: a body that restarts a strip emits
-    # FEWER primitives from the same vertices than a contiguous run would, never
-    # more, and a list topology's count does not depend on restarts at all.
+    # An upper bound: a restarted strip emits fewer primitives from the same
+    # vertices, never more, and a list's count ignores restarts.
     np = primitivecount(cfg.output_topology, cfg.max_vertices)
     np > 0 || throw(ArgumentError(
         "lower_geometry_to_mesh: `max_vertices = $(cfg.max_vertices)` is not " *
@@ -307,10 +209,8 @@ end
     requirevertexindex(f, argtypes::Type)
 
 Throw unless the vertex body `f` accepts a leading `VertexIndex` for `argtypes`.
-
-Asked by a backend before it compiles a lowered mesh stage, because the
-alternative is a `MethodError` raised from inside a shader compilation — which
-names the body, but not what is missing from it or why a mesh stage needs it.
+A backend asks before compiling a lowered mesh stage, so the error says what is
+missing instead of a `MethodError` from inside shader compilation.
 """
 function requirevertexindex(@nospecialize(f), @nospecialize(argtypes::Type))
     tt = Tuple(argtypes.parameters)

@@ -1,69 +1,36 @@
-# Transient render targets on Metal.
-#
-# The graph places these: two targets whose lifetimes do not overlap are given
-# the same offset and share the bytes. Mantle owns that decision — what a
-# backend supplies is an image object that can be asked how much room it wants,
-# and a way to put one at a given offset.
-#
-# ── Why the image arena is a heap and the buffer arena is not ─────────────────
-#
-# Every other arena here suballocates a `MTLBuffer`, and a texture CAN be made
-# over buffer memory (`MTLTexture(buffer, desc, offset, bytesPerRow)`). It is a
-# LINEAR texture, and an Apple GPU cannot render into one — the tile memory path
-# needs the driver's own swizzled layout. So the image arena is a
-# `MTLHeapTypePlacement` heap instead, which is the same bargain in Metal's
-# vocabulary: one device allocation, explicit offsets, resources at overlapping
-# offsets alias.
-#
-# `Automatic` would have been the easier heap type and is the wrong one: it
-# chooses its own offsets, so the placer's answer would be advisory and two
-# targets it aliased deliberately might not alias at all.
+# Transient render targets. The graph places them; targets with disjoint
+# lifetimes share an offset. The arena is a `MTLHeapTypePlacement` heap, not a
+# buffer: a texture over buffer memory is linear and Apple GPUs cannot render
+# into it, and an `Automatic` heap picks its own offsets, so deliberate aliasing
+# would not happen.
 
-"""What a render target of this element type is for, in Metal's vocabulary."""
-# `|` on two `@cenum` values widens to the underlying `UInt64`, so the result is
-# cast back: the usage a transient carries has to keep Metal's type or nothing
-# downstream can dispatch on it.
+"""
+    imageusage(dev, T) -> MTLTextureUsage
+
+Render target and shader read, for colour and depth alike: Metal has no depth
+usage bit. Cast back because `|` on two `@cenum` values widens to `UInt64`.
+"""
 Mantle.imageusage(::MetalDevice, ::Type) =
     MTL.MTLTextureUsage(MTL.MTLTextureUsageRenderTarget | MTL.MTLTextureUsageShaderRead)
-# Depth wants the same two. Metal has no depth-specific usage bit — the
-# attachment kind is decided by the pixel format and by which slot of the render
-# pass descriptor the texture is bound to, not by a flag at creation.
 
-# Everything Metal needs to make this image again, and what the placer reads.
-# `size`/`alignment` are the two fields Mantle looks at; `desc` is Metal's own
-# and is what `materialize!` places into the heap.
+# The placer reads `size`/`alignment`; `materialize!` places `desc` into the heap.
 const MetalImageReq = NamedTuple{(:size, :alignment, :desc),
                                  Tuple{Int,Int,MTL.MTLTextureDescriptor}}
 
-# The texture does not exist until the heap does, so the image field starts
-# empty. A small union rather than `Any`: `target_view` is read while a pass is
-# recorded.
+# The image is `nothing` until placed. A small union rather than `Any` because
+# `target_view` is read while a pass is recorded.
 const MetalTransientImage{T} = Mantle.TransientImage{T,MTL.MTLPixelFormat,MTL.MTLTextureUsage,
                                                      Union{Nothing,MTL.MTLTexture},
                                                      MetalImageReq}
 
 """
-The descriptor for a render target of `T` at this size, plus what it will cost
-in a heap.
+    image_descriptor(T, width, height, srgb, usage) -> MTLTextureDescriptor
 
-`storageMode = Private` because a render target lives in GPU memory: it is
-written by the rasteriser and read by a later pass, and `Shared` would ask for
-CPU-coherent memory nothing reads. Readback goes through `getBytes!`, which is
-the only way off an Apple render target anyway.
-
-`hazardTrackingMode = Tracked`, and that is not a default left alone.
-`Untracked` would need Mantle's graph to have emitted the dependency, and it has
-not: the `Barriers` phase computes transitions, and the KernelAbstractions path
-this backend runs on does not consume them — no `MTLFence`, no `MTLEvent`,
-nothing. Untracked tells the driver it may overlap a pass with the one that
-feeds it, and it does: a readback issued right after a render pass on the SAME
-queue comes back with the texture untouched, clear colour and all, once per
-process and then never again.
-
-Committing to one queue orders when command buffers START; it does not stop the
-GPU overlapping them when it can see no dependency. Tracking is what makes the
-dependency visible. It can go back to untracked the day the backend turns
-Mantle's transitions into fences, and not before.
+A `Private` render-target descriptor (no host reads; readback blits). Hazard
+tracking must stay `Tracked`: this path turns no graph transition into an
+`MTLFence` or `MTLEvent`, and untracked lets the driver overlap a pass with the
+one feeding it, so a readback right after a render pass on the same queue
+returned the clear colour.
 """
 function image_descriptor(::Type{T}, width::Int, height::Int, srgb::Bool,
                           usage::MTL.MTLTextureUsage) where {T}
@@ -85,9 +52,7 @@ end
 
 function Mantle.remakeimage!(dev::MetalDevice, t::MetalTransientImage{T}) where {T}
     desc = image_descriptor(T, t.width, t.height, false, t.usage)
-    # `srgb` is not re-derived: `t.format` already carries the answer the first
-    # call reached, and asking again from a flag the transient does not keep
-    # would be a second place for it to be decided.
+    # `t.format` already encodes `srgb`, which the transient does not keep.
     desc.pixelFormat = t.format
     sa = MTL.heap_texture_size_and_align(dev.dev, desc)
     t.req = (; size = Int(sa.size), alignment = Int(sa.align), desc)
@@ -96,12 +61,11 @@ function Mantle.remakeimage!(dev::MetalDevice, t::MetalTransientImage{T}) where 
 end
 
 """
-Place the target in the arena's heap.
+    materialize!(dev, t, heap, offset) -> MTLTexture
 
-`view` and `image` are the same object on this backend. Vulkan distinguishes
-them because a `VkImage` is bound by barriers and a `VkImageView` by draws; a
-`MTLTexture` is both, and giving `target_view` an answer is what lets the shared
-render-pass code bind it without asking which backend it came from.
+Place the target in the arena's heap at `offset`. `view` and `image` are the
+same `MTLTexture`, so shared render-pass code can bind `target_view`. Throws
+`OutOfMemoryError` if the heap cannot hold it.
 """
 function Mantle.materialize!(::MetalDevice, t::MetalTransientImage, heap::MTL.MTLHeap, offset::Int)
     t.memory = heap                     # the texture outlives the call; the heap must too
@@ -113,16 +77,11 @@ function Mantle.materialize!(::MetalDevice, t::MetalTransientImage, heap::MTL.MT
 end
 
 """
-Copy a placed render target back to the host.
+    readback_target(dev, t, T) -> Matrix{T}
 
-Through a blit into a shared buffer, because the arena is `Private`: a
-`getBytes!` on a private texture is not something Metal will do, and making the
-arena shared to allow it would put every G-buffer in CPU-coherent memory to
-serve a path that runs in tests and screenshots.
-
-The row stride is tight — `width * sizeof(T)` — so the bytes come back as a
-`Matrix{T}` with no padding to strip. The usage the plan left the target in does
-not matter here: a texture has no layout to move it out of.
+Copy a placed render target to the host through a blit into a `Shared` buffer,
+since `getBytes!` refuses `Private` textures. Rows are tight (`width * sizeof(T)`).
+Waits for completion.
 """
 function Mantle.readback_target(dev::MetalDevice, t::MetalTransientImage{T}, ::Type) where {T}
     tex = t.image
@@ -130,8 +89,7 @@ function Mantle.readback_target(dev::MetalDevice, t::MetalTransientImage{T}, ::T
         error("this target has not been placed yet; readback needs a compiled plan")
     row = t.width * sizeof(T)
     buf = MTL.MTLBuffer(dev.dev, row * t.height; storage = Metal.SharedStorage)
-    # Everything the frame recorded has to have run before these bytes mean
-    # anything, and the blit itself is the last thing in that command buffer.
+    # Behind everything already submitted; the blit is the last command.
     cmd = framebuffer!(dev.dev)
     MTL.MTLBlitCommandEncoder(cmd) do enc
         MTL.append_copy!(enc, buf, 0, row, 0, tex,
@@ -144,16 +102,11 @@ function Mantle.readback_target(dev::MetalDevice, t::MetalTransientImage{T}, ::T
 end
 
 """
-Copy a render target into a device buffer, without touching the host.
+    copy_target!(dev, dst, src; region = nothing)
 
-The body of the graph's `copy!` pass, and the one route off a `Private` texture
-that stays on the GPU: a compute pass reads the destination in the same frame,
-so `readback_target`'s trip through shared memory would be a stall per
-attachment per frame.
-
-`bytesPerRow` is tight, so the buffer is the image in row-major order and the
-kernel that reads it indexes `y * width + x` — the same layout the Vulkan side's
-`vkCmdCopyImageToBuffer` produces with a zero `bufferRowLength`.
+The graph's `copy!` pass: blit a render target (or `region = (x, y, w, h)` of it)
+into a device buffer without a host round trip. Rows are tight, so a reader
+indexes `y * width + x`, as Vulkan's copy with a zero `bufferRowLength`.
 """
 function Mantle.copy_target!(d::MetalDevice, dst, src::MetalTransientImage{T}; region = nothing) where {T}
     tex = src.image
@@ -169,18 +122,16 @@ function Mantle.copy_target!(d::MetalDevice, dst, src::MetalTransientImage{T}; r
         MTL.append_copy!(enc, buf, byteoffset(dst), w * sizeof(T), 0, tex,
                          MTL.MTLOrigin(x, y, 0), MTL.MTLSize(w, h, 1))
     end
-    # Committed, like a render pass: one command buffer per copy, nothing left
-    # open. See `framebuffer!`.
+    # One command buffer per copy, committed here (see `framebuffer!`).
     commit!(cmd)
     return nothing
 end
 
 """
-Where a destination array starts inside its `MTLBuffer`.
+    byteoffset(x)
 
-A transient's storage is a VIEW over the arena, so the copy has to land at its
-offset rather than at zero — writing to zero would overwrite whichever tenant
-was placed first.
+Where `x` starts inside its `MTLBuffer`. A transient is a view over the arena;
+writing at zero would overwrite another region.
 """
 byteoffset(x::Metal.MtlArray) = pointer(x).offset
 byteoffset(::MTL.MTLBuffer) = 0

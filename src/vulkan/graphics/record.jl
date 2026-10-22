@@ -85,18 +85,15 @@ function begin_render_pass!(dev::LavaDevice, targets, loads, depth, depth_load)
                 VK.ImageView[t.view for t in targets],
                 VK.Image[t.image for t in targets],
                 VK.Extent2D(UInt32(first_t.width), UInt32(first_t.height));
-                # VECTORS, one entry per attachment: `perattachment` reads any
-                # other container as a single value repeated, so a tuple of one
-                # `nothing` arrives as the clear colour itself.
+                # Vectors: `perattachment` treats any other container as one value for all.
                 clear_color = [clearvalue(l) for l in loads],
                 load_op = [loadop(l) for l in loads],
                 depth_view = depth === nothing ? nothing : depth.view,
                 depth_image = depth === nothing ? nothing : depth.image,
                 depth_clear = depth === nothing ? nothing : depthclearvalue(depth_load),
                 depth_load_op = depth === nothing ? nothing : loadop(depth_load))
-    # The viewport covers the whole attachment until a caller says otherwise:
-    # viewport and scissor are dynamic state, and a pipeline drawn without them
-    # rasterises nothing without raising anything.
+    # Whole-attachment viewport by default: a draw without the dynamic viewport
+    # and scissor silently rasterises nothing.
     set_viewport!(e, 0, 0, first_t.width, first_t.height)
     return VulkanPassHandle(e, o)
 end
@@ -116,8 +113,7 @@ end
 setviewport!(h::VulkanPassHandle, x::Real, y::Real, w::Real, hgt::Real) =
     set_viewport!(h.e, x, y, w, hgt)
 
-# The set is bound against the PIPELINE's layout, so the draw's pipeline is what
-# `use_bindings!` needs — not the `VulkanDraw` that wraps it.
+# The set binds against the pipeline's layout, not the `VulkanDraw`.
 use_bindings!(h::VulkanPassHandle, d::VulkanDraw, bindings) =
     use_bindings!(h.e, d.pipeline, bindings)
 
@@ -133,8 +129,8 @@ function record_draw!(h::VulkanPassHandle, d::VulkanDraw, args, count::Integer;
     elseif indices === nothing
         draw_in_pass!(e, d.pipeline, count; push_bda = addr, instances)
     else
-        # The device READS the indices, so the submission has to outlive them —
-        # and the offset is the view's, because an index buffer may be a slice.
+        # Held because the device reads the indices; the offset is the view's,
+        # since an index buffer may be a slice.
         hold!(e, indices)
         mb = indices.buf[]::VkManagedBuffer
         draw_indexed_in_pass!(e, d.pipeline, count; push_bda = addr, instances,

@@ -1,6 +1,5 @@
-# Legacy channel ownership: retain referenced resources through completion, defer
-# explicit destruction, order cross-channel uses and recycle completed recordings.
-# Target token retirement replaces this with one release engine (docs/api.md §4.3).
+# Channel ownership: retain referenced resources through completion, defer explicit
+# destruction, order cross-channel uses and recycle completed recordings.
 
 """
     Stamp{T}
@@ -36,9 +35,7 @@ mutable struct SubmitChannel{Q,R,T,P}
     # timeline semaphore, an `MTLCommandQueue`. Core never looks inside it.
     channel::Q
     outstanding::Vector{Outstanding{T,P}}
-    # 2.3: recordings the device has finished with, ready to be recorded into
-    # again. Core's list, because when a recording may be reused is a question
-    # about a submission having passed and nothing else.
+    # Recordings whose submissions have passed, ready to be recorded into again.
     free::Vector{R}
     # One hold frame per open recording, innermost last. Nested one-shots must not
     # consume their outer recording's references.
@@ -48,8 +45,8 @@ mutable struct SubmitChannel{Q,R,T,P}
     # Any thread may enqueue pending destroys; only the owner stamps and reclaims
     # retiring entries against this channel's timeline.
     pending::Vector{Any}
-    # Finalizers can re-enter retire! at allocation safepoints inside this lock.
-    # Use a ReentrantLock; a SpinLock would deadlock on same-task re-entry.
+    # Finalizers can re-enter retire! at allocation safepoints inside this lock, so
+    # a SpinLock would deadlock on same-task re-entry.
     pendinglock::ReentrantLock
     retiring::Vector{Tuple{Any,T}}
     # Scratch for draining pending requests. Driver destructors and cross-channel
@@ -59,14 +56,11 @@ mutable struct SubmitChannel{Q,R,T,P}
     thread::Int
 end
 
-# What it submits through and how much is in flight, not every outstanding
-# submission and every recording it holds.
 Base.show(io::IO, ch::SubmitChannel) =
     print(io, "SubmitChannel(", ch.channel, ", ", length(ch.outstanding), " outstanding)")
 
-# Fully parameterised — a backend spells its channel type once, as an alias, and
-# calls it with the driver bundle. A partial application would bind the
-# parameters in the wrong order (`SubmitChannel{R,T,P}` sets Q, R and T).
+# Fully parameterised: a backend aliases its channel type once. A partial
+# application binds the wrong parameters (`SubmitChannel{R,T,P}` sets Q, R and T).
 SubmitChannel{Q,R,T,P}(channel::Q) where {Q,R,T,P} =
     SubmitChannel{Q,R,T,P}(channel, Outstanding{T,P}[], R[],
                            Vector{Any}[], Vector{Any}[],
@@ -104,8 +98,8 @@ outstanding(ch::SubmitChannel) = ch.outstanding
 """
     WrongThread(owner, caller)
 
-A recording or submission touched a channel outside its owning thread. Callers may catch
-this exception; all ownership checks use ownthread.
+Thrown by [`ownthread`](@ref) when a recording or submission touches a channel outside
+its owning thread.
 """
 struct WrongThread <: Exception
     owner::Int
@@ -125,8 +119,6 @@ Enforce the single-writer invariant; throw WrongThread before recording or submi
     Threads.threadid() == ch.thread || throw(WrongThread(ch.thread, Threads.threadid()))
     return nothing
 end
-
-# ── 2.2: what a submission holds ─────────────────────────────────────────────
 
 """
     hold!(ch, obj) -> obj
@@ -157,8 +149,6 @@ function holdleaves! end
 
 @inline holdleaves!(holder, a::AbstractArray) = (hold!(holder, a); nothing)
 
-# DeviceArray is not an AbstractArray, but remains a leaf: descending through its
-# region into driver ownership can encounter cycles.
 @inline holdleaves!(holder, a::DeviceArray) = (hold!(holder, a); nothing)
 
 @generated function holdleaves!(holder, x::Tuple)
@@ -168,9 +158,8 @@ end
     Expr(:block, Expr[:(holdleaves!(holder, x[$i])) for i in 1:fieldcount(x)]..., :(nothing))
 end
 
-# The generic walker, and the sole fallback — there is no `::Any` method for a
-# `@generated` to collide with during precompile. The short-circuits are decided
-# at codegen time, so the fast path is a literal `nothing`.
+# The sole fallback: no `::Any` method exists for this `@generated` to collide with
+# during precompile. Short-circuits resolve at codegen time.
 @generated function holdleaves!(holder, x::T) where {T}
     # An isbits type cannot transitively contain an array, which is mutable.
     isbitstype(T) && return :(nothing)
@@ -181,8 +170,7 @@ end
     Expr(:block, Expr[:(holdleaves!(holder, getfield(x, $i))) for i in 1:n]..., :(nothing))
 end
 
-# The two halves of `holders`, spelled once. A resource with no stamp is not
-# tracked and costs one dynamic call that returns `nothing`.
+# A resource without a stamp is untracked and costs one dynamic call.
 @inline function claim!(@nospecialize(obj))
     s = stampof(obj)
     s === nothing || @atomic s.holders += 1
@@ -224,29 +212,26 @@ function unhold!(ch::SubmitChannel, h::Vector{Any})
     return nothing
 end
 
-# No submission-owned frame uses nothing; allocating an empty vector per replay
-# would defeat the zero-allocation render path.
+# A submission without a frame passes `nothing`; an empty vector per replay would
+# allocate on the render path.
 unhold!(::SubmitChannel, ::Nothing) = nothing
 
 # Open a hold frame for a recording that is about to be built.
 pushholds!(ch::SubmitChannel) = (push!(ch.holds, emptyframe!(ch)); nothing)
 
-# Drop the innermost frame without submitting: the recording it belonged to
-# never reached the device, so nothing had to outlive it.
+# Drop the innermost frame of a recording that was never submitted.
 function dropholds!(ch::SubmitChannel)
     isempty(ch.holds) && return nothing
     unhold!(ch, pop!(ch.holds))
     return nothing
 end
 
-# ── 2.2: order between channels, and destroys that have to wait ──────────────
-
 """
     crosswaits!(ch, resources, waits)
 
-Append (channel,token) waits for resources last named by another unfinished channel.
-All named resources are stamped, including reads, so this legacy single-stamp model
-conservatively serializes read/read uses too; transferring the stamp cannot lose an ordering.
+Append (channel, token) waits for resources last named by another unfinished channel.
+Reads are stamped too, so read/read uses across channels also serialize; moving the
+stamp cannot lose an ordering.
 """
 function crosswaits!(ch::SubmitChannel, resources, waits)
     for r in resources
@@ -334,8 +319,7 @@ function reclaim!(ch::SubmitChannel)
         for obj in taken
             s = stampof(obj)
             if s !== nothing && (@atomic s.holders) > 0
-                # Named by a recording nobody has submitted yet. Nothing about
-                # it reads as a timeline, so it goes back and is asked again.
+                # Held by an unsubmitted recording, which has no token yet: retry later.
                 keep += 1
                 taken[keep] = obj
                 continue
@@ -385,8 +369,6 @@ function drain!(ch::SubmitChannel)
     reclaim!(ch)
     return nothing
 end
-
-# ── 2.3: recordings, reused ──────────────────────────────────────────────────
 
 """
     makerecording(ch) -> R
@@ -446,13 +428,10 @@ claims/references; nothing means this submission owns no hold frame.
 """
 struct Submission{R}
     recording::R
-    # `nothing` when the submission held nothing — see `unhold!`.
     holds::Union{Nothing,Vector{Any}}
 end
 
-# The payload half of the two facts. Nothing is destroyed here — dropping the
-# holds is what releases, and what becomes of the recording is
-# `finishrecording!`'s.
+# Destroys nothing: dropping the holds releases, `finishrecording!` decides the recording.
 function recycle!(ch::SubmitChannel, s::Submission)
     finishrecording!(ch, s.recording)
     unhold!(ch, s.holds)
@@ -479,8 +458,8 @@ function oneshot!(f, ch::SubmitChannel; tag = nothing)
     return handover!(ch, token, r; tag)
 end
 
-# Emission receives the plan/device/channel explicitly; do not use task-global
-# open-batch state to route dispatches.
+# Emission takes plan, device and channel explicitly; no task-global batch state
+# routes dispatches.
 
 """
     handover!(ch, token, recording; tag = nothing) -> token

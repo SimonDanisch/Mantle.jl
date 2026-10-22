@@ -1,61 +1,9 @@
-# Debug / validation: the PROOF step.
-#
-# There is exactly one way to switch validation on, and it is not in this file:
-#
-#     reset_device!(debug = DebugConfig(gpu_av = true, pool_disabled = true))
-#
-# See `DebugConfig` and `reset_device!`. There are no preset functions and no
-# `LAVA_*` environment variables: each preset encodes a slightly different
-# combination (`enable_gpu_av` with `pool_disabled = false` is blind to the bugs
-# GPU-AV is turned on to find), so "which one do I call" is itself a way to end
-# up instrumented for something other than what is being hunted.
-#
-# What remains here is the one thing a config object cannot express, because it
-# is a measurement rather than a setting: **"GPU-AV is enabled" and "GPU-AV is
-# catching errors" are not the same thing on every driver.** `verify_gpu_av` runs
-# a known out-of-bounds write and asserts the layer reports it, so a passing call
-# is proof end-to-end and a clean run afterwards means something.
+# Validation is switched on only by building the device with
+# `reset_device!(debug = DebugConfig(...))`. `verify_gpu_av` checks that GPU-AV,
+# once enabled, actually reports errors on this driver.
 
-"""
-    verify_gpu_av(; timeout=10.0) -> Bool
-
-Run a known out-of-bounds device write and assert that the GPU-AV layer
-reports it via its debug-utils callback. Returns `true` on success; throws
-`LavaError` if the layer did not catch the OOB within `timeout` seconds.
-
-**Call this every time you switch GPU-AV on.** It is the only step that can tell
-you the instrument is live, and skipping it is how a clean run gets mistaken for
-"no fault found":
-
-    reset_device!(debug = DebugConfig(gpu_av = true, pool_disabled = true))
-    verify_gpu_av()
-
-**It can take the process with it, and that is also an answer.** GPU-AV can
-attach (`gpu_assisted = true`) and still silently fail to instrument shaders on
-some driver/loader combinations — observed on RADV / Mesa 26 here: the layer
-attaches, never fires, and this probe's deliberate out-of-bounds write
-**segfaults the process** rather than being reported. So a segfault or a thrown
-`LavaError` here is definitive: GPU-AV is non-functional on this driver, and
-anything you were about to conclude from a clean run under it means nothing. Do
-GPU-AV bug-hunting on a driver where this returns cleanly.
-
-The non-instrumenting layers need no probe — nothing about
-`DebugConfig(sync_val = true, best_practices = true)` can silently not-instrument
-— so that is the configuration to reach for when you want to keep the session
-alive.
-
-Uses a write at index `100_000_000_000` (~400 GB past the array start), so
-the destination address is past every possible underlying `VkBuffer` —
-this proves the layer is alive whether or not `pool_disabled` is set.
-
-Implementation: the flush after a GPU-AV-caught dispatch can hang in cleanup
-on some drivers (observed on AMDVLK Windows), so the flush is spawned on a
-worker task and the main task polls `ctx.validation.messages` until either the
-expected message appears or the timeout expires. On success, the function
-calls `reset_device!` to clear the half-flushed batch state.
-"""
-# Top level: a kernel is compiled by its function, so this cannot be a closure
-# minted inside the probe below.
+# The probe kernel. Kernels are compiled by function, so this cannot be a closure
+# inside `verify_gpu_av`.
 function _lava_gpuav_check_kernel!(out, bad_idx::Int)
     i = KI.get_global_id().x
     if i == 1
@@ -64,6 +12,18 @@ function _lava_gpuav_check_kernel!(out, bad_idx::Int)
     return nothing
 end
 
+"""
+    verify_gpu_av(; timeout = 30.0, ctx = vk_context()) -> Bool
+
+Run a known out-of-bounds device write and return `true` once GPU-AV reports it
+through the debug-utils callback; throw `LavaError` if no matching message
+arrives within `timeout` seconds. Requires a device built with
+`DebugConfig(gpu_av = true)`; call it after every such build, since a clean run
+under a GPU-AV that does not instrument proves nothing. On RADV / Mesa 26 the
+layer attaches but does not instrument, and the probe write segfaults the
+process. Success and the throw both reset `ctx`'s device. `sync_val` and
+`best_practices` need no probe.
+"""
 function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
     if !ctx.gpu_assisted
         throw(LavaError("verify_gpu_av",
@@ -75,24 +35,15 @@ function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
     dev = ctx.device
     clear_validation_messages!(ctx)
     arr = LavaArray{Int32,1}(undef, (16,); bq)
-    # Write FAR past the (pool-disabled) dedicated 64-byte buffer — 400 KB out,
-    # so the faulting address lies outside EVERY tracked VkBuffer range.  GPU-AV's
-    # BufferDeviceAddressPass flags a store only when its address is within *no*
-    # known buffer; a small offset (a few KB) can land inside a neighbouring
-    # tracked buffer and is, correctly, not flagged.  (An earlier 1000-index /
-    # 4 KB probe gave a false negative on the RTX 4000 Ada for exactly this
-    # reason.)
+    # 400 KB past the 64-byte array. GPU-AV flags a device-address store only
+    # when no tracked VkBuffer contains it; an offset of a few KB can land in a
+    # neighbouring buffer and go unreported.
     bad_idx = 100_000
     Base.invokelatest(KI.Kernel(LavaBackend(bq), _lava_gpuav_check_kernel!),
                       arr, bad_idx; ndrange=4, workgroupsize=1)
-    # GPU-AV surfaces the violation only after the host waits for the dispatch
-    # to complete (the layer reads back the instrumented error log in its
-    # post-wait hook, then invokes our debug callback).  Drive that readback
-    # ourselves with a SHORT, FINITE semaphore wait in a poll loop — never a
-    # blocking `KA.synchronize`, which (a) trips the single-writer assertion if
-    # spawned off-thread and (b) blocks forever if a faulting submit never
-    # signals.  The async callback only copies bytes into a ring, so neither the
-    # wait nor the drain can hang; we drain + scan after each short wait.
+    # GPU-AV reports only after a host wait on the dispatch. Poll with short
+    # semaphore waits: `KA.synchronize` blocks forever if a faulting submission
+    # never signals.
     submit!(bq)
     target = something(newest(bq), UInt64(0))
     matches(s) = occursin("Out of bounds access", s) || occursin("device address", s)
@@ -101,7 +52,7 @@ function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
     while time() < deadline && isempty(caught_msg)
         VK.wait_semaphores(dev,
             VK.SemaphoreWaitInfo([timelineof(bq)], [target]),
-            UInt64(200_000_000))   # 200 ms — finite, so a non-signalling fault can't hang us
+            UInt64(200_000_000))   # 200 ms
         drain_validation_messages!(ctx)
         for m in ctx.validation.messages
             matches(m) && (caught_msg = m; break)
@@ -109,7 +60,7 @@ function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
     end
     if isempty(caught_msg)
         n = length(ctx.validation.messages)
-        reset_device!(lavadevice(ctx))   # recover the device that was checked
+        reset_device!(lavadevice(ctx))
         throw(LavaError("verify_gpu_av",
             "GPU-AV did not report a known out-of-bounds write within $(timeout)s " *
             "($(n) validation messages captured, none matching 'Out of bounds access').",
@@ -119,8 +70,8 @@ function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
             "way to switch it on afterwards."))
     end
     @info "Lava: GPU-AV verified working" sample=first(caught_msg, 240)
-    # The OOB left this device's batch queue in an errored state. Recover the
-    # same physical device; an unselected reset may choose another GPU.
+    # The fault leaves the batch queue errored. Reset the same physical device;
+    # an unselected reset may pick another GPU.
     reset_device!(lavadevice(ctx))
     return true
 end

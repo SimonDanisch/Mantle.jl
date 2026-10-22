@@ -4,14 +4,9 @@ function create_shader_module(dev::VK.Device, bytes::Vector{UInt8})
     return VK.ShaderModule(dev, length(bytes), reinterpret(UInt32, bytes))
 end
 
-# Compute pipeline creation and caching for Lava.jl
-#
-# Creates VkShaderModule + VkComputePipeline from validated SPIR-V binary.
-# Pipelines are cached by SPIR-V content hash.
-#
-# On Windows, vkCreateComputePipelines runs on a dedicated thread with a 256MB
-# stack to work around AMD's proprietary Vulkan driver overflowing its internal
-# compiler stack when processing certain SPIR-V patterns.
+# Compute pipeline creation and the per-device pipeline cache. On Windows,
+# vkCreateComputePipelines runs on a thread with a 256 MB stack: AMD's
+# proprietary driver overflows its compiler stack on some SPIR-V.
 
 const LARGE_STACK_PIPELINE = Sys.iswindows()
 const LARGE_STACK_SIZE = 256 * 1024 * 1024  # 256 MB
@@ -30,11 +25,10 @@ struct _VkCreatePipelineArgs
     _pad2::Int32
 end
 
-# Runs on a thread Julia did not create, so entering it ADOPTS the thread into
-# the runtime — and adoption allocates, which can start a garbage collection
-# right here. See the wait in `create_compute_pipeline_large_stack` for what that
-# requires of the thread waiting for this one. The driver call is GC-safe so a
-# compile that takes seconds does not hold up a collection on any other thread.
+# Runs on a thread Julia did not create; entering adopts it into the runtime,
+# which allocates and can start a GC (hence the GC-safe wait in
+# `create_compute_pipeline_large_stack`). The driver call is GC-safe so a long
+# compile does not block collections on other threads.
 function vk_pipeline_thread_callback(args_ptr::Ptr{Cvoid})::UInt32
     args = unsafe_load(Ptr{_VkCreatePipelineArgs}(args_ptr))
     result = @ccall gc_safe = true "vulkan-1".vkCreateComputePipelines(
@@ -73,32 +67,18 @@ function create_compute_pipeline_large_stack(device::Ptr{Cvoid},
             C_NULL, LARGE_STACK_SIZE, PIPELINE_THREAD_CFUNC[], args_ptr,
             UInt32(0), thread_id)
         handle == C_NULL && error("CreateThread failed for vkCreateComputePipelines")
-        # The wait is GC-SAFE, and that is not a detail. The thread above is
-        # adopted into the runtime on entry, adoption allocates, and an
-        # allocation can start a collection — which waits for every thread to
-        # reach a safepoint. A plain `ccall` here never reaches one, so the
-        # collection waited for this thread and this thread waited for the
-        # collection's: a deadlock that ended only at the timeout below. Rare
-        # per compile, so it surfaced deep into long sessions, which is why this
-        # comment used to blame "AMD's Windows driver being slow under
-        # accumulated session state". Measured 2026-10-07 on LapWin (8060S):
-        # the Mantle suite died in `test_gemm_staged.jl`, which passes alone in
-        # 95 s; a callback that collects deadlocks a plain wait (timeout after
-        # 5 s) and finishes in 8 ms under a GC-safe one.
-        #
-        # 600 seconds remains the bound for a driver that really hangs. On
-        # timeout the thread is terminated rather than abandoned: abandoned, it
-        # would later write into `args`, which is freed when this returns.
+        # GC-safe wait: the adopted thread can start a collection, which waits
+        # for every thread to reach a safepoint, and a plain `ccall` never does,
+        # so the two deadlock until the timeout. 600 s bounds a driver that
+        # really hangs; the thread is then terminated, not abandoned, because
+        # it would later write into `args`, freed on return.
         wait_result = @ccall gc_safe = true "kernel32".WaitForSingleObject(
             handle::Ptr{Cvoid}, UInt32(600_000)::UInt32)::UInt32
         if wait_result == 0x00000102  # WAIT_TIMEOUT
-            # Force-kill the leaked AMDVLK thread so it can't crash the
-            # process later when it accesses our freed args memory.
             ccall((:TerminateThread, "kernel32"), Cint,
                 (Ptr{Cvoid}, UInt32), handle, UInt32(1))
             ccall((:CloseHandle, "kernel32"), Cint, (Ptr{Cvoid},), handle)
-            # Best-effort: mark the Lava context as device_lost so subsequent
-            # work doesn't try to use a driver in unknown state.
+            # Best effort: the driver is in an unknown state.
             ctx = VK_CONTEXT_REF[]
             ctx === nothing || mark_device_lost!(ctx)
             error("vkCreateComputePipelines timed out after 600s — AMD Windows " *
@@ -115,15 +95,10 @@ end
     PIPELINE_NO_COMPILE
 
 When set, compute pipelines are created with
-`PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`: the driver REFUSES to
-build a binary and returns `VK_PIPELINE_COMPILE_REQUIRED` instead. That turns
-"the pipeline cache was warm" from a wall-clock inference into something the
-driver asserts directly — a fast second run otherwise proves nothing, since it
-could just as easily be Lava's in-memory `ctx.caches.pipelines` rather than the
-on-disk blob.
-
-Requires `pipelineCreationCacheControl`, which `vk_device!` enables as part of
-the Vulkan 1.3 core feature set. Use via `no_pipeline_compilation`.
+`PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`, so the driver returns
+`VK_PIPELINE_COMPILE_REQUIRED` instead of compiling. Needs
+`pipelineCreationCacheControl`, enabled with the Vulkan 1.3 features at device
+creation. Use through `no_pipeline_compilation`.
 """
 const PIPELINE_NO_COMPILE = Ref(false)
 
@@ -133,41 +108,27 @@ const PIPELINE_COMPILES_REFUSED = Ref(0)
 "Entry names of pipelines that would have compiled while PIPELINE_NO_COMPILE was set."
 const PIPELINE_COMPILE_MISSES = String[]
 
-# VkResult VK_PIPELINE_COMPILE_REQUIRED. Positive (success class), so a bare
-# `result != 0` check reports it as a generic failure — it needs naming.
+# Success-class (positive) VkResult, so `result != 0` alone would report it as
+# a generic failure.
 const VK_PIPELINE_COMPILE_REQUIRED = 1000297000
 
 """
-    no_pipeline_compilation(f) -> f()
+    no_pipeline_compilation(f; ctx = vk_context()) -> f()
 
-Run `f` with the driver forbidden from compiling any compute pipeline: every
-creation carries `PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`, so a
-pipeline that is not already in the cache makes creation fail loudly instead of
-quietly building a binary.
-
-This is how to prove a cache is doing its job. Timing cannot: a fast second run
-is equally explained by Lava's in-memory `ctx.caches.pipelines`, which never
-touches disk. Under this wrapper, a run that completes did zero driver
-compilation — the driver said so.
-
-Clears every in-memory cache that holds a pipeline first, the pipelines dict and
-the linked kernels and launch plans above it (`clear_kernel_cache!`), so only the
-`VkPipelineCache` (seeded from disk) can satisfy a creation. Restores the
-previous setting after.
+Run `f` with the driver forbidden to compile compute pipelines, which proves the
+`VkPipelineCache` seeded from disk serves them (a fast run alone could be the
+in-memory caches). Clears `ctx`'s kernel caches first (`clear_kernel_cache!`)
+and restores the flag after. A refusal does not throw: it is counted, recorded
+in `PIPELINE_COMPILE_MISSES` and retried without the flag.
 
     no_pipeline_compilation() do
         run_the_workload()
     end
     PIPELINE_COMPILES_REFUSED[] == 0    # nothing needed the driver's compiler
-
-A refusal does not throw. The creation is recorded in `PIPELINE_COMPILE_MISSES`
-and retried without the flag, so a workload finishes and reports every miss.
 """
 function no_pipeline_compilation(f; ctx::VkContext = vk_context())
     old = PIPELINE_NO_COMPILE[]
     old_refused = PIPELINE_COMPILES_REFUSED[]
-    # One invalidation owner clears native pipelines, linked kernels and launch
-    # plans, so no Julia-side lookup can mask a cold driver VkPipelineCache.
     clear_kernel_cache!(ctx)
     PIPELINE_NO_COMPILE[] = true
     PIPELINE_COMPILES_REFUSED[] = 0
@@ -182,30 +143,11 @@ end
 
 const MAX_PIPELINE_CACHE_SIZE = Ref(1024)
 
-# `COOPMAT_SUBGROUP` (core, `src/array/gemm.jl`) is the subgroup width the
-# cooperative-matrix kernels are written against; a coopmat pipeline is pinned to it.
-
-# Per device, for the same reason as `DEVICE_SUBGROUP_SIZE` above: RDNA 3.5
-# reports min 32 / max 64 where this card reports 32 / 32, and answering the
-# first for the second decides wrongly whether a pipeline may be pinned.
-
-# One warning per device, not per pipeline: the message is about the device's
-# subgroup width, so a coopmat-heavy workload would otherwise repeat it hundreds
-# of times. Cleared with the other per-device tables on reset.
-
-# The device's DEFAULT subgroup width, as opposed to the min/max it can be pinned
-# to. Queried once; cleared on device reset with the rest.
-# Per device, keyed by `ctx.id`, and never a single `Ref`: the width is 32 on
-# this desktop and 64 on RDNA 3.5, so one answer for all of them hands a second
-# context the first's.
-#
-# This class differs from the handle caches in a way worth stating: a stale
-# pipeline is undefined behaviour and usually crashes, while a stale device
-# PROPERTY just returns the wrong number. Every tiling decision keyed on the
-# subgroup width would then be silently made for the other device.
-
+# The device's default subgroup width, not the min/max it can be pinned to.
+# Cached per device: it differs between GPUs (64 on RDNA 3.5), and another
+# device's value silently mistiles every kernel sized by it.
 function device_subgroup_size(ctx::VkContext)
-    # 0 is the "not yet queried" sentinel; no device reports a 0-lane subgroup.
+    # 0 means not yet queried.
     ctx.caches.subgroup_size != 0 && return ctx.caches.subgroup_size
     props = VK.get_physical_device_properties_2(ctx.physical_device,
                                                     VK.PhysicalDeviceSubgroupProperties)
@@ -248,9 +190,8 @@ function can_require_subgroup_size(ctx::VkContext, n::Integer)
     c.compute && c.min <= n <= c.max
 end
 
-# Whether the module declares `cap` via OpCapability. Capabilities are the first
-# thing in a valid SPIR-V module, so this stops at OpMemoryModel rather than
-# walking the whole binary.
+# Whether the module declares `cap` via OpCapability. Capabilities precede
+# OpMemoryModel in a valid module, so the scan stops there.
 function spirv_declares_capability(spirv::Vector{UInt8}, cap::UInt32)
     length(spirv) >= 20 && length(spirv) % 4 == 0 || return false
     w = reinterpret(UInt32, spirv)
@@ -272,12 +213,9 @@ end
 """
     spirv_local_size(spirv) -> Int
 
-Threads per workgroup, read out of the module's `OpExecutionMode LocalSize`, or
-`0` when the module does not state one literally.
-
-`0` for `OpExecutionModeId`, where the extents are specialisation constants and
-are not known until the pipeline is created — the caller must treat that as
-"unknown", not as "small".
+Threads per workgroup from the module's `OpExecutionMode LocalSize`, or `0`
+when not stated literally (e.g. `OpExecutionModeId` with specialisation
+constants). Callers must treat `0` as unknown, not small.
 """
 function spirv_local_size(spirv::Vector{UInt8})
     length(spirv) >= 20 && length(spirv) % 4 == 0 || return 0
@@ -290,7 +228,7 @@ function spirv_local_size(spirv::Vector{UInt8})
         opcode = UInt16(w[i] & 0xffff)
         # Past the debug/annotation sections there are no more execution modes.
         opcode == Op.OpTypeVoid && break
-        # OpExecutionMode <entry> LocalSize x y z  — mode 17, so 6 words.
+        # OpExecutionMode <entry> LocalSize x y z: mode 17, 6 words.
         if opcode == Op.OpExecutionMode && count >= 6 && i + 5 <= length(w) &&
            w[i+2] == UInt32(17)
             return Int(w[i+3]) * Int(w[i+4]) * Int(w[i+5])
@@ -300,27 +238,18 @@ function spirv_local_size(spirv::Vector{UInt8})
     return 0
 end
 
-# No reset callback here any more. Every one of those five lived on `VkContext`
-# by the time this ran, and `reset_device!` builds a new context — so a fresh
-# `DeviceCaches` is the reset. Clearing a global was the compensation for state
-# that outlived its device; owning it removes both.
-
-# `spirv_content_hash` is in `compiler/spirv/content_hash.jl`. It is the identity
-# of a module rather than anything about a pipeline, and the compiler's dump path
-# names files after it too — see that file.
-
 """
-    get_compute_pipeline(spirv_bytes::Vector{UInt8}, entry_name::String;
+    get_compute_pipeline(ctx, spirv_bytes::Vector{UInt8}, entry_name::String;
                          push_constant_size::Integer=8,
                          needs_tlas_descriptor::Bool=false) -> LavaComputePipeline
 
-Get or create a compute pipeline from SPIR-V binary.
-Validates SPIR-V before creating the shader module.
+Get or create `ctx`'s compute pipeline for the SPIR-V, cached by content and
+layout. A cooperative-matrix module is pinned to `COOPMAT_SUBGROUP` lanes where
+the device's default differs and it allows pinning.
 """
 function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_name::String;
                                push_constant_size::Integer=8,
                                needs_tlas_descriptor::Bool=false)
-    # Content/length and layout define reuse within this device-owned cache.
     cache_key = hash((spirv_content_hash(spirv_bytes), length(spirv_bytes),
                       entry_name, push_constant_size, needs_tlas_descriptor))
     cached = get(ctx.caches.pipelines, cache_key, nothing)
@@ -333,7 +262,6 @@ function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_
     shader_mod = create_shader_module(dev, spirv_bytes)
     check_validation_errors!("vkCreateShaderModule (compute)")
 
-    # Pipeline layout with push constant range
     push_ranges = if push_constant_size > 0
         [VK.PushConstantRange(
             VK.SHADER_STAGE_COMPUTE_BIT,
@@ -362,59 +290,23 @@ function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_
 
     layout = VK.PipelineLayout(dev, ds_layouts, push_ranges)
 
-    # A cooperative-matrix module assumes a 32-lane subgroup (see COOPMAT_SUBGROUP).
-    # Where the device lets a pipeline pin its subgroup size we do, which makes
-    # those kernels correct on wave64 hardware rather than merely disabled. This
-    # is a deterministic function of (SPIR-V, device), so `cache_key` still
-    # identifies the pipeline uniquely without naming the size.
-    #
-    # Skipped entirely where the device is already COOPMAT_SUBGROUP wide: pinning
-    # would be semantically identical, and not touching the create-info at all is
-    # a stronger guarantee than "should be equivalent" for the wave32 hardware the
-    # kernels were tuned on.
+    # Cooperative-matrix kernels index subgroups as `tid ÷ COOPMAT_SUBGROUP`, so
+    # on a device with another default width the pipeline is pinned to
+    # COOPMAT_SUBGROUP. That is a function of (SPIR-V, device), so `cache_key`
+    # need not name it. A device already that wide gets an untouched create-info.
     stage_next = C_NULL
     if spirv_declares_capability(spirv_bytes, Cap.CooperativeMatrixKHR) &&
        device_subgroup_size(ctx) != COOPMAT_SUBGROUP
-        # And where it does NOT, refuse. Creating the pipeline anyway gives a
-        # kernel that indexes `tid ÷ 32` on a wave64 device — it launches, it
-        # returns, and every subgroup past the first reads another's fragment.
-        # Wrong numbers with no error is the worst outcome available here, and on
-        # a device nobody has run yet it would be blamed on the kernel.
-        #
-        # Reachable only on hardware that has cooperative matrices AND cannot pin
-        # a 32-lane subgroup. RDNA 3.5 supports `VK_EXT_subgroup_size_control`
-        # with `minSubgroupSize == 32`, so this is a guard, not a limitation —
-        # but it is a guard the first non-NVIDIA run should hit loudly if the
-        # assumption is wrong.
         if can_require_subgroup_size(ctx, COOPMAT_SUBGROUP)
             stage_next = VK.PipelineShaderStageRequiredSubgroupSizeCreateInfo(
                 UInt32(COOPMAT_SUBGROUP))
         else
-            # Cannot pin — but that is only fatal for a workgroup holding MORE
-            # THAN ONE subgroup. The assumption being violated is `tid ÷
-            # COOPMAT_SUBGROUP` as a subgroup index, and with a single subgroup
-            # every lane computes 0, which is right whatever the real width is.
-            #
-            # This distinction is load-bearing, not hypothetical: lavapipe runs
-            # 8-lane subgroups, cannot pin, and **does** have cooperative
-            # matrices — four 8x8x8 shapes, `Float16` among them. It is therefore
-            # a second, independent cooperative-matrix consumer on a machine that
-            # was documented as having only one, and refusing it outright would
-            # keep `test_shared_index_division.jl`'s open question closed for no
-            # reason. A single-subgroup workgroup is exactly what that
-            # investigation needs to run there.
-            #
-            # `spirv_local_size` returns 0 when the extents are specialisation
-            # constants; treat unknown as unsafe.
-            # A WARNING, not a refusal, and the distinction was earned. The gate
-            # that protects correctness is the capability query — `coopmat_gemm_
-            # available` and `flashcmfits` both check `can_require_subgroup_size`
-            # before routing anything here, which is what was actually broken
-            # (`mul!` asked the global context). A refusal at pipeline creation is
-            # redundant for those paths and, for a hand-written kernel that indexes
-            # no subgroup at all, simply wrong: it refused a valid 8-lane
-            # cooperative-matrix kernel on lavapipe and would have kept
-            # `test_shared_index_division.jl`'s question closed.
+            # Cannot pin. Only a workgroup of more than one subgroup reads wrong
+            # fragments (with one, `tid ÷ 32` is 0 for every lane), so warn
+            # rather than refuse: lavapipe has coopmat, 8-lane subgroups and no
+            # pinning, and runs valid single-subgroup kernels. Routing gates such
+            # as `coopmat_gemm_available` check `can_require_subgroup_size`
+            # themselves. A workgroup size of 0 (not literal) counts as unsafe.
             wg = spirv_local_size(spirv_bytes)
             sg = device_subgroup_size(ctx)
             if !(0 < wg <= sg) && !ctx.caches.coopmat_warned
@@ -430,24 +322,20 @@ function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_
         end
     end
 
-    # Create compute pipeline
     stage = VK.PipelineShaderStageCreateInfo(
         VK.SHADER_STAGE_COMPUTE_BIT,
         shader_mod,
         entry_name;
         next = stage_next
     )
-    # Optional CAPTURE_STATISTICS and CAPTURE_INTERNAL_REPRESENTATIONS bits so
-    # VK_KHR_pipeline_executable_properties has a populated stats table and the
-    # driver's ISA to query later via pipeline_exec_stats / pipeline_exec_ir.
+    # The capture bits give `pipeline_exec_stats` / `pipeline_exec_ir` data to read.
     pipeline_flags = VK.PipelineCreateFlag(VK.PIPELINE_CREATE_DISPATCH_BASE_BIT)
     if ctx.pipeline_exec_props_available
         pipeline_flags |= VK.PipelineCreateFlag(VK.PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR) |
                           VK.PipelineCreateFlag(VK.PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR)
     end
     if PIPELINE_NO_COMPILE[]
-        # EARLY_RETURN_ON_FAILURE alongside, as the spec pairs them: bail at the
-        # first pipeline that would compile rather than continuing the batch.
+        # EARLY_RETURN_ON_FAILURE alongside, as the spec pairs them.
         pipeline_flags |= VK.PipelineCreateFlag(VK.PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) |
                           VK.PipelineCreateFlag(VK.PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT)
     end
@@ -456,18 +344,13 @@ function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_
     pipeline = try
         create_compute_pipeline(dev, ci; pipeline_cache=ctx.pipeline_cache)
     catch e
-        # A cache miss is RECORDED, not fatal: retry without the flag so the
-        # workload finishes and every miss is reported, rather than dying at the
-        # first one. Aborting a pipeline creation mid-render leaves a partially
-        # recorded batch behind and cost a DEVICE_LOST when this threw instead.
+        # Record the miss and retry without the flag, so the workload finishes
+        # and reports every miss; throwing mid-render left a partly recorded
+        # batch and lost the device.
         if PIPELINE_NO_COMPILE[] && occursin("PIPELINE_COMPILE_REQUIRED", sprint(showerror, e))
-            # Every Lava kernel's entry point is "main", so the name alone does not
-            # identify anything. Record the SPIR-V hash and size, which do.
-            # `spirv_content_hash`, NOT `hash`: `Base.hash` SAMPLES a large
-            # Vector, so two modules differing in one byte report as the same
-            # miss. That is the bug that read as a 256-lane device cap for
-            # months (see `spirv_content_hash`), here in the one instrument
-            # whose job is to say WHICH module was not in the cache.
+            # Every entry point is "main", so identify the module by content
+            # hash and size. `spirv_content_hash`, not `Base.hash`, which
+            # samples large vectors.
             push!(PIPELINE_COMPILE_MISSES,
                   string(entry_name, " spirv=",
                          string(spirv_content_hash(spirv_bytes), base=16),
@@ -493,10 +376,8 @@ function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_
     while length(ctx.caches.pipeline_order) > MAX_PIPELINE_CACHE_SIZE[]
         old_key = popfirst!(ctx.caches.pipeline_order)
         delete!(ctx.caches.pipelines, old_key)
-        # No defensive pin needed: every dispatch pin!s its pipeline into
-        # `batch.pinned`, so any in-flight batch that used this pipeline
-        # holds a strong ref.  Once all such batches retire the ref drops
-        # naturally and GC runs the destructor.
+        # Safe to evict: every dispatch `hold!`s its pipeline, so submissions
+        # using it keep it alive until they complete.
     end
     return result
 end
@@ -533,9 +414,8 @@ end
 
 function create_compute_pipeline(dev::VK.Device, ci::VK.ComputePipelineCreateInfo;
                                    pipeline_cache=C_NULL)
-    # Resolve the raw handle for the LARGE_STACK ccall path. VK.jl high-
-    # level wrappers carry the raw UInt64 (non-dispatchable handle) in `.vks`;
-    # ccall accepts a Ptr{Cvoid} of that value on 64-bit systems.
+    # Raw handle for the LARGE_STACK ccall: `.vks` holds the non-dispatchable
+    # handle's UInt64, passed as a Ptr{Cvoid} on 64-bit systems.
     cache_handle = if pipeline_cache === C_NULL
         C_NULL
     else
@@ -567,12 +447,9 @@ function create_compute_pipeline(dev::VK.Device, ci::VK.ComputePipelineCreateInf
         destructor = x -> VK._destroy_pipeline(parent, x)
         return VK.Pipeline(raw_pipeline, destructor, dev)
     else
-        # The return code is NOT discardable here. VK_PIPELINE_COMPILE_REQUIRED is
-        # a SUCCESS-class code, so `@check` inside VK.jl does not raise and
-        # `unwrap` returns normally — with pPipelines[1] left at VK_NULL_HANDLE.
-        # Dropping the code therefore hands back a null pipeline that segfaults
-        # later at vkCmdBindPipeline, a long way from the cause. Checked on both
-        # branches, not only the LARGE_STACK (Windows) one above.
+        # Check the code: VK_PIPELINE_COMPILE_REQUIRED is success-class, so VK.jl
+        # does not raise and pPipelines[1] stays VK_NULL_HANDLE, which segfaults
+        # later at vkCmdBindPipeline.
         pipelines, code = @vk_checked "vkCreateComputePipelines" VK.create_compute_pipelines(dev, [ci]; pipeline_cache)
         if code == VK.PIPELINE_COMPILE_REQUIRED
             PIPELINE_COMPILES_REFUSED[] += 1

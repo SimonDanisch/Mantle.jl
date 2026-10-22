@@ -6,9 +6,8 @@ get_or_compile_gfx(@nospecialize(f), @nospecialize(tt), stage::Symbol; config=no
     cached_gfx_shader(f, tt, stage; config)
 
 """
-The key of a compiled pipeline: the shaders it is made of, by identity, and the
-state baked in with them. The shaders, not their functions: a stage compiled
-again after an edit is a new shader, and the pipeline has to follow it.
+The key of a compiled pipeline: its shaders by identity (not their functions, so a
+stage recompiled after an edit gives a new pipeline) and the state baked in.
 """
 function pipeline_cache_key(shaders::Tuple, pipeline, color_format, depth_format, descriptor_set_layout)
     formats = color_format isa Union{Tuple,AbstractVector} ? Tuple(color_format) : (color_format,)
@@ -25,7 +24,6 @@ function ensure_compiled_with_shader!(pipeline::GraphicsPipeline, vert_fn, frag_
     vert = get_or_compile_gfx(vert_fn, tt_vertex, :vertex)
     frag = get_or_compile_gfx(frag_fn, tt_fragment, :fragment)
 
-    # Optional stages
     geom = nothing
     if pipeline.geometry !== nothing
         # Geometry wrappers supply the emitter and primitive inputs before user arguments.
@@ -75,9 +73,8 @@ function ensure_compiled_with_shader!(pipeline::MeshPipeline, mesh_fn, frag_fn, 
     cache_key = pipeline_cache_key((mesh, frag), pipeline, color_format, depth_format,
                                    descriptor_set_layout)
     compiled = get!(ctx.caches.gfx_pipelines, cache_key) do
-        # No `topology`: a mesh stage has no input stream to assemble, and what it
-        # EMITS is an execution mode of its own entry point rather than pipeline
-        # state — `MeshConfig` carries it and the compile above reads it there.
+        # No `topology`: a mesh stage's output primitive is an execution mode of
+        # its entry point, carried by `MeshConfig`.
         return create_graphics_pipeline(nothing, frag.spirv_bytes;
             ctx, mesh_spirv=mesh.spirv_bytes,
             blend=pipeline.blend, cull=pipeline.cull, depth=pipeline.depth,
@@ -90,8 +87,6 @@ end
 
 ensure_compiled!(pipeline::Union{GraphicsPipeline,MeshPipeline}, args...; kw...) =
     last(ensure_compiled_with_shader!(pipeline, args...; kw...))
-
-# ── Draw API ──
 
 """Resolve wrapped vertex/fragment functions and type tuples. Varyings come from
 the last geometry-producing stage; empty outputs support depth-only passes."""
@@ -186,8 +181,8 @@ function submit_and_present!(bq::SubmitChannel{<:VulkanQueue}, win::VulkanWindow
         # Wait for swapchain image availability before color attachment writes:
         waits = ((win.image_available[fi], UInt64(0),
                   VK.PipelineStageFlag2(VK.PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)),),
-        # Signal render_finished for the subsequent present operation. Indexed
-        # by IMAGE, not frame slot — see the comment where these are created.
+        # Signal render_finished for the present; indexed by image, not frame
+        # slot (see `create_swapchain!`).
         signals = ((win.render_finished[win.current_image_idx + 1], UInt64(0),
                     VK.PipelineStageFlag2(VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)),),
         fence = win.in_flight[fi])
@@ -201,8 +196,6 @@ end
 Mantle.supports_geometry_stage(::LavaBackend) = true
 Mantle.supports_tessellation(::LavaBackend) = true
 
-# Unlike the two above, this one is a property of the DEVICE rather than of the
-# backend: `VK_EXT_mesh_shader` is an extension, and the geometry chain is still
-# the only front end on hardware without it. Answered from the live context's
-# probe, the way `supportspredicate` answers for conditional rendering.
+# A device property, not a backend one: `VK_EXT_mesh_shader` is optional, so the
+# live context's probe answers.
 Mantle.supports_mesh_pipeline(::LavaBackend) = vk_context().mesh_shader_available

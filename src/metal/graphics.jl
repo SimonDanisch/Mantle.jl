@@ -1,22 +1,12 @@
-# The rasterisation half of the Metal backend.
-#
-# `supports_graphics(::MetalBackend)` said `false` for one reason: Metal.jl
-# compiled Julia to compute kernels and nothing else. It compiles vertex and
-# fragment programs now (`Metal/src/compiler/graphics.jl`), so the reason is
-# gone and this is the rest — the concrete resources behind Mantle's abstract
-# `Framebuffer` / `Texture2D` / `Sampler` / `CompiledGraphicsPipeline`, the
-# translation of the portable pipeline state, and `draw!`.
-#
-# Nothing here knows about the graph. Mantle decides what is drawn and in what
-# order; this records it.
+# Rasterisation on Metal: the resources behind Mantle's `Framebuffer`,
+# `Texture2D`, `Sampler` and `CompiledGraphicsPipeline`, pipeline state
+# translation, and the render-pass verbs. The graph decides what is drawn and in
+# what order; this records it.
 
 const MTLm = Metal.MTL
 
-# ── portable pipeline state → Metal ──────────────────────────────────────────
-#
-# One method per state value rather than a `Dict`, so an unhandled one is a
-# missing method at compile time instead of a `KeyError` in the middle of a
-# frame.
+# One method per state value, not a `Dict`, so an unhandled value is a
+# `MethodError`, not a `KeyError` mid-frame.
 
 mtl_cull(::Mantle.NoCull)    = MTLm.MTLCullModeNone
 mtl_cull(::Mantle.CullBack)  = MTLm.MTLCullModeBack
@@ -92,8 +82,6 @@ function depthstate(dev, depth, depth_format)
     return MTLm.MTLDepthStencilState(dev, dd)
 end
 
-# ── resources ────────────────────────────────────────────────────────────────
-
 """A 2D texture on Metal. The element type is Mantle's spelling of the format."""
 struct MetalTexture2D{T} <: Mantle.Texture2D{T}
     tex::MTLm.MTLTexture
@@ -110,45 +98,23 @@ struct MetalSampler <: Mantle.Sampler
 end
 
 """
-The pixel format a SAMPLED texture of element type `T` has.
+    mtlsampledformat(T) -> MTLPixelFormat
 
-Not `mtlformat`, and the difference is not cosmetic: that one answers for a
-RENDER TARGET, where `Float32` means `Depth32Float`. A single-channel float
-texture that is read by a shader — a signed-distance glyph atlas is exactly one —
-is `R32Float`, and creating it as depth is rejected by the sampler.
-
-Everything else defers, because for a colour format the two questions have the
-same answer.
+The pixel format of a sampled texture of `T`. Differs from `mtlformat` (render
+targets) only for scalar floats: `Float32` is `R32Float` here, not `Depth32Float`,
+which a sampler rejects.
 """
 mtlsampledformat(::Type{Float32}) = MTLm.MTLPixelFormatR32Float
 mtlsampledformat(::Type{Float16}) = MTLm.MTLPixelFormatR16Float
 mtlsampledformat(@nospecialize(T::Type)) = mtlformat(T)
 
 """
-    Texture2D(backend, data::Matrix)
+    Texture2D(backend, data::AbstractMatrix; mipmap = false)
 
-A sampled 2D texture holding `data`.
-
-Dispatches on the BACKEND, matching `Texture2D(::LavaBackend, …)` on the other
-side — with two backends loaded there is nothing else to tell them apart by. The
-element type names the format, as everywhere a caller names one in Mantle.
-
-`data[x, y]`: the FIRST index is the horizontal one. That is the convention the
-whole Julia GPU stack already uses — GLMakie's `Texture(::Matrix)`, and the
-Vulkan side here, both hand a column-major matrix to the driver as tightly packed
-rows, which makes a Julia column one row of the image — and it is what makes
-Makie's glyph atlas sample as itself rather than as its transpose.
-
-`storageMode` is Shared rather than a buffer-backed texture: a linear texture
-cannot be sampled on an Apple GPU, and the same storage cannot be both a render
-target and a sampled source. This is the same reason `MetalFramebuffer` reads
-back through `getBytes!`.
-
-`data` may be on the host or already on the device; see
-[`upload_texture_data!`](@ref) for both.
-
-`mipmap = true` gives it the full chain of mip levels, made from level 0 at every
-upload, as on the Vulkan side.
+A sampled 2D texture holding `data` (host or device), with the element type
+naming the format. `data[x, y]`: the first index is horizontal, as in GLMakie and
+the Vulkan backend. `Shared` storage, not a buffer-backed linear texture.
+`mipmap = true` regenerates the full mip chain from level 0 at every upload.
 """
 function Mantle.Texture2D(::Metal.MetalBackend, data::AbstractMatrix{T}; mipmap::Bool = false) where {T}
     dev = Metal.device()
@@ -164,24 +130,15 @@ end
 """
     upload_texture_data!(tex::MetalTexture2D, data)
 
-New texels for an existing texture, from the host or from the device.
-
-Both go through a blit on Mantle's queue, not `replace_region!`. A CPU write lands
-the moment it is made, while a frame that samples this texture may still be
-running; a blit is a command like the frame's own and waits its turn. That is
-also how Vulkan's upload works (`vkCmdCopyBufferToImage`), and it is why the two
-methods here mirror the two there.
-
-The texels are the matrix's column-major bytes as they stand: a Julia column is
-the contiguous run `bytesPerRow` describes, so one column is one ROW of the
-image, the same reading the Vulkan upload takes. Transposing instead mirrored
-the glyph atlas about its diagonal.
+New texels for an existing texture, from the host or the device, through a
+blit on Mantle's queue rather than `replace_region!`, so a frame still sampling
+the texture is not overwritten. The matrix's column-major bytes are uploaded as
+they are: one Julia column is one image row. Waits for completion.
 """
 function Mantle.upload_texture_data!(t::MetalTexture2D{T}, data::AbstractMatrix{T}) where {T}
     size(data) == size(t) || throw(DimensionMismatch(
         "upload_texture_data!: $(size(data)) texels for a $(size(t)) texture"))
-    # Staged through a shared buffer. `collect` for anything without a dense
-    # HOST pointer to hand: a view, a lazy adjoint.
+    # `collect` for anything without a dense host pointer (views, adjoints).
     rows = data isa Matrix{T} ? data : collect(data)
     nbytes = length(rows) * sizeof(T)
     staging = GC.@preserve rows MTLm.MTLBuffer(Metal.device(), nbytes, pointer(rows);
@@ -190,23 +147,13 @@ function Mantle.upload_texture_data!(t::MetalTexture2D{T}, data::AbstractMatrix{
     return t
 end
 
-# Already on the device: the array's own buffer is the source, no host round trip.
-#
-# Its own method, and not the one above, because an `MtlArray` IS a
-# `DenseMatrix` (`AbstractGPUArray <: DenseArray`) with a `pointer` — to DEVICE
-# memory. The constructor used to test `DenseMatrix` and hand that pointer to
-# the CPU-side `replace_region!`, which read texels from a device address: the
-# texture came out zero, an `image!` of a device array drew nothing at all,
-# and the image shader's `discard` of a zero alpha hid even that.
+# Device source: blit from the array's own buffer. A separate method because an
+# `MtlArray` is a `DenseMatrix` whose `pointer` is a device address.
 function Mantle.upload_texture_data!(t::MetalTexture2D{T}, data::Metal.MtlMatrix{T}) where {T}
     size(data) == size(t) || throw(DimensionMismatch(
         "upload_texture_data!: $(size(data)) texels for a $(size(t)) texture"))
-    # The array was most likely just WRITTEN by a kernel — RayMakie's
-    # `texeldata` is a broadcast — and that kernel may sit on a queue this blit
-    # is not ordered against: the running task's own Metal.jl queue, if this
-    # task never adopted the device's (`adoptqueue!`). `framebuffer!` below
-    # only orders after the device's batch. Unordered, the blit read the buffer
-    # before the broadcast had filled it and the texture came out zero.
+    # The kernel that wrote `data` may be on this task's own Metal.jl queue (no
+    # `adoptqueue!`), which `framebuffer!` does not order against.
     Metal.synchronize()
     p = pointer(data)
     blit_into_texture!(t, p.buffer, p.offset)
@@ -216,18 +163,14 @@ end
 """Copy a whole texture's worth of texels from `src` at byte `soff`, on the queue."""
 function blit_into_texture!(t::MetalTexture2D{T}, src::MTLm.MTLBuffer, soff::Integer) where {T}
     w, h = size(t)
-    # Behind whatever the device's batch holds and has not committed — a frame
-    # still sampling this texture, a kernel that produced `src` — because commit
-    # order is execution order, and a buffer opened beside an open batch runs
-    # ahead of it.
+    # Behind the device's uncommitted batch: commit order is execution order.
     cb = framebuffer!(Device(MetalAPI()))
     MTLm.MTLBlitCommandEncoder(cb) do enc
         MTLm.append_copy!(enc, t.tex, MTLm.MTLOrigin(0, 0, 0), MTLm.MTLSize(w, h, 1),
                           src, soff, w * sizeof(T), 0)
         t.tex.mipmapLevelCount > 1 && MTLm.append_generate_mipmaps!(enc, t.tex)
     end
-    # Waited for, so the caller's array is free the moment this returns — the
-    # contract the Vulkan side keeps by copying into its own scratch first.
+    # Waited for, so the caller may reuse its array on return.
     submitwait!(cb)
     cb.status == MTLm.MTLCommandBufferStatusCompleted ||
         error("Metal texture upload failed: $(cb.status)")
@@ -237,8 +180,8 @@ end
 """
     Sampler(backend; filter = :linear, wrap = :repeat)
 
-How a texture is sampled. The same two keywords the Vulkan side takes, because a
-caller that had to know which backend it was on would be writing two renderers.
+How a texture is sampled; the same keywords as the Vulkan backend.
+`filter` is `:nearest` or `:linear`, `wrap` is `:repeat`, `:clamp` or `:mirror`.
 """
 function Mantle.Sampler(::Metal.MetalBackend; filter::Symbol = :linear,
                         wrap::Symbol = :repeat)
@@ -252,8 +195,6 @@ function Mantle.Sampler(::Metal.MetalBackend; filter::Symbol = :linear,
     desc = MTLm.MTLSamplerDescriptor()
     desc.minFilter = f
     desc.magFilter = f
-    # a texture with mip levels is read from the one its footprint asks for;
-    # one without has only level 0 either way
     desc.mipFilter = MTLm.MTLSamplerMipFilterLinear
     desc.sAddressMode = a
     desc.tAddressMode = a
@@ -262,11 +203,9 @@ function Mantle.Sampler(::Metal.MetalBackend; filter::Symbol = :linear,
 end
 
 """
-An offscreen render target: a colour texture and, optionally, a depth one.
-
-Buffer-backed textures are deliberately NOT used. A render target cannot be a
-linear texture on an Apple GPU — it builds, it draws, and the result is never
-written — so readback goes through `getBytes!` instead.
+An offscreen render target: a `Shared` colour texture and an optional depth one.
+Not buffer-backed: rendering into a linear texture on an Apple GPU silently writes
+nothing, so readback uses `getBytes!`.
 """
 struct MetalFramebuffer <: Mantle.Framebuffer
     color::MTLm.MTLTexture
@@ -280,12 +219,8 @@ end
 """
     Framebuffer(backend, width, height; depth = true, color_format = nothing)
 
-Allocate an offscreen target.
-
-Dispatches on the BACKEND, matching the documented signature — with two backends
-loaded there is nothing else to tell them apart by. `color_format` is a Julia
-element type, as everywhere a caller names a format in Mantle; `mtlformat`
-lowers it the way `vkformat` does on the other side.
+Allocate an offscreen target. `color_format` is a Julia element type lowered by
+`mtlformat` (default `BGRA8Unorm`); depth is `Depth32Float`.
 """
 function Mantle.Framebuffer(be::Metal.MetalBackend, width::Integer, height::Integer;
                             depth::Bool = true, color_format = nothing)
@@ -302,7 +237,7 @@ function Mantle.Framebuffer(be::Metal.MetalBackend, width::Integer, height::Inte
     if depth
         ddesc = MTLm.MTLTextureDescriptor(dfmt, width, height, false)
         ddesc.usage = MTLm.MTLTextureUsageRenderTarget
-        # A depth buffer is never read back, so it can live where the GPU wants it.
+        # Private: depth is never read back.
         ddesc.storageMode = MTLm.MTLStorageModePrivate
         dtex = MTLm.MTLTexture(dev, ddesc)
     end
@@ -312,19 +247,12 @@ end
 """
     mtlformat(T) -> MTLPixelFormat
 
-Metal's format for a Julia element type. The counterpart to `vkformat`, and the
-same table `runtime/format.jl` documents.
-
-Matched on the element TYPE, not on `nameof(T)`: ColorTypes is a Mantle
-dependency (`[deps]`), and matching structurally accepts any foreign type that
-happens to be called `RGBA`. `runtime/format.jl` documents `BGRA{N0f8}` as the
-portable spelling.
+Metal's render-target format for a Julia element type: the table in
+`runtime/format.jl`, as `vkformat` on Vulkan. `Float32` is depth. Matched on the
+type, not `nameof(T)`, so foreign types named `RGBA` do not match.
 """
 function mtlformat(@nospecialize(T::Type); srgb::Bool = false)
-    # Depth, matching `vkformat`'s `D32_SFLOAT` and the table in
-    # `runtime/format.jl`. `R32Float` is a colour format, so a depth target
-    # reaching this by way of its element type would be created as colour and
-    # rejected by the render pass.
+    # Depth, as `vkformat`'s `D32_SFLOAT`; `R32Float` would be a colour target.
     T === Float32 && return MTLm.MTLPixelFormatDepth32Float
     T === UInt32 && return MTLm.MTLPixelFormatR32Uint
     T <: StaticVector{2,UInt32} && return MTLm.MTLPixelFormatRG32Uint
@@ -333,17 +261,11 @@ function mtlformat(@nospecialize(T::Type); srgb::Bool = false)
                                          MTLm.MTLPixelFormatBGRA8Unorm
     T === RGBA{N0f8}    && return srgb ? MTLm.MTLPixelFormatRGBA8Unorm_sRGB :
                                          MTLm.MTLPixelFormatRGBA8Unorm
-    # No sRGB variant exists for the float formats, and none is needed: sRGB is
-    # an encoding for 8-bit channels, and a float target holds linear values.
+    # Float formats have no sRGB variant; they hold linear values.
     T === RGBA{Float16} && return MTLm.MTLPixelFormatRGBA16Float
     T === RGBA{Float32} && return MTLm.MTLPixelFormatRGBA32Float
 
-    # The TUPLE spellings, which is what a portable shader says a texel is:
-    # `NTuple{4,Float32}` is how `Vec4f` reaches a stage, and the Vulkan side's
-    # `julia_to_vk_format` has taken them all along. Without them an `image!` or a
-    # `heatmap!` — whose texels RayMakie builds as `NTuple{4,Float32}` — died in
-    # `Texture2D` with "no Metal pixel format", and the plot silently did not draw
-    # while the axis around it did.
+    # Tuple spellings, as portable shaders and Vulkan's `julia_to_vk_format` use.
     T === NTuple{4,Float32} && return MTLm.MTLPixelFormatRGBA32Float
     T === NTuple{2,Float32} && return MTLm.MTLPixelFormatRG32Float
     T === NTuple{4,Float16} && return MTLm.MTLPixelFormatRGBA16Float
@@ -351,9 +273,7 @@ function mtlformat(@nospecialize(T::Type); srgb::Bool = false)
     T === NTuple{4,UInt8}   && return srgb ? MTLm.MTLPixelFormatRGBA8Unorm_sRGB :
                                              MTLm.MTLPixelFormatRGBA8Unorm
     T === UInt8             && return MTLm.MTLPixelFormatR8Unorm
-    # `NTuple{3,Float32}` is deliberately absent: Metal has no three-channel pixel
-    # format at all, and Vulkan's `R32G32B32_SFLOAT` is optional there too. A caller
-    # with three channels pads to four.
+    # No three-channel formats exist on Metal; callers pad to four.
     error("no Metal pixel format for $T — extend `mtlformat` in metal/graphics.jl")
 end
 
@@ -363,40 +283,26 @@ struct MetalCompiledGraphicsPipeline <: Mantle.CompiledGraphicsPipeline
     depth_state::Union{Nothing,MTLm.MTLDepthStencilState}
     primitive::MTLm.MTLPrimitiveType
     cull::MTLm.MTLCullMode
-    # A depth-only pipeline has none, and binding to a stage that does not exist
-    # is an error rather than a no-op.
+    # False for depth-only pipelines; Metal rejects binding to a missing stage.
     has_fragment::Bool
-    # Held so the functions stay reachable: an `MTLFunction` does not keep its
-    # library alive, and a released library takes the pipeline's shaders with it.
+    # An `MTLFunction` does not keep its library alive; releasing the library
+    # breaks the pipeline's shaders.
     libs::Vector{Any}
 end
-
-# ── compiling a portable pipeline ────────────────────────────────────────────
 
 """
     stage_output_type(pipeline, stage) -> Type
 
-The struct a stage writes.
-
-`Mantle.outputtype` builds it from the stage's own `outputs`, and a `NamedTuple`
-TYPE already has `fieldnames` and `fieldtype` — which is exactly what Metal.jl's
-`stage_outputs` reads. So the portable declaration lowers with no translation
-table at all.
-
-The clip position is prepended there rather than declared, because every vertex
-stage has one and a caller that had to remember to list it would eventually
-forget.
+The struct a stage writes. For the vertex stage this is `Mantle.outputtype`, a
+`NamedTuple` type with the clip position prepended, which Metal.jl's
+`stage_outputs` reads directly.
 """
 stage_output_type(p::Mantle.GraphicsPipeline, ::Val{:vertex}, ncolor::Int = 1) =
     Mantle.outputtype(p.vertex)
 
 """
-One field per colour attachment, because that is what a fragment stage writes.
-
-The count comes from the PASS, not from the shader: a deferred g-buffer pass
-attaches albedo, material and normal and its fragment returns a three-tuple, and
-the same shader compiled for one attachment would silently drop two of them.
-`air.render_target <i>` is per field, so the struct IS the attachment list.
+For the fragment stage: one field per colour attachment of the pass (each field
+is an `air.render_target`), so the count comes from the pass, not the shader.
 """
 stage_output_type(::Mantle.GraphicsPipeline, ::Val{:fragment}, ncolor::Int = 1) =
     NamedTuple{ntuple(i -> Symbol(:color, i), ncolor),
@@ -409,35 +315,18 @@ fragment_output_type(formats) = NamedTuple{
     ntuple(i -> Symbol(:color, i), length(formats)),
     Tuple{map(fragment_attachment_type, formats)...}}
 
-# ── Shaders that RETURN their outputs ────────────────────────────────────────
-#
-# The portable spelling: a vertex stage returns `(position = …, varyings…)` and a
-# fragment stage takes the varyings as its first argument and returns one value
-# per colour attachment. That is how `bench/showcase.jl` is written and what
-# Lava's `VertexWrapper`/`FragmentWrapper` translate on the other backend.
-#
-# AIR wants neither shape — a stage writes through the trailing pointer this
-# backend's rewrite turns into a return value, and reads each varying as its own
-# tagged parameter. These two callables are that translation, and they are
-# `@generated` for the same reason Lava's are: the arity and the field list are
-# types, so the whole thing folds away and the compiled stage looks as if the
-# caller had written the pointer form by hand.
+# Portable shaders return their outputs: a vertex stage returns
+# `(position = …, varyings…)`, a fragment stage takes the varyings first and
+# returns one value per attachment. AIR stages write through a trailing output
+# pointer and read each varying as a tagged parameter; the `@generated` wrappers
+# below translate at compile time, as Lava's `VertexWrapper`/`FragmentWrapper` do.
 
 """
-Bring one value to the type the stage's output struct declares.
+    to_stage_field(T, v)
 
-A shader is free to write `Vec2f` where the declaration says `NTuple{2,Float32}`
-or the other way round, and this is the bridge. The two are the SAME bytes — a
-`Vec` is a one-field wrapper around exactly that tuple — so it is a `getfield`,
-not a `convert`: `convert` has no method between them and the failure is a
-`MethodError` reached from device code, which surfaces as
-`jl_f_throw_methoderror` plus a `gc_pool_alloc` in a fragment shader.
-
-It is NOT what carries `position`. That field is `Vec4f` on both backends now,
-because a clip position is one; declaring it as the tuple here and converting
-was a second spelling for one thing, and nothing needed it — `mangle_varying`
-gives `Vec4f` and `NTuple{4,Float32}` the same string, which is all the two
-stages link by.
+Convert `v` to the declared field type `T`. A one-field wrapper of `T` (`Vec2f`
+for `NTuple{2,Float32}`) is unwrapped with `getfield`, since `convert` has no
+method between them and would throw from device code.
 """
 @generated function to_stage_field(::Type{T}, v) where {T}
     v === T && return :v
@@ -449,17 +338,11 @@ stages link by.
 end
 
 """
-Assemble a fragment stage's declared outputs from what the shader returned.
+    stage_fragment_out(Out, r)
 
-One value per attachment when there are several, and just the value when there
-is one — which is genuinely ambiguous, because a colour IS a four-tuple:
-`r isa Tuple` reads a single `NTuple{4,Float32}` as four render targets and
-throws inside the `NamedTuple` constructor, which surfaces as a fragment stage
-that is `noreturn` and draws nothing.
-
-So the test is on the ELEMENT type. A per-target tuple holds colours, and a
-colour is not a `Real`; a single colour holds floats. That distinguishes the two
-for every attachment count.
+A fragment stage's declared outputs from its return value: a tuple of one value
+per attachment, or a single value. A colour is itself a tuple, so the two are
+told apart by element type: per-attachment tuples do not hold `Real`s.
 """
 @generated function stage_fragment_out(::Type{Out}, r) where {Out}
     per_target = r <: Tuple && fieldcount(r) == fieldcount(Out) &&
@@ -472,15 +355,9 @@ for every attachment count.
 end
 
 """
-A stage's baked arguments, ALL of them, bound as one block.
-
-One `air.buffer` per argument capped a stage at 31, the size of Metal's buffer
-table, and a stage with more failed at pipeline creation ("indirect argument
-buffer resources exceeded"): RayMakie's mesh shader has 51. Vulkan never had the
-limit, because Lava packs every argument into one block. This is the same
-shape: every baked argument is plain bytes (a device array is its address and
-dimensions), so the whole tuple is one `setBytes`, and the stage wrappers splat
-it back into the body's arguments.
+All of a stage's baked arguments, bound as one `setBytes` block and splatted back
+into the body's arguments by the stage wrappers. One buffer slot per argument
+would cap a stage at Metal's 31 buffer slots.
 """
 struct PackedArgs{T<:Tuple}
     args::T
@@ -496,8 +373,8 @@ function packargs(d::Tuple)
     return (p,)
 end
 
-# Defined before the wrappers that call it: a generator runs in the world its
-# method was defined in, so a later `unpacked` does not exist for it.
+# Defined before the `@generated` wrappers that call it: a generator runs in the
+# world of its definition.
 """The body's arguments, expressions for a `@generated` wrapper: a `PackedArgs` splatted in place."""
 function unpacked(argtypes, idxs)
     exprs = Any[]
@@ -517,28 +394,21 @@ bodytypes(bufs::Type{<:Tuple}) =
     Tuple{(U for T in fieldtypes(bufs) for U in (T <: PackedArgs ? fieldtypes(fieldtype(T, 1)) : (T,)))...}
 
 """
-A vertex shader that returns `(position = …, varyings…)`.
-
-`VID` is whether the body takes its vertex index as a leading
-`KernelInterface.VertexIndex` instead of calling `vertex_index()`. Decided on the
-HOST, from the method table, and carried as a type parameter — a `@generated`
-function may not ask `hasmethod` itself, and the answer is a property of the
-shader rather than of one invocation. See `KernelInterface.wantsvertexindex`.
+A vertex shader that returns `(position = …, varyings…)`. `VID` is whether the
+body takes a leading `KernelInterface.VertexIndex`, decided on the host
+(`KernelInterface.wantsvertexindex`) because a `@generated` function may not call
+`hasmethod`.
 """
 struct MetalVertexStage{F, Out, VID} end
 
-# The old two-parameter spelling, for a body that calls the builtin. Kept as a
-# constructor rather than a second `@generated` method so there is one body.
+# Two-parameter form, for a body that calls `vertex_index()`.
 MetalVertexStage{F,Out}() where {F,Out} = MetalVertexStage{F,Out,false}()
 
 @generated function (::MetalVertexStage{F,Out,VID})(args::Vararg{Any,N}) where {F,Out,VID,N}
     bufs = unpacked(args, 1:(N - 1))
     call = VID ? Expr(:call, :(F.instance), :(KI.VertexIndex(KI.vertex_index())), bufs...) :
                  Expr(:call, :(F.instance), bufs...)
-    # By NAME, not by position: the shader is free to list its varyings in
-    # whatever order reads well, and the declaration is what fixes the layout.
-    # `position` is the one field with a meaning of its own — every vertex stage
-    # has one, and it is the one that has to be brought into this backend's
+    # Fields by name, in declaration order; `position` is mirrored into Metal's
     # clip space.
     vals = Expr(:tuple, (n === :position ?
                          :(flip_clip(to_stage_field($(fieldtype(Out, n)),
@@ -556,25 +426,20 @@ end
 
 """
 A fragment shader that takes the varyings as a NamedTuple and returns its
-colours.
-
-The varying markers sit BETWEEN the buffer arguments and the output pointer:
-buffers keep the leading positions they were given, so their `air.buffer`
-location indices are the slots `record_draw!` binds, and the output stays last
-because that is what `stage_return!` takes it to be.
+colours. Parameters are buffers, varying markers, textures and samplers, then the
+output pointer: buffers stay first so their `air.buffer` indices are the slots
+`record_draw!` binds, and `stage_return!` takes the last parameter as the output.
 """
 struct MetalFragmentStage{F, VIn, Out, NT} end
 
-# The old three-parameter spelling, for a stage that samples nothing.
+# Three-parameter form, for a stage that samples nothing.
 MetalFragmentStage{F,VIn,Out}() where {F,VIn,Out} = MetalFragmentStage{F,VIn,Out,0}()
 
 @generated function (::MetalFragmentStage{F,VIn,Out,NT})(args::Vararg{Any,N}) where {F,VIn,Out,NT,N}
     nv = fieldcount(VIn)
-    # `NT` textures cost TWO parameters each — the texture and its sampler — and
-    # they come after the varyings, which is the order the driver requires; see
-    # `texture_markers`. The body takes neither: a texture reaches
-    # `sample_texture_2d` through the lowering in `Metal/src/compiler/texture.jl`,
-    # because AIR has no way to name one from a function that was not handed it.
+    # Each texture adds a texture and a sampler parameter after the varyings
+    # (`texture_markers`). The body takes neither: `sample_texture_2d` reaches
+    # them through the lowering in `Metal/src/compiler/texture.jl`.
     ntex = 2 * NT
     nbuf = N - 1 - nv - ntex
     nbuf >= 0 || error("a fragment stage with $nv varyings and $NT textures needs " *
@@ -590,11 +455,8 @@ MetalFragmentStage{F,VIn,Out}() where {F,VIn,Out} = MetalFragmentStage{F,VIn,Out
 end
 
 """
-The Julia signature the wrapped fragment stage is compiled for.
-
-One `Varying` marker per declared varying, in declaration order — the ORDER is
-not what links them (the mangled string is), but a stable order keeps the
-argument metadata reproducible.
+One `Varying` marker per declared varying, in declaration order. Stages link
+varyings by mangled name; the stable order keeps argument metadata reproducible.
 """
 varying_markers(VIn::Type) =
     Tuple(Metal.Varying{n, fieldtype(VIn, n)} for n in fieldnames(VIn))
@@ -602,67 +464,37 @@ varying_markers(VIn::Type) =
 """
     texture_markers(n) -> Tuple
 
-The parameters a stage that samples `n` bound textures needs: one texture pointer
-and one sampler pointer each, in binding order.
-
-Both are real parameters and not markers in the `Varying` sense, because in AIR a
-texture IS an entry-function parameter — that is the whole reason
-`sample_texture_2d` cannot be a free function on this backend without a lowering.
-See `Metal/src/compiler/texture.jl`.
-
-They come AFTER the varyings, which is where the shipped shaders put them —
-`GPUPass` in CoreDisplay's metallib is `(position, texCoord, texture, buffer,
-texture, sampler, …)`. That order is not cosmetic: with the textures in FRONT of
-the interpolated inputs the Metal compiler service segfaults in
-`AGCLLVMUserFragmentShader::setupShaderInputs`, so a stage that samples anything
-fails to build a pipeline with `XPC_ERROR_CONNECTION_INTERRUPTED` and no
-diagnostic. The buffers stay first either way, which is what keeps their
-`air.location_index` the slot the encoder binds them at.
+Entry parameters for `n` sampled textures: `n` texture pointers, then `n`
+sampler pointers, in binding order (AIR textures are entry parameters). They must
+follow the varyings: textures before the interpolated inputs crash the Metal
+compiler service in `AGCLLVMUserFragmentShader::setupShaderInputs`
+(`XPC_ERROR_CONNECTION_INTERRUPTED` at pipeline creation).
 """
 texture_markers(n::Integer) =
     (ntuple(_ -> Metal.Texture2DPtr{Float32}, n)..., ntuple(_ -> Metal.SamplerPtr, n)...)
 
 """
-What the fragment stage reads, as a `NamedTuple` type.
-
-`Mantle.fragmentinputtype` answers it, because which stage feeds the rasteriser
-depends on which stages the pipeline HAS — the geometry stage when there is one,
-the vertex stage otherwise. An empty tuple is a real answer, not a missing one:
-a vertex stage that outputs only its clip position is a real pipeline and a
-shadow pass is exactly that.
-
-A `MeshPipeline` too: its fragment stage is compiled with the same wrapper and
-the same leading varyings, fed by the mesh stage instead.
+The fragment stage's varyings as a `NamedTuple` type (`Mantle.fragmentinputtype`),
+for graphics and mesh pipelines. May be empty, e.g. for a shadow pass.
 """
 varying_type(p::Union{Mantle.GraphicsPipeline,Mantle.MeshPipeline}) = Mantle.fragmentinputtype(p)
 
 """
     stage_signatures(p, ncolor, vert_bufs, frag_bufs) -> (vfn, ffn, vert_tt, frag_tt)
 
-The two callables to compile and the Julia signature for each.
-
-Both stages are ALWAYS wrapped. The portable contract is that a shader returns
-its outputs and reads its varyings as a NamedTuple, and the pointer form this
-backend compiles is an implementation detail of AIR — a caller who had to know
-which spelling a backend wanted would be writing two shaders.
+The two wrapped stage callables to compile and the Julia signature of each.
+`ffn` and `frag_tt` are `nothing` when there is no colour attachment.
 """
 function stage_signatures(p::Mantle.GraphicsPipeline, ncolor::Int,
                           vert_bufs::Type, frag_bufs::Type; color_formats = nothing)
     VIn  = varying_type(p)
     VOut = stage_output_type(p, Val(:vertex))
     vf = Mantle.stagefunction(p.vertex)
-    # Asked of the method table, here on the host: a body that declares the
-    # leading `VertexIndex` is handed one, and one that does not is untouched. The
-    # two spellings are the same number — see `KernelInterface.VertexIndex` — and
-    # a shader that has both runs natively through this and lowers onto a mesh
-    # stage through `lower_geometry_to_mesh`.
+    # A body declaring a leading `VertexIndex` is handed one.
     vid = KI.wantsvertexindex(vf, fieldtypes(bodytypes(vert_bufs)))
     vfn = MetalVertexStage{typeof(vf), VOut, vid}()
     vert_tt = Tuple{vert_bufs.parameters..., StageOut{VOut}}
-    # No colour attachment means no fragment stage at all — a shadow pass writes
-    # depth and nothing else, and its `fragment` returns `nothing`. Metal spells
-    # that as a pipeline with a nil `fragmentFunction`; compiling a stage that
-    # returns an EMPTY struct instead is not a thing AIR has.
+    # No colour attachment: a nil `fragmentFunction`; AIR has no empty output struct.
     ncolor == 0 && return vfn, nothing, vert_tt, nothing
     FOut = color_formats === nothing ? stage_output_type(p, Val(:fragment), ncolor) :
         fragment_output_type(color_formats)
@@ -678,25 +510,16 @@ end
 
 Compile a portable `GraphicsPipeline` into a Metal render pipeline state.
 
-`vert_bufs`/`frag_bufs` are Tuple types of the stage's BUFFER arguments only.
-Everything else about the signature — the varying inputs, the output pointer —
-follows from the pipeline, so there is one place that decides it.
-
-Cached on the shader pair, those argument types and the state, because
-everything in that list is baked into the compiled object and nothing else is.
+`vert_bufs`/`frag_bufs` are Tuple types of each stage's buffer arguments only;
+the rest of the signature follows from the pipeline. Cached on the compiled
+stages, the formats and the pipeline state.
 """
 function compile_pipeline(d::MetalDevice, p::Mantle.GraphicsPipeline,
                           color_formats::Vector{MTLm.MTLPixelFormat},
                           depth_format::Union{Nothing,MTLm.MTLPixelFormat},
                           vert_bufs::Type, frag_bufs::Type)
-    # Asked through the capability, not asserted here, so a caller can ask
-    # `supports_geometry_stage(backend)` BEFORE building a pipeline instead of
-    # compiling one and reading the error.
-    #
-    # A geometry pipeline does not normally reach this function at all:
-    # `compile_draw` dispatches one onto the mesh path (`metal/mesh.jl`), which
-    # lowers it. This is the direct entry point, and it compiles a NATIVE stage
-    # per stage — which is the one thing this backend has no program kind for.
+    # Geometry pipelines normally go through `compile_draw`, which lowers them
+    # onto a mesh pipeline (`metal/mesh.jl`); this compiles native stages only.
     be = Metal.MetalBackend()
     p.geometry === nothing || Mantle.supports_geometry_stage(be) ||
         error("`compile_pipeline` compiles each stage of the pipeline as itself, " *
@@ -731,8 +554,7 @@ function compile_pipeline(d::MetalDevice, p::Mantle.GraphicsPipeline,
         desc = MTLm.MTLRenderPipelineDescriptor()
         desc.vertexFunction = vfun
         ffun === nothing || (desc.fragmentFunction = ffun)
-        # One descriptor slot per attachment, in the order the pass declared them,
-        # which is the order `air.render_target <i>` numbers the fragment's outputs.
+        # Attachments in pass order, matching `air.render_target <i>`.
         Mantle.checkdepthtarget(p.depth, depth_format !== nothing)
         apply_attachments!(desc, color_formats, depth_format, p.blend)
         state = MTLm.MTLRenderPipelineState(dev, desc)
@@ -746,11 +568,9 @@ function compile_pipeline(d::MetalDevice, p::Mantle.GraphicsPipeline,
 end
 
 """
-The Metal stage functions compiled from one Julia function at one point in its
-history, by `(device, stage, name)`. GPUCompiler holds them against the function's
-`CodeInstance` (`cached_results`), so an edit to the function or to anything
-inlined into it (Revise) compiles the stage again, where a cache keyed on the
-pipeline description drew its first compile for the rest of the session.
+Stage functions compiled from one `CodeInstance` of a Julia function, by
+`(device, stage, name)`. Held in GPUCompiler's `cached_results`, so editing the
+function or anything inlined into it compiles the stage again.
 """
 mutable struct MetalStages
     stages::Dict{Any,Tuple{Any,Any}}
@@ -758,10 +578,8 @@ mutable struct MetalStages
 end
 
 """
-`name` with every character an identifier cannot hold replaced by `_`: what an
-entry point is called once it reaches a metallib, and so what it has to be asked
-for by. An anonymous shader is `#332`, which the compiler spells `_332`, so the
-library was asked for a `#332_fs` it did not have.
+`name` with every non-identifier character replaced by `_`, which is how the
+entry point is named in the metallib (`#332` becomes `_332`).
 """
 identifier(name::AbstractString) =
     map(c -> (isletter(c) || isdigit(c) || c == '_') ? c : '_', String(name))
@@ -772,21 +590,14 @@ stagename(f, suffix::AbstractString) = identifier(string(nameof(f))) * suffix
 """
     compile_stage_function(device, f, tt, stage, name) -> (MTLFunction, MTLLibrary)
 
-Compile one Julia shader into a Metal stage function, or hand back the one
-compiled from the code `f` has now.
-
-The library is handed back, not discarded: an `MTLFunction` does not keep it
-alive, and a released library takes the pipeline's shaders with it — which shows
-up as a render that draws nothing rather than as an error.
+Compile one Julia shader into a Metal stage function, cached per `CodeInstance`.
+The caller must keep the library: an `MTLFunction` does not keep it alive, and a
+released library makes the pipeline draw nothing.
 """
 function compile_stage_function(dev::MTLm.MTLDevice, f, tt::Type, stage::Symbol, name::String)
-    # `always_inline`: a stage binds its textures and samplers as ENTRY parameters
-    # (Metal's `lower_texture_bindings!`), so every call that samples has to be
-    # inlined into the entry. The optimiser does not promise that: RayMakie's
-    # textured mesh fragment, grown by per-instance placement, stayed out of line
-    # and the compile refused it ("a texture binding is named from
-    # `julia_mesh_fragment_textured_…`, which is not the stage entry"). Lava
-    # forces the same for every Vulkan graphics stage (`force_inline_all`).
+    # `always_inline`: textures and samplers are entry parameters
+    # (`lower_texture_bindings!`), so every sampling call must be inlined into the
+    # entry; the optimiser alone does not guarantee it.
     cfg = Metal.compiler_config(dev; stage, name, always_inline = true)
     job = Metal.GPUCompiler.CompilerJob(Metal.methodinstance(typeof(f), tt), cfg)
     key = (dev, stage, name)
@@ -803,65 +614,33 @@ function compile_stage_function(dev::MTLm.MTLDevice, f, tt::Type, stage::Symbol,
     return compiled
 end
 
-# ── drawing ──────────────────────────────────────────────────────────────────
+# `draw!` is core's (`graphics/record.jl`), over `compile_draw` and `record_draw!`.
 
-# `draw!` is CORE's, in `src/graphics/record.jl`. This backend used to shadow it
-# with a method of its own taking `buffers=`/`frag_buffers=` and explicit
-# `vert_tt`/`frag_tt`, which meant the "portable entry point" its docstring
-# claimed to be was portable in name only -- a caller spelled the same draw two
-# ways depending on the backend. Core builds on `compile_draw`, `pass!` and
-# `record_draw!`, all of which this backend already answers, and infers the
-# shader argument types from the arrays it is handed rather than being told.
-
-
-# ── How this backend submits ─────────────────────────────────────────────────
-#
-# **One queue, shared with compute**, and one command buffer PER CALL: a
-# render pass, a copy, a present, a readback each open their own, and commit
-# it before the call that opened it returns.
-#
-# The queue first, because it is a correctness matter. A second queue of its own
-# is what this had, and it quietly threw away the ordering the graph had just
-# computed: two Metal queues have NO order between them, so a shadow pass
-# reading the draw count a compute pass wrote read whatever was in the buffer —
-# and an indirect draw whose count is uninitialised memory does not fail, it
-# asks the GPU for four billion vertices. The frame hung in
-# `waitUntilCompleted` with the process at 0% CPU. Command buffers on ONE queue
-# run in COMMIT order, which is exactly the ordering Mantle's barrier phase
-# established.
-#
-# One buffer per call, because the alternative is an open one, and what is open
-# depends on every call since it was opened and cannot be scheduled around. A
-# submission costs more than the drawing in it (`bench/showcase.jl`'s frame is
-# 5 ms of GPU work and ten times that when every pass commits), so the per-pass
-# submissions this costs are the same regression the Vulkan side accepts for
-# its ad hoc launches; batching is the graph's job, not the queue's.
-#
-# What stays is the flush of Metal.jl's OWN batched compute before one of our
-# buffers is created: Metal.jl accumulates KA dispatches in a command buffer of
-# its own, and if one is open, ours has to go behind it.
+# Submission: render passes, copies, presents and readbacks share the compute
+# queue and each opens one command buffer, committed before the call returns.
+# Command buffers on one queue run in commit order, which is the order the
+# graph's barrier phase assumes; two queues have no mutual order (an indirect
+# draw then read an unwritten count and hung the GPU). Metal.jl's open compute
+# batch is flushed first so ours runs behind it.
 
 """
-A fresh command buffer for this backend's own work, behind whatever compute
-Metal.jl has batched and not yet committed.
+    framebuffer!(dev) -> MTLCommandBuffer
+
+A fresh command buffer on the device's queue, behind the compute Metal.jl has
+batched and not committed. Given a raw `MTLDevice`, uses the cached
+`Device(MetalAPI())`.
 """
-# `draw!` takes a KernelAbstractions backend and so has only the raw `MTLDevice`.
-# The Mantle device for it is the process one — `Device(MetalAPI())` is cached and
-# is the same object the graph is running on.
 framebuffer!(::MTLm.MTLDevice) = framebuffer!(Device(MetalAPI()))
 
 function framebuffer!(d::MetalDevice)
     bq = batchqueue(d)
-    # Compute was recorded since our last buffer. Theirs first, then ours.
     Metal.has_open_batch(bq) && Metal.flush!(bq)
     return MTLm.MTLCommandBuffer(bq.queue)
 end
 
-"""Commit a command buffer this backend opened. Every caller of `framebuffer!`
-ends with this or with `submitwait!`.
-
-Through `Metal.submit_command_buffer`, which commits Metal.jl's open batch first and
-claims the arrays the passes bound (`metal_buffer`) for this queue, so host reads of
+"""Commit a command buffer from `framebuffer!`; every caller ends with this or
+`submitwait!`. `Metal.submit_command_buffer` commits Metal.jl's open batch first
+and claims the bound arrays (`metal_buffer`) for this queue, so host reads of
 them wait for this buffer."""
 function commit!(cb::MTLm.MTLCommandBuffer)
     Metal.submit_command_buffer(() -> MTLm.commit!(cb), cb, true)
@@ -869,45 +648,24 @@ function commit!(cb::MTLm.MTLCommandBuffer)
     return cb
 end
 
-"""Commit and wait — the only way to read bytes back."""
+"""Commit and wait; required before reading bytes back."""
 function submitwait!(cb::MTLm.MTLCommandBuffer)
     commit!(cb)
     MTLm.wait_completed(cb)
     return nothing
 end
 
-# ── Per-pass GPU time ────────────────────────────────────────────────────────
-#
-# A `MTLCommandBuffer` reports `GPUStartTime` and `GPUEndTime` once it has run,
-# in seconds. That is a whole profiler with no counter sample buffers and no
-# `MTLCounterSet` — but it is per COMMAND BUFFER, so attributing it to a pass
-# means one buffer per pass, which means submitting and waiting at every pass
-# boundary. `gpupasstime!` does exactly that, and only while profiling.
-#
-# The buffers this backend commits itself (render, copy, present) are collected
-# here as they go; the compute passes are in Metal.jl's batched queue, whose
-# open buffer is picked up the same way just before it is flushed.
-
+# Per-pass GPU time from each command buffer's `GPUStartTime`/`GPUEndTime`
+# (seconds). Committed buffers are collected while profiling and drained by
+# `gpupasstime!`, which submits and waits at every pass boundary.
 const COMMITTED = MTLm.MTLCommandBuffer[]
 
-# Armed by `makeprofiler`, and off otherwise. Collecting unconditionally is a
-# LEAK: `gpupasstime!` is the only thing that drains this, and it is only called
-# while profiling — so an ordinary frame loop pushed ~8 command buffers per
-# frame and never let one go. Holding them alive stops Metal recycling them, and
-# the frame time climbed with the frame count: 532 ms over the first fifty and
-# 1040 ms over the next fifty, for a frame whose GPU work is 5 ms.
+# Set by `makeprofiler`. Held command buffers are not recycled by Metal, so
+# collecting without a drain makes frame time grow with frame count.
 const COLLECT = Ref(false)
 
-# How many command buffers may be held before the oldest is let go.
-#
-# A BOUND rather than trust, because arming is per DEVICE and draining is per
-# profiled PLAN: two plans on one device, one of them profiled, and the
-# unprofiled one's buffers pile up with nothing to drain them. Unbounded that is
-# a leak — holding command buffers alive stops Metal recycling them, and the
-# frame time climbs with the frame count until it is ten times what it should
-# be. Bounded it is at worst a wrong number for a pass nobody is measuring.
-#
-# A frame commits under ten, so a profiled run never reaches this.
+# Collection is process-wide but draining is per profiled plan, so an unprofiled
+# plan's buffers are capped here. A frame commits fewer than ten.
 const COMMITTED_MAX = 64
 
 """Remember a command buffer so a profiled run can ask what it cost."""
@@ -919,14 +677,9 @@ function committed!(cb)
 end
 
 """
-Arm per-pass GPU collection along with the host profiler.
-
-The plan is what knows whether it is profiled, and this is where the backend
-finds out. Armed for the DEVICE rather than the plan: two plans on one device
-share the queue, so an unprofiled one's buffers are collected too and drained by
-the profiled one's next pass. That skews the profiled numbers upward by whatever
-the other plan submitted, which is the honest cost of measuring one of two plans
-running together.
+Enable per-pass GPU collection with the host profiler when `profile`. Collection
+is process-wide, so another plan's buffers on the same queue are counted into the
+profiled plan's next pass.
 """
 function Mantle.makeprofiler(dev::MetalDevice, passes, profile::Bool)
     profile || return nothing
@@ -935,23 +688,14 @@ function Mantle.makeprofiler(dev::MetalDevice, passes, profile::Bool)
 end
 
 """
-Nanoseconds of GPU time for everything recorded since the last call.
-
-Submits and WAITS, which is what makes the number per-pass and what makes a
-profiled frame slower than a real one. A buffer that never reached the GPU
-reports zeros for both ends, and contributes nothing rather than a negative.
-
-`0.0` when nothing was committed since the last call: in a walked run that is a
-pass that gave the GPU no work, and zero is what it cost. A RECORDED pass never
-asks, because at `record!` nothing runs; see `profiled!` for `MetalRecorder`.
+Nanoseconds of GPU time for everything committed since the last call; `0.0` if
+nothing was. Flushes and waits. Buffers that never ran contribute nothing.
+Recorded passes do not call this (`profiled!`).
 """
 function Mantle.gpupasstime!(d::MetalDevice)
     bq = batchqueue(d)
-    # Every buffer this backend opened for the pass has been committed by the
-    # call that opened it; Metal.jl's batch may still be open and is picked up
-    # here, so the numbers describe the frame as it ran.
-    # A managed wrapper with a reference of its own: the batch's buffer is borrowed,
-    # and the batch gives its reference back when the flush below commits it.
+    # Metal.jl's open batch counts too. Retained, because the batch releases its
+    # borrowed reference when the flush commits it.
     open_cb = bq.backend.cmdbuf
     open_cb === nothing || push!(COMMITTED, MTLm.retained(open_cb))
     Metal.flush!(bq)
@@ -969,43 +713,15 @@ end
 """
     readback_framebuffer(fb) -> Matrix{<:Colorant}
 
-The colour attachment on the host: `width` x `height`, one COLORANT per pixel --
-`eltypeof(fb.color_format)`, the same element type the Vulkan side returns, so
-`p.r` and `p.b` name the channels on either backend.
-
-The colorant is also what carries the channel ORDER: a `BGRA{N0f8}` attachment
-comes back as `BGRA{N0f8}`, and `p.r` picks the third slot because the type says
-so. Returning a bare `NTuple{4,T}` made that the caller's problem and silently
-the wrong way round for half the formats.
-
-Through `getBytes!` rather than shared memory: a render target cannot be a
-buffer-backed linear texture on an Apple GPU.
-
-The SHAPE is the contract and not this backend's convenience. It returned a
-`4 x width x height` `Array{UInt8,3}` while the Vulkan side returned exactly the
-matrix above, so `pixels[col, row]` — the one caller, RayMakie's compositor —
-read a `BoundsError` here and four correct bytes there. A hook whose two
-implementations disagree about the shape of their answer is the thing this
-package exists to remove; the divergence only surfaced once a Mac composited an
-overlay at all.
+The colour attachment as a `width` x `height` matrix of
+`eltypeof(fb.color_format)`, the same colorant and shape as on Vulkan; the
+colorant carries the channel order. Waits for outstanding GPU work, then reads
+with `getBytes!`.
 """
 function Mantle.readback_framebuffer(fb::MetalFramebuffer)
-    # WAITS, because `readback_framebuffer`'s contract says it does: "there is no
-    # way to read pixels the device has not finished writing, so unlike the rest
-    # of the frame loop this one waits."
-    #
-    # It did not, and `getBytes!` is a HOST copy out of the texture — it does not
-    # join the queue and it does not block on it. So a readback taken straight
-    # after a pass read whatever the texture held, which for a freshly created
-    # one is zeros. It is a race, so it passed for a long time: RayMakie's
-    # compositor happens to synchronise elsewhere in the frame and the window is
-    # narrow. `blit!` followed immediately by a readback loses it every time, and
-    # the whole composited image came back transparent black.
+    # `getBytes!` is a host copy that does not wait for the queue.
     Metal.synchronize()
-    # Allocated as the COLORANT and read into directly: a `RGBA{Float32}` is
-    # four `Float32`s and a `BGRA{N0f8}` four bytes, laid out exactly as the
-    # texture has them, so there is nothing to convert -- and nothing left for a
-    # caller to get wrong.
+    # The colorant's layout matches the texel's, so bytes are read directly.
     px = Matrix{eltypeof(fb.color_format)}(undef, fb.width, fb.height)
     GC.@preserve px MTLm.getBytes!(pointer(px), fb.color, fb.width * sizeof(eltype(px)),
                                    MTLm.MTLRegion(MTLm.MTLOrigin(0, 0, 0),
@@ -1013,62 +729,33 @@ function Mantle.readback_framebuffer(fb::MetalFramebuffer)
     return px
 end
 
-# Metal.jl compiles graphics stages now, so the capability answer changes. It
-# said `false` in `device.jl` because there was no vertex or fragment program to
-# be had, not because Metal cannot rasterise.
 supports_graphics(::Metal.MetalBackend) = true
 supports_graphics(::MetalDevice) = true
 
-# ── the graph's render-pass verbs ────────────────────────────────────────────
-#
-# Mantle's `runrenderpass!` decides which pass runs, over which attachments and
-# with which draws; these four only do as they are told. Declared in
-# `graphics/commands.jl`.
+# The render-pass verbs declared in `graphics/commands.jl`, driven by core's
+# `runrenderpass!`.
 
-"""What Mantle hands `record_draw!` and `end_render_pass!` back."""
+"""What `begin_render_pass!` returns and `record_draw!`/`end_render_pass!` take."""
 struct MetalPassHandle
     cmdbuf::MTLm.MTLCommandBuffer
     encoder::MTLm.MTLRenderCommandEncoder
 end
 
-# ── The argument ABI a graph draw uses ───────────────────────────────────────
-#
-# The SAME one a kernel launch uses, and deliberately: `mtlconvert` turns an
-# `MtlArray` into a `MtlDeviceArray` — a struct of a GPU address and the
-# dimensions — and `set_argument!` binds that struct's BYTES to the slot. A
-# shader reached through the graph therefore sees exactly what a hand-launched
-# kernel's does, which is what lets one shader source compile on both backends:
-# Lava's device arrays carry their length too, and a shader written against
-# `length(buf)` or a bounds-checked index would not survive a raw pointer here.
-#
-# The conversion is done ONCE, at bake time, for the reason the KA dispatch path
-# bakes its arguments: `mtlconvert` without an encoder makes the buffer
-# persistently resident, and that commit is a setup cost, not a per-frame one.
+# Draw arguments use the kernel-launch ABI: `mtlconvert` turns an `MtlArray`
+# into an `MtlDeviceArray` (address plus dimensions) whose bytes are bound, so
+# shaders can use `length` and bounds checks as on Vulkan.
 
 """
-The device-side form of one stage's arguments, plus the buffers behind them.
-
-The buffers are kept because a `MtlDeviceArray` is only an ADDRESS once
-converted, and an address the render encoder was never told about is not
-resident — Metal reads it as zeros rather than faulting. `record_draw!` hands
-each one to `use!`.
-
-Everything is converted once here, because `mtlconvert` on a buffer also makes
-it persistently resident and that is a setup cost. `refuserefs` refuses a `Ref`
-at the declaration, and a value that changes between frames is a `GPURef`.
+The device-side form of one stage's arguments, plus the buffers behind them,
+which `record_draw!` passes to `use!`: a non-resident address reads as zeros.
+A value that changes between frames must be a `GPURef` (`refuserefs`).
 """
 mutable struct StageArgs
-    # What this was baked FROM, for the identity check in `rebake!`. A plan that
-    # never rebinds hands back the same tuple every frame, so the bake happens
-    # once and this field is what says so.
-    source::Tuple
+    source::Tuple      # the arguments last baked from
     device::Tuple      # what gets bound, byte for byte
     buffers::Vector{MTLm.MTLBuffer}
-    # Scratch the argument bytes are staged in on their way to the encoder.
-    # `setVertexBytes` takes a POINTER, and the only way to point at a Julia
-    # value is to put it somewhere addressable. A fresh `Base.RefValue` per
-    # argument per draw per frame is 145 KB and 811 allocations a frame; one
-    # buffer per stage, reused, is the same bytes.
+    # Reused staging for `setVertexBytes`, which takes a pointer; avoids a `Ref`
+    # per argument per draw.
     scratch::Vector{UInt8}
 end
 
@@ -1088,39 +775,18 @@ function StageArgs(args)
     return StageArgs(t, d, bufs, Vector{UInt8}(undef, scratchsize(d)))
 end
 
-# The widest argument decides it; a rebake can only widen, never narrow, because
-# `rebind!` refuses a tuple of different types.
+# The widest argument; `rebake!` only ever grows the scratch.
 scratchsize(d::Tuple) = isempty(d) ? 0 : maximum(sizeof(typeof(x)) for x in d)
 
 """
-Re-bake `a` from `args`.
-
-A plan's arguments DO change between frames: a [`Mantle.DrawBinding`](@ref) is
-a plan's way of saying which of its values are re-read each frame. Binding what
-was baked at compile and ignoring the arguments `record_draw!` is handed turns a
-rebind into a silent no-op: the plan is correctly reused, the draw correctly
-recorded, and the picture is last frame's. A zoomed axis whose scatter does not
-move.
-
-UNCONDITIONAL, and that is the point. It was guarded by `===` on the tuple the
-bake came from, which assumed that the same Julia objects mean the same device
-addresses. They do not: `resize!` on a `MtlVector` keeps the object and
-reallocates the `MTLBuffer` under it, so the guard said "nothing changed" and
-the encoder kept a pointer into freed storage.
-
-It showed up as tick labels that would not update. Every link in the chain was
-correct — the render object, the rebound cell, the count, even the contents of
-the buffer on the GPU — and the draw read the address the buffer used to have.
-A cached device pointer is not a property of an object's identity, so there is
-nothing cheap to compare here and the bake is simply done. It is 32 to 80 bytes
-an argument; the guard was saving that and costing correctness.
+Re-bake `a` from this frame's `args` (a [`Mantle.DrawBinding`](@ref) can change
+them). Unconditional: the same Julia object can have a new device address, since
+`resize!` on an `MtlVector` reallocates its `MTLBuffer`.
 """
 rebake!(a::StageArgs, args) = rebake!(a, Tuple(args))
 
-# The bake runs on a CONCRETE tuple and everything derived from it is computed
-# before anything is stored. `StageArgs.device` and `.source` are declared
-# `::Tuple`, so reading either one back mid-bake makes `map`, `maximum` and the
-# buffer scan dynamic — 147 KB a frame against 10, for the same work.
+# Everything is computed from the concrete `t` before storing: reading back the
+# `::Tuple` fields mid-bake would make the work dynamic and allocate.
 function rebake!(a::StageArgs, t::T) where {T<:Tuple}
     d = packargs(map(bakearg, t))
     n = scratchsize(d)
@@ -1133,13 +799,8 @@ function rebake!(a::StageArgs, t::T) where {T<:Tuple}
 end
 
 """
-Push every argument that HAS a device buffer onto `bufs`, unrolled.
-
-The same trap `bindall!` is unrolled for, one function along: iterating a
-heterogeneous tuple boxes each element, and this loop ran over every argument of
-every stage of every draw — 617 boxes and 117 KB a frame. `@generated` writes
-out the indices, so each `t[i]` is a typed field read and `metal_buffer` is
-resolved statically.
+Push the device buffer of every argument that has one onto `bufs`. Unrolled,
+like `bindall!`: iterating a heterogeneous tuple boxes each element.
 """
 @generated function collectbuffers!(bufs, t::T) where {T<:Tuple}
     Expr(:block, Expr(:meta, :inline),
@@ -1158,18 +819,15 @@ end
 """The Tuple type of one stage's device-side arguments."""
 buffer_types(a::StageArgs) = Tuple{map(argdevtype, a.device)...}
 
-# `bindings` is accepted and ignored: a texture is bound to an argument slot
-# here, so a pipeline that samples is compiled no differently. Vulkan builds its
-# pipeline layout around the descriptor set layout and needs it at compile.
+# `bindings` is ignored: textures bind to encoder slots, so they do not affect
+# pipeline compilation (Vulkan needs the layout at compile).
 function Mantle.compile_draw(d::MetalDevice, p::Mantle.GraphicsPipeline,
                              color_formats, depth_format, vert_args, frag_args;
                              bindings = nothing)
     cfmts = MTLm.MTLPixelFormat[mtlformat(T) for T in color_formats]
     vert = StageArgs(vert_args)
     frag = StageArgs(frag_args)
-    # Through `mtlformat`, not a hardcoded `Depth32Float`: a pipeline compiled
-    # for a format the attachment does not have is rejected at draw time, and
-    # the attachment's format comes from its element type like every other.
+    # Through `mtlformat`, so the pipeline matches the attachment's format.
     dfmt = depth_format === nothing ? nothing : mtlformat(depth_format)
     pipeline = compile_pipeline(d, p, cfmts, dfmt, buffer_types(vert), buffer_types(frag))
     return MetalCompiledDraw(pipeline, vert, frag)
@@ -1200,12 +858,9 @@ function Mantle.begin_render_pass!(d::MetalDevice, targets, loads, depth, depth_
 end
 
 """
-Bind one stage's baked arguments.
-
-`setBytes:` rather than `setBuffer:`, because what a stage takes is the
-`MtlDeviceArray` STRUCT — an address plus the dimensions — and not the data. The
-data is reached through the address, which is why every buffer behind an
-argument is made resident first.
+Bind one stage's baked arguments with `setBytes:` (a stage takes the
+`MtlDeviceArray` struct, not the data), after making every buffer behind them
+resident.
 """
 function bind_stage!(enc, a::StageArgs, setbytes!, stage::MTLm.MTLRenderStages)
     for b in a.buffers
@@ -1216,14 +871,9 @@ function bind_stage!(enc, a::StageArgs, setbytes!, stage::MTLm.MTLRenderStages)
 end
 
 """
-Bind every argument of a stage, unrolled.
-
-`StageArgs.device` is declared `::Tuple`, so iterating it boxes each element on
-its way to `bind_arg!` — 811 boxes and 145 KB a frame on a figure with an axis.
-ONE dynamic dispatch lands here, on the tuple's concrete type; everything after
-it is static, because `@generated` writes out the indices and each `d[i]` is
-then a typed field read.
-
+Bind every argument of a stage. Unrolled by `@generated`: iterating the
+`::Tuple` field would box each element; here one dynamic dispatch lands on the
+concrete tuple type and the rest is static.
 """
 @generated function bindall!(setbytes!, enc, d::D, scratch) where {D<:Tuple}
     Expr(:block, Expr(:meta, :inline),
@@ -1231,13 +881,8 @@ then a typed field read.
          :(return nothing))
 end
 
-# One call per argument, so the byte copy itself is concrete: `T` is the
-# argument's own type here, which is what makes `sizeof` and the store static.
-#
-# Into the stage's `scratch` rather than a fresh `Ref`: the encoder copies these
-# bytes out before the call returns — that is what `setVertexBytes` IS, the path
-# for data too small to deserve a buffer — so one reused staging area is enough
-# and nothing has to outlive the store.
+# Staged in the stage's `scratch`: `setVertexBytes` copies the bytes before it
+# returns, so one reused area suffices.
 function bind_arg!(setbytes!, enc, arg::T, i::Int, scratch::Vector{UInt8}) where {T}
     GC.@preserve scratch begin
         ptr = Base.unsafe_convert(Ptr{T}, pointer(scratch))
@@ -1249,10 +894,8 @@ end
 
 function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledDraw, args, count;
                              instances::Integer = 1, indices = nothing)
-    # `args` is what Mantle resolved for THIS frame. A stage compiled with a
-    # non-empty list re-bakes from it — see `rebake!`, which is a no-op unless
-    # the tuple actually changed — and a stage compiled with none has nothing to
-    # take from it. Core packs ONE list, so the non-empty stages share it.
+    # `args` is this frame's resolved list, shared by both stages; a stage with
+    # arguments re-bakes from it every draw (`rebake!`).
     isempty(d.vert.device) || rebake!(d.vert, args)
     isempty(d.frag.device) || rebake!(d.frag, args)
     c = d.pipeline
@@ -1260,16 +903,11 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledDraw, args, cou
     c.depth_state === nothing ||
         MTLm.set_depth_stencil_state!(h.encoder, c.depth_state)
     MTLm.set_cull_mode!(h.encoder, c.cull)
-    # Counter-clockwise is front-facing here, because `flip_clip` mirrors y and
-    # a mirror reverses the handedness of every triangle. Without this, back-face
-    # culling keeps exactly the faces it should drop: the g-buffer shows the far
-    # side of every solid and a shadow map records the depth of the wrong side,
-    # which still LOOKS like a shadow map and still fills, so the only symptom
-    # is the demo's shadow-bias knob having no effect at all.
+    # Counter-clockwise: `flip_clip` mirrors y, reversing every triangle's
+    # winding; otherwise back-face culling drops the front faces.
     MTLm.set_front_facing_winding!(h.encoder, MTLm.MTLWindingCounterClockwise)
     bind_stage!(h.encoder, d.vert, MTLm.set_vertex_bytes!, MTLm.MTLRenderStageVertex)
-    # A depth-only pipeline has no fragment stage, so binding to it is not just
-    # wasted work — Metal rejects a fragment binding on a pipeline that has none.
+    # Metal rejects fragment bindings on a depth-only pipeline.
     c.has_fragment &&
         bind_stage!(h.encoder, d.frag, MTLm.set_fragment_bytes!, MTLm.MTLRenderStageFragment)
     draw_with_count!(h.encoder, c, count, instances, indices)
@@ -1279,34 +917,12 @@ end
 """
     setviewport!(handle, x, y, width, height)
 
-The rectangle the following draws land in, and the scissor derived from it.
-
-A NEGATIVE `height` is Vulkan's way of saying "clip-space +y at the top", and it
-names the BOTTOM edge in `y`: the rect runs from `y + height` up to `y`. Metal
-has no such spelling — this backend mirrors y in the vertex stage instead
-(`flip_clip`, and the matching `MTLWindingCounterClockwise`, see
-`mantle-clip-space-is-vulkans`) — so the flip itself is already paid for. What
-the sign still carries is WHICH EDGE `y` is, and that has to be honoured: it is
-the same rectangle, named from the other side.
-
-Metal takes a negative `MTLViewport.height` and means by it what Vulkan does, so
-the sign is passed straight through and the two conventions meet without a
-special case. Only the SCISSOR is normalised, because a scissor rectangle has no
-orientation.
-
-Taking `abs(height)` and keeping `y` is wrong on both counts. A full-target
-overlay is recorded as `(0, h, w, -h)`, which reaches the encoder as a viewport
-at `y = h` of height `h`: the whole rect one target BELOW the target, a figure
-at the wrong offset and scale with everything above the bottom edge outside it.
-Relocating the rect without keeping the sign is not enough either: it lands in
-the right place and draws upside down, because the mirror in the vertex stage is
-then never undone.
+The viewport for the following draws, and a scissor over the same rectangle.
+A negative `height` (Vulkan's flipped viewport, `y` naming the bottom edge) is
+passed to `MTLViewport` unchanged, which interprets it the same way and undoes
+the vertex stage's `flip_clip`. Only the scissor is normalised.
 """
 function Mantle.setviewport!(h::MetalPassHandle, x::Real, y::Real, w::Real, hgt::Real)
-    # The SIGN goes through untouched: it is the only thing that can undo the mirror
-    # the vertex stage applies, and a caller asking for a negative height is asking
-    # for exactly that. The scissor is the same rectangle written the ordinary way
-    # round, since a scissor has no orientation to carry.
     top = min(y, y + hgt)
     MTLm.set_viewport!(h.encoder,
         MTLm.MTLViewport(Float64(x), Float64(y), Float64(w), Float64(hgt), 0.0, 1.0))
@@ -1316,30 +932,13 @@ function Mantle.setviewport!(h::MetalPassHandle, x::Real, y::Real, w::Real, hgt:
     return nothing
 end
 
-# What a hand-recorded pass reads off a framebuffer and a window. Both are one
-# field; they are verbs rather than field access so that core never names a
-# backend's struct.
 """
     indexbuffer(::MetalDevice, indices) -> MtlVector{UInt32}
 
-An index buffer on Metal: an ordinary device array.
-
-Overridden rather than left to the core default, which answers a `Mantle.Buffer`
-— a pool region with a length, not an array. Both are drawable, but a caller
-that keeps its index buffer beside its vertex arrays keeps them in one container,
-and the Vulkan side already answers with an array (`alloc_index_buffer`). Two
-backends whose `indexbuffer` return different KINDS of thing is a difference a
-caller has to know about, which is the thing this package exists to remove.
-
-Nothing extra is asked of the allocation: `drawIndexedPrimitives` takes any
-buffer, which is why the usage bits Vulkan needs have no counterpart here.
-
-The STORAGE is the one this backend's pool already declares for buffers, and
-that is the whole reason it is spelled rather than defaulted. `MtlVector` gives
-private storage, into which a host write stages through a temporary shared
-buffer, blits and frees: 122 us for 4096 `Vec3f` against a `memcpy` too fast to
-time. An index buffer is rewritten from the host every time a plot relayouts, so
-that was most of what a zoomed axis cost.
+An index buffer as a device array, as on Vulkan (core's default returns a
+`Mantle.Buffer`). Uses the pool's buffer storage mode: `MtlVector`'s default
+private storage stages every host write through a blit, and index buffers are
+rewritten from the host on every relayout.
 """
 Mantle.indexbuffer(d::MetalDevice, indices::AbstractVector{UInt32}) =
     buffercopy(d, indices)
@@ -1347,19 +946,13 @@ Mantle.indexbuffer(d::MetalDevice, indices::AbstractVector{UInt32}) =
 """
     devicearray(backend, data) -> MtlVector
 
-An array of `data` on Metal, in the storage this backend gives buffers.
-
-The portable fallback is `KernelAbstractions.allocate` plus a copy, which has no
-way to ask for a storage mode and so gets the private default — see
-`indexbuffer` above for what that costs a host write.
+An array of `data` on Metal, in the pool's buffer storage mode rather than the
+private default of `KernelAbstractions.allocate` (see `indexbuffer`).
 """
 Mantle.devicearray(be::Metal.MetalBackend, data::AbstractArray) =
     buffercopy(Mantle.todevice(be), data)
 
-# The storage mode is a TYPE PARAMETER on `MtlArray`, not a keyword — there is no
-# `MtlArray{T}(undef, dims; storage = …)`, and asking for one is a `MethodError`
-# that RayMakie's per-plot error handling turns into a blank figure rather than a
-# stack trace.
+# The storage mode is a type parameter of `MtlArray`, not a keyword.
 function buffercopy(d::MetalDevice, data::AbstractArray{T,N}) where {T,N}
     S = constraintof(d, Buffers(), T)
     a = Metal.MtlArray{T,N,S}(undef, size(data))
@@ -1367,8 +960,7 @@ function buffercopy(d::MetalDevice, data::AbstractArray{T,N}) where {T,N}
     return a
 end
 
-# What a render pass binds, as for a window and a transient: a `MTLTexture` is
-# both the view and the image.
+# A `MTLTexture` is both the view and the image.
 Mantle.target_view(fb::MetalFramebuffer) = fb.color
 Mantle.target_image(fb::MetalFramebuffer) = fb.color
 
@@ -1377,10 +969,8 @@ Mantle.depthimage(fb::MetalFramebuffer) = fb.depth
 
 Mantle.target_extent(fb::MetalFramebuffer) = (fb.width, fb.height)
 Mantle.target_format(fb::MetalFramebuffer) = fb.color_format
-# The ELEMENT type of an attachment format, which is what `blittarget` (core's)
-# reads off a target. `MetalFramebuffer` keeps the MTL format it was created with
-# and not the Julia type behind it, so this is the reverse of `mtlformat` — and
-# only over the formats a blit target can have, because that is the one caller.
+# The inverse of `mtlformat` over a framebuffer's colour formats, for core's
+# `blittarget` and for `readback_framebuffer`.
 
 eltypeof(f::MTLm.MTLPixelFormat) =
     f === MTLm.MTLPixelFormatBGRA8Unorm      ? BGRA{N0f8} :
@@ -1393,9 +983,6 @@ eltypeof(f::MTLm.MTLPixelFormat) =
 
 """
 End the encoder and commit the pass's command buffer.
-
-One buffer per pass, committed here: nothing stays open across the call
-boundary.
 """
 function Mantle.end_render_pass!(h::MetalPassHandle)
     MTLm.endEncoding!(h.encoder)
@@ -1403,11 +990,13 @@ function Mantle.end_render_pass!(h::MetalPassHandle)
     return nothing
 end
 
-"""A plain count draws directly; a `Commands` buffer draws INDIRECTLY."""
-# `instances` and `indices` reach here from a HAND-RECORDED pass; the graph passes
-# neither. An indexed draw needs the buffer resident for the same reason an
-# indirect one does — the command processor reads it, not a stage, so nothing in
-# the shader names it and the encoder still has to be told.
+"""
+    draw_with_count!(enc, c, n, instances = 1, indices = nothing)
+
+A plain count draws directly; a `Commands` buffer draws indirectly. `instances`
+and `indices` come only from hand-recorded passes. An index buffer is made
+resident explicitly: no shader names it.
+"""
 function draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Integer,
                           instances::Integer = 1, indices = nothing)
     if indices === nothing
@@ -1416,8 +1005,7 @@ function draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Integer,
         ibuf = metal_buffer(indices)
         ibuf === nothing &&
             error("an indexed draw needs a device buffer of indices, got $(typeof(indices))")
-        # `MTLRenderStageVertex` IS an `MTLRenderStages`; the constructor takes
-        # an `Integer`, so wrapping it is a `MethodError`.
+        # Already an `MTLRenderStages`; wrapping it is a `MethodError`.
         MTLm.use!(enc, ibuf, MTLm.ReadUsage, MTLm.MTLRenderStageVertex)
         MTLm.draw_indexed_primitives!(enc, c.primitive, n,
                                       MTLm.MTLIndexTypeUInt32, ibuf,
@@ -1431,23 +1019,15 @@ draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Mantle.Commands,
     draw_indirect_with!(enc, c, n)
 
 function draw_indirect_with!(enc, c::MetalCompiledGraphicsPipeline, n::Mantle.Commands)
-    # The whole point of this form is that the host never learns the count, so
-    # reading it here to call the direct form would defeat it.
+    # The host never reads the count.
     buf = metal_buffer(n.resource)
     buf === nothing && error("a Commands draw needs a device buffer, got $(typeof(n.resource))")
-    # Resident, like every other buffer this pass reaches. It is easy to miss
-    # because nothing in the SHADER names it — the command processor reads it,
-    # not a stage — but the encoder still has to be told, and a
-    # `drawPrimitives:indirectBuffer:` whose buffer was never made resident does
-    # not fail: it reads whatever is mapped, takes the vertex count from it, and
-    # asks the GPU for however many that is. Four billion vertices is a command
-    # buffer that never completes and a frame that hangs in
-    # `waitUntilCompleted` with the process at 0% CPU.
+    # Must be made resident although no shader names it: a non-resident indirect
+    # buffer yields a garbage vertex count and a command buffer that never completes.
     MTLm.use!(enc, buf, MTLm.ReadUsage,
               MTLm.MTLRenderStages(MTLm.MTLRenderStageVertex |
                                    MTLm.MTLRenderStageFragment))
-    # At the resource's own offset: a transient's storage is a view into the
-    # arena, and offset zero is whichever tenant was placed first.
+    # At the resource's offset: transients are views into the arena.
     MTLm.draw_primitives_indirect!(enc, c.primitive, buf, byteoffset(n.resource))
 end
 
@@ -1458,51 +1038,21 @@ metal_texture(t) = error("not something Metal can attach as a render target: $(t
 
 """The `MTLBuffer` behind a draw argument, or `nothing` if it is not one."""
 metal_buffer(x::MTLm.MTLBuffer) = x
-# Through `unsafe_convert`, which also records the array as used by the next command
-# buffer this task submits: `commit!` claims it for the queue, so that a host read of the
-# array (`Array(x)`) waits for the pass. Metal.jl waits per buffer, for the queue that
-# last claimed it, and an unclaimed buffer is read at once. An `MtlArray` may be a VIEW
-# over a pool region — a transient's storage always is — and this is its block's buffer.
+# `unsafe_convert` also marks the array as used by this task's next submission, so
+# `commit!` claims it and a host read waits for the pass. For a view over a pool
+# region this is the block's buffer.
 metal_buffer(x::Metal.MtlArray) = Base.unsafe_convert(MTLm.MTLBuffer, x)
 metal_buffer(@nospecialize(x))  = nothing
 
-# Three answers, and the CLEAR is asked for first.
-#
-# `discards(l)` is the graph's question — "does this pass need what was there?"
-# — and a `Clear` answers YES just as loudly as a `Discard` does, because
-# clearing is one of the two ways not to need it. Asking it first therefore
-# turned every `Clear` into `DontCare`: the attachment kept whatever was in the
-# arena, the geometry drew over it correctly, and only the pixels the geometry
-# missed were wrong. A green-triangle test cannot see that; the clear's ALPHA
-# is what gave it away.
-#
-# So: a clear value means Clear, and only then does `discards` distinguish
-# `Discard` from `Keep`.
-# One method per answer, like the rest of the state translation here, and the
-# CLEAR is a type rather than a predicate — asking `clearvalue` would mean
-# asking a depth op for four floats, which is an error, and asking `depthclear`
-# would mean asking a colour op for one.
+# `Clear` is matched first: `discards` is also true for `Clear`, which would map
+# it to `DontCare`.
 mtl_loadaction(::Mantle.Clear)   = MTLm.MTLLoadActionClear
 mtl_loadaction(l::Mantle.LoadOp) = Mantle.discards(l) ? MTLm.MTLLoadActionDontCare :
                                                         MTLm.MTLLoadActionLoad
 mtl_loadaction(::Nothing) = MTLm.MTLLoadActionDontCare
 
-# ── The shader vocabulary, on this backend ───────────────────────────────────
-#
-# `@device_override`, not a plain definition: `KI.vertex_index()` has a HOST
-# method that errors, and shadowing it would let a host-side call reach a GPU
-# instruction on the CPU. The overlay puts these in Metal's method table, so
-# they apply exactly when this compiler is running — which is the only thing
-# that can decide what a builtin means.
-#
-# Overriding KernelInterface DIRECTLY, where the previous arrangement went
-# through Mantle and a bridge in each backend. Metal.jl can reach
-# KernelInterface; Lava can too; neither can reach the other's runtime. That is
-# the whole reason the names moved.
-
-# What Metal has. Generated from the list so a name added to KernelInterface and
-# missed here is a `MethodError` naming it, rather than a shader that silently
-# reads the wrong builtin.
+# KernelInterface shader builtins as `@device_override`s in Metal's method table;
+# the host methods error and must stay.
 const METAL_BUILTINS = (:vertex_index, :instance_index, :frag_coord_x, :frag_coord_y,
                         :frag_coord_z, :frag_coord_w, :frag_coord_xy)
 
@@ -1511,79 +1061,40 @@ for f in METAL_BUILTINS
 end
 Metal.@device_override KI.frag_coord(dim::Integer = 1) = Metal.frag_coord(dim)
 
-# Screen-space derivatives. `air.dfdx.f32`/`air.dfdy.f32` -- see
-# `Metal/src/device/intrinsics/graphics.jl` for where those names come from.
+# `air.dfdx.f32`/`air.dfdy.f32` (`Metal/src/device/intrinsics/graphics.jl`).
 Metal.@device_override KI.dFdx(v::Float32) = Metal.dfdx(v)
 Metal.@device_override KI.dFdy(v::Float32) = Metal.dfdy(v)
 
-# Throwing a fragment away. `air.discard_fragment` -- same file, same provenance
-# as the derivatives. Returns nothing and does not terminate the shader, which
-# is what `KI.discard`'s contract promises and what MSL does.
+# `air.discard_fragment`: returns and does not terminate the shader, as
+# `KI.discard` specifies.
 Metal.@device_override KI.discard() = Metal.discard_fragment()
 
-# The size of a drawn point, `[[point_size]]`: a trailing field of what the vertex
-# stage returns, which Metal.jl's `stage_return!` appends when the body calls it.
+# `[[point_size]]`, appended to the vertex output by `stage_return!` when called.
 Metal.@device_override KI.set_point_size!(s::Float32) = Metal.set_point_size!(s)
 
-# What Metal does NOT have, and says so rather than leaving a MethodError for a
-# shader compile to find:
-#
-#   `emit_vertex!`,        Metal has no geometry stage at all. Apple's
-#   `end_primitive!`,      replacement is the mesh pipeline, which this backend
-#   `primitive_id_in`      DOES run — a geometry pipeline is lowered onto it by
-#                          `Mantle.lower_geometry_to_mesh`, so these three are
-#                          the leaf of a lowering nothing here reaches.
-#
-# All three are absent from the hardware. `caps` is where a caller asks — see
-# `supports_geometry`.
+# `emit_vertex!`, `end_primitive!` and `primitive_id_in` have no Metal
+# counterpart: Metal has no geometry stage, and `Mantle.lower_geometry_to_mesh`
+# never emits them (`supports_geometry_stage`).
 
-# Sampling a bound texture. The binding is a SLOT and AIR has no global textures,
-# so the texture reaches the intrinsic through a lowering rather than an argument
-# — `Metal/src/compiler/texture.jl` has the whole of why. A stage says how many
-# it samples through `Mantle.FragmentShader`'s `textures`, and that count is what
-# gives the entry its parameters.
+# The binding is a slot; the lowering in `Metal/src/compiler/texture.jl` maps it to
+# an entry parameter. `Mantle.FragmentShader`'s `textures` sets how many exist.
 Metal.@device_override KI.sample_texture_2d(binding::UInt32, u::Float32, v::Float32,
                                             component::UInt32) =
     Metal.sample_texture_2d(binding, u, v, component)
 
-# Metal's clip space is the other one: +y is UP where the portable convention's
-# (Vulkan's) is down.
-#
-# `@device_override`, like the builtins: a plain `KI.clip_y(y::Float32) = -y`
-# here is not an override at all, it REDEFINES the declaring package's method —
-# which an extension may not do, and which would also change the answer on the
-# host, where nothing is being rasterised.
-#
-# The overlay reaches compute as well as graphics: this backend compiles both
-# through the same Metal method table, so a COMPUTE shader reprojecting into a
-# shadow map gets the same transform the rasteriser applied. That symmetry is
-# the bug fixed in September 2026 — the vertex stage mirrored and the shadow
-# lookup did not, which no test saw because a mirrored scene still looks like a
-# scene and its shadow map is mirrored with it.
-#
-# A plain `@overlay`, not `Metal.@device_override`: that one is a
-# `@consistent_overlay`, a promise that the overlay returns what the host method
-# returns, and in exchange Julia folds calls with constant arguments by running
-# the HOST method. This overlay deliberately returns something else, so a mesh
-# stage writing constant positions got `clip_y(-0.9f0) == -0.9f0` and drew upside
-# down.
+# Metal's clip-space +y is up, Vulkan's (the portable one) down. An overlay, not
+# a method redefinition, so the host answer is unchanged; it applies to compute
+# too, so compute reprojection matches the rasteriser. A plain `@overlay`, not
+# `@device_override` (a `@consistent_overlay`): Julia would constant-fold calls
+# with the host method, which returns `y` unchanged.
 Base.Experimental.@overlay Metal.method_table KI.clip_y(y::Float32) = -y
 
 @inline flip_clip(p::Vec4f) = Vec4f(p[1], KI.clip_y(p[2]), p[3], p[4])
 @inline flip_clip(p::NTuple{4,Float32}) = (p[1], KI.clip_y(p[2]), p[3], p[4])
 
-# ── the overlay's texture table ───────────────────────────────────────────────
-#
-# At the END of the file because it names `MetalPassHandle`, which the render-pass
-# verbs below define. A method signature is evaluated where it stands.
-
 """
-The bound texture table on Metal.
-
-Metal has no descriptor set: a texture and its sampler go straight onto the
-encoder, in two separate slot namespaces. So this is the LIST, and
-`use_bindings!` is what puts it there — which is why the two verbs are separate
-in the first place, one to build a set and one to select it.
+The bound texture table on Metal: textures and samplers as lists, since Metal
+has no descriptor set; `use_bindings!` sets them on the encoder.
 """
 struct MetalTextureBindings <: Mantle.TextureBindings
     textures::Vector{MTLm.MTLTexture}
@@ -1592,9 +1103,7 @@ end
 
 Base.length(b::MetalTextureBindings) = length(b.textures)
 
-# On THIS backend's textures, which is what `SampledTexture` carrying its
-# concrete types makes possible: `bind_textures` takes no device argument, so
-# without them the Vulkan method would be the only one that could exist.
+# Dispatches on the texture type, since `bind_textures` takes no device.
 function Mantle.bind_textures(
         textures::Vector{<:Mantle.SampledTexture{<:Any,<:Any,<:MetalTexture2D}})
     isempty(textures) && error("bind_textures: cannot bind an empty texture list")
@@ -1605,10 +1114,8 @@ end
 """
     use_bindings!(emitter, compiled, bindings)
 
-Put `bindings` on the encoder for the next draw.
-
-Slots count from one on Mantle's side and from zero on Metal's; the setters do
-the conversion, as everywhere else in this backend.
+Put `bindings` on the encoder for the next draw. Slots are 1-based; the setters
+convert to Metal's 0-based slots.
 """
 function Mantle.use_bindings!(h::MetalPassHandle, _compiled,
                               b::MetalTextureBindings)

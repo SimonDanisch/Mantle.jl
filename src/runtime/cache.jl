@@ -1,8 +1,8 @@
 mutable struct CachePublication{V}
     ready::Base.Event
     owner::Union{Nothing,Task}
-    # Keep immutable native aggregates boxed once too: an inline Some{V}
-    # can materialize a new aggregate on every hit, like Vector{LaunchPlan}.
+    # `Some{Any}`, not `Some{V}`: boxed once, so a hit does not rebuild an
+    # immutable native aggregate such as a `Vector{LaunchPlan}`.
     value::Union{Nothing,Some{Any}}
     failure::Any
 end
@@ -11,14 +11,11 @@ CachePublication{V}() where {V} = CachePublication{V}(Base.Event(), current_task
 """
     CompilationCache{K,V}()
 
-Core publication of device-owned compiled objects. One producer runs per key;
-unrelated keys can compile concurrently. No map lock is held while compiling,
-allocating or waiting, so GC finalizers remain enabled during native creation.
-Failed publications wake their waiters and are removed, allowing a later retry.
-
-`empty!` detaches pending publications as well as ready ones. Existing callers
-can finish with their publication, but it cannot repopulate the cleared cache.
-This coordinates publication, not idle retention or resource retirement.
+Publishes device-owned compiled objects: one producer per key, unrelated keys
+compile concurrently. No lock is held while building or waiting, so finalizers
+stay enabled during native creation. A failed build wakes its waiters and is
+removed so a later call retries. `empty!` also detaches pending entries: their
+callers still get the value, but it does not repopulate the cache.
 """
 struct CompilationCache{K,V}
     lock::ReentrantLock

@@ -6,8 +6,6 @@ struct BackendProbe
     probe::Any
 end
 
-# API defaults are cached; explicit selections remain independently owned.
-
 """Physical-device index, name, kind and driver, as returned by devices(api)."""
 struct DeviceInfo
     index::Int

@@ -1,43 +1,28 @@
-# The resources a graphics or ray-tracing pipeline is built from.
-#
-# Every type here is Mantle's, and every one of them was the Vulkan backend's
-# until now — `LavaTexture2D`, `LavaSampler`, `LavaFramebuffer`, `HWTLAS`. The
-# names said which backend happened to implement them first, which is not a
-# thing a caller should have to know: Hikari asks for a 2D texture, and on a Mac
-# it should get a Metal one.
-#
-# So each splits in two. The ABSTRACT type is the API and lives here; the
-# CONCRETE type is one backend's and is named for it —
-# `VulkanTexture2D <: Texture2D`, and `MetalTexture2D` beside it later. Nothing
-# downstream names either concrete.
-#
-# Three of these turn out to be portable outright, because all they do is pair
-# things that are now abstract: `SampledTexture`, `WindowTarget` and
-# `OffscreenTarget` are defined here in full, not declared.
-
-# ── Textures and samplers ─────────────────────────────────────────────────────
+# The resources a graphics or ray-tracing pipeline is built from. The abstract
+# type is the API; each backend names its concrete subtype (`VulkanTexture2D <:
+# Texture2D`), and nothing downstream names a concrete type. `SampledTexture`,
+# `WindowTarget` and `OffscreenTarget` only pair abstract types, so they are
+# defined here in full.
 
 """
     Texture{T,N}
 
-An `N`-dimensional image of element type `T`, owned by a device.
-
-Backends subtype [`Texture1D`](@ref) / [`Texture2D`](@ref) rather than this
-directly; this is the type to write when the rank does not matter.
+An `N`-dimensional image of element type `T`, owned by a device. Backends
+subtype [`Texture1D`](@ref) or [`Texture2D`](@ref), not this.
 """
 abstract type Texture{T, N} end
 
 """
     Texture1D{T}
 
-A one-dimensional texture. Backends provide the concrete type — `VulkanTexture1D`.
+A one-dimensional texture; backends provide the concrete type (`VulkanTexture1D`).
 """
 abstract type Texture1D{T} <: Texture{T, 1} end
 
 """
     Texture2D{T}
 
-A two-dimensional texture. Backends provide the concrete type — `VulkanTexture2D`.
+A two-dimensional texture; backends provide the concrete type (`VulkanTexture2D`).
 """
 abstract type Texture2D{T} <: Texture{T, 2} end
 
@@ -51,48 +36,31 @@ function mipmapped end
 """
     Sampler
 
-How a texture is filtered and addressed when a shader reads it.
-
-Filtering, wrap mode and anisotropy are the portable vocabulary; the object a
-driver needs for them is the backend's.
+How a texture is filtered and addressed when a shader reads it. The driver
+object is the backend's.
 """
 abstract type Sampler end
 
 """
     SampledTexture(texture, sampler)
 
-A texture paired with the sampler a shader will read it through.
-
-Defined here rather than declared, and that is the whole payoff of the split
-above: this type does nothing but hold one [`Texture`](@ref) and one
-[`Sampler`](@ref), so once those are the API the pairing is portable and no
-backend needs its own.
-
-Parameterised on the CONCRETE texture and sampler types, and that is
-load-bearing. The fields were `::Texture{T,N}` and `::Sampler` — abstract — which
-meant no backend could dispatch [`bind_textures`](@ref) on its own texture, since
-that function takes no device argument. The Vulkan side worked around it by
-reaching into `textures[1].texture.ctx`: a backend recovering its own concrete
-type out of an abstract field, which is exactly the kind of reach a portable
-struct should make unnecessary. With the types visible each backend dispatches on
-its own and nothing is smuggled.
+A texture paired with the sampler a shader reads it through. Parameterised on the
+concrete texture and sampler types so a backend can dispatch
+[`bind_textures`](@ref), which takes no device argument, on its own texture.
 """
 struct SampledTexture{T, N, TEX<:Texture{T, N}, SAM<:Sampler}
     texture::TEX
     sampler::SAM
 end
 
-# No outer constructor: Julia's generated one already solves `T` and `N` out of
-# `TEX <: Texture{T,N}`. Writing one by hand duplicated that exact signature,
-# which is a method overwrite and blocks precompilation outright.
+# No outer constructor: the default one solves `T` and `N` from `TEX <: Texture{T,N}`,
+# and a hand-written one with that signature overwrites it and breaks precompilation.
 
 """
     TextureBindings
 
-A bound table of [`SampledTexture`](@ref)s a pipeline can index.
-
-Concrete on every backend, because it IS the driver object — a descriptor set on
-Vulkan, an argument buffer on Metal.
+A bound table of [`SampledTexture`](@ref)s a pipeline can index: a descriptor set
+on Vulkan, an argument buffer on Metal.
 """
 abstract type TextureBindings end
 
@@ -106,54 +74,31 @@ function bind_textures end
 """
     upload_texture_data!(texture, data)
 
-Write new pixels into an EXISTING texture.
-
-The portable verb for animating a texture, and the reason it exists rather than
-making a new one: a recorded draw bakes the descriptor set that names the image,
-so replacing the texture leaves the recording pointing at the old one. Writing
-into the image the set already names is what a frame actually sees.
-
-`data` must match the texture's `size` and `eltype` — ask with those before
-calling; a mismatch is a new texture, not an upload.
-
-!!! note
-    Backend implementations **must** implement it for their texture type, along
-    with `Base.size`. `Base.eltype` is answered here, from the type parameter.
+Write new pixels into an existing texture. A recorded draw bakes the descriptor
+set naming the image, so replacing the texture would leave the recording on the
+old one. `data` must match the texture's `size` and `eltype`. Backends implement
+it and `Base.size` for their texture type; `Base.eltype` is answered here.
 """
 function upload_texture_data! end
 
-# The element type IS the abstract type's parameter, so core answers it for every
-# backend. Left to each backend, Metal never did: `eltype` fell back to `Any`,
-# nothing ever "fit", and every animated texture on Metal was rebuilt from
-# scratch each update — new texture, new bindings, new frame plan — which is
-# exactly what `upload_texture_data!` exists to avoid.
+# From the type parameter, for every backend. Without it `eltype` is `Any`, no
+# upload fits, and every update rebuilds the texture, its bindings and the plan.
 Base.eltype(::Texture{T}) where {T} = T
-
-# ── Render targets ────────────────────────────────────────────────────────────
 
 """
     Framebuffer(backend, width, height; depth = true, color_format = …)
 
-Colour and depth attachments a pass renders into, off-screen.
-
-Constructed through the abstract type with a backend as the first argument, so
-a caller names no concrete type: the Vulkan backend answers with a
-`VulkanFramebuffer` and a Metal one will answer with its own. That first
-argument is the reason it is here rather than a bare `Framebuffer(w, h)` —
-without it there is nothing to dispatch on once two backends are loaded.
-
-[`RenderTarget`](@ref) is what a pipeline is pointed at; this is one of the two
-things that can be behind it.
+Colour and depth attachments a pass renders into, off-screen. Constructed through
+the abstract type with a backend as the first argument, which dispatch needs once
+two backends are loaded; each answers with its own (`VulkanFramebuffer`,
+`MetalFramebuffer`).
 """
 abstract type Framebuffer end
 
 """
     WindowTarget(window)
 
-Render into a window's swapchain.
-
-Portable for the same reason [`SampledTexture`](@ref) is: [`Window`](@ref) is
-already the API type, so this wrapper has nothing backend-specific left in it.
+Render into a [`Window`](@ref)'s swapchain.
 """
 struct WindowTarget <: RenderTarget
     window::Window
@@ -168,11 +113,8 @@ struct OffscreenTarget <: RenderTarget
     fb::Framebuffer
 end
 
-# What is behind a target, asked of the target. Core's, because the two wrappers
-# are core's: a backend answers for its own framebuffer and its own window, and
-# neither should have to know that Mantle wraps them before a pass sees them.
-# `pass!` and `blit!` ask a TARGET for its extent, and without these every
-# hand-recorded pass was a `MethodError` on both backends.
+# Core's, because the wrappers are: a backend answers for its own framebuffer and
+# window. `pass!` and `blit!` ask a target for its extent.
 target_extent(t::OffscreenTarget) = target_extent(t.fb)
 target_extent(t::WindowTarget) = target_extent(t.window)
 
@@ -184,17 +126,13 @@ format type, `VK.Format` or `MTLPixelFormat`.
 """
 function eltypeof end
 
-# The element type of a target's colour attachment, which is what a pipeline is
-# compiled against: the format its framebuffer or window was made with, read back
-# as the Julia type it was lowered from. Core's like `target_extent`, and for the
-# same reason; it was one method per backend, the same in both, and a Mac that
-# compiles both trees cannot hold two.
+# The element type a pipeline is compiled against: the target's format read back
+# as the Julia type it was lowered from. In core, since two loaded backends cannot
+# both define it.
 blittarget(t::OffscreenTarget) = eltypeof(target_format(t.fb))
 
-# …and the framebuffer itself, which a graph names as an attachment directly:
-# `attachment_format` asks its `eltype`, and without this a pipeline drawing into
-# a Metal framebuffer was compiled for `Any`. Vulkan's graph path asked the format
-# instead, so only the backend that records through core's walk ever reached it.
+# A graph names a framebuffer as an attachment directly and `attachment_format`
+# asks its `eltype`; without this the pipeline is compiled for `Any`.
 Base.eltype(fb::Framebuffer) = eltypeof(target_format(fb))
 blittarget(t::WindowTarget) = eltypeof(target_format(t.window))
 target_format(t::OffscreenTarget) = target_format(t.fb)
@@ -203,51 +141,30 @@ target_format(t::WindowTarget) = target_format(t.window)
 """
     CompiledGraphicsPipeline
 
-A [`GraphicsPipeline`](@ref) after a backend has compiled it for a target.
-
-The description is portable and the compiled object is not, which is why they
-are two types rather than one with a cache field.
+A [`GraphicsPipeline`](@ref) after a backend has compiled it for a target; the
+description is portable, the compiled object is not.
 """
 abstract type CompiledGraphicsPipeline end
 
-# ── Acceleration structures ───────────────────────────────────────────────────
-
 """
     HWTLAS{Tri}
-
-A top-level acceleration structure: the instances a ray is traced against,
-holding triangles of type `Tri`.
-
-Was `HWTLAS`. Hardware ray tracing is not a Vulkan feature — Metal has
-`MTLAccelerationStructure` and DXR has its own — so the name carries no vendor.
-
-Parameterised on the triangle type because a caller picks it: Hikari pushes
-`Raycore.Triangle{TriangleMeta}` for its per-face data, where the default
-`Triangle{UInt32}` would reject those with a convert error.
-
     HWTLAS{Tri}(backend) -> HWTLAS{Tri}
 
-Constructed through the abstract type with a KernelAbstractions backend, so a
-caller names no concrete type — the Vulkan backend answers with a `VulkanTLAS`
-and Metal with a `MetalTLAS`. Backends implement this constructor.
+A top-level acceleration structure: the instances a ray is traced against,
+holding triangles of type `Tri`, which the caller picks (Hikari uses
+`Raycore.Triangle{TriangleMeta}` for per-face data). Constructed through the
+abstract type with a KernelAbstractions backend; each backend implements the
+constructor (`VulkanTLAS`, `MetalHWTLAS`).
 """
 abstract type HWTLAS{Tri} <: Raycore.AbstractAccel end
 
-# `AccelBuildContext` is a concrete shared struct in `raytracing/accel.jl`:
-# once the submission channel was shared, both of its fields were portable.
-
-# ── Queues and interop ────────────────────────────────────────────────────────
-
-# A submission channel is `SubmitChannel` in `graph/lifetime.jl`, concrete:
-# thirty-one of the forty-one fields a backend implementation would hold are
-# backend-independent scheduling state.
+# `AccelBuildContext` (`raytracing/accel.jl`) and `SubmitChannel`
+# (`graph/lifetime.jl`) are concrete shared structs, so they have no abstract type.
 
 """
     ExternalImage
 
-An image whose memory is shared with another process or API.
-
-The handle type is the backend's — an fd or a Windows handle on Vulkan, an
-`IOSurface` on Metal — so only the concept is declared here.
+An image whose memory is shared with another process or API. The handle type is
+the backend's: an fd or Windows handle on Vulkan, an `IOSurface` on Metal.
 """
 abstract type ExternalImage end

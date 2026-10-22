@@ -1,26 +1,13 @@
-# Fixed-function rasterizer state: blending, culling, depth.
-#
-# These were Lava's, and nothing about them is a compiler's business — the
-# search for uses outside its own `graphics/types.jl` found exactly one hit
-# each, the `export` line. Blending and culling are not shader code; they are
-# state a pipeline is created with, which is Mantle's job on every backend.
-#
-# `Topology` did NOT come here, and the difference is the point: the compiler
-# genuinely dispatches on it, to pick a geometry stage's input execution mode.
-# Two owners means it belongs to neither, so it is `KernelInterface`'s, beside
-# `MatrixShape` and `DeviceCaps`.
-#
-# The state is carried in type parameters rather than fields so a pipeline's
-# configuration is part of its type and dispatch is free — `GraphicsPipeline`
-# is parameterised on all three.
+# Fixed-function rasterizer state: blending, culling, depth. Pipeline creation
+# state, so Mantle's and not the compiler's; `Topology`, which the compiler
+# dispatches on, is `KernelInterface`'s. Carried in type parameters, so a
+# pipeline's configuration is part of its type.
 
 """
     BlendMode
 
-How a fragment's colour combines with what is already in the target.
-
-Backends map these to their own enumerations —
-`VK_BLEND_FACTOR_SRC_ALPHA` and friends on Vulkan, `MTLBlendFactor` on Metal.
+How a fragment's colour combines with what is already in the target. Backends
+map these to `VkBlendFactor` or `MTLBlendFactor`.
 """
 abstract type BlendMode end
 
@@ -37,21 +24,18 @@ struct Additive <: BlendMode end
 struct Premultiplied <: BlendMode end
 
 """
-The fragment writes nothing to this attachment: the target keeps what it holds.
-
-For a draw whose colour should land but whose id should not, as in a
-[`PerAttachment`](@ref) blend. The fragment still tests and writes depth as
-the pipeline's depth mode says.
+The fragment writes nothing to this attachment, such as the id attachment of a
+[`PerAttachment`](@ref) blend whose colour should land. Depth is still tested
+and written as the pipeline's depth mode says.
 """
 struct NoWrite <: BlendMode end
 
 """
     PerAttachment(modes...)
 
-One blend mode per colour attachment, in the order the pass declares them.
-Any other mode applies to every floating-point attachment, and an integer
-attachment (an id) is written unblended; here an integer attachment takes
-`Opaque()` or `NoWrite()`, since ids cannot be blended.
+One blend mode per colour attachment, in pass order. A plain mode applies to
+every floating-point attachment and writes integer (id) attachments unblended;
+here an integer attachment takes `Opaque()` or `NoWrite()`.
 """
 struct PerAttachment{M<:Tuple{Vararg{BlendMode}}} <: BlendMode
     modes::M
@@ -105,13 +89,12 @@ struct DepthLess <: DepthMode end
 struct DepthLessEq <: DepthMode end
 
 """
-Closer or equal wins, without writing depth: for see-through draws (glass, a
-glow) drawn after the opaque ones, which are hidden behind what is solid but
-hide nothing themselves.
+Closer or equal wins, without writing depth: for see-through draws drawn after
+the opaque ones, hidden by what is solid but hiding nothing.
 """
 struct DepthLessEqReadOnly <: DepthMode end
 
-"Farther wins — reversed-Z."
+"Farther wins (reversed-Z)."
 struct DepthGreater <: DepthMode end
 
 "Every fragment passes, and still writes depth."
@@ -123,11 +106,8 @@ struct DepthOff <: DepthMode end
 """
     RenderTarget
 
-What a graphics pipeline renders into.
-
-Also Lava's until now, and also used nowhere in it: what a pipeline draws to is
-the runtime's concern, not the compiler's. The concrete targets belong to a
-backend, since each wraps something a driver owns — a swapchain image, an
-offscreen framebuffer — so they subtype this rather than replacing it.
+What a graphics pipeline renders into. Concrete targets belong to a backend,
+since each wraps a driver-owned image (a swapchain image, an offscreen
+framebuffer).
 """
 abstract type RenderTarget end

@@ -4,8 +4,6 @@
 using GeometryBasics: Vec3f
 using LinearAlgebra: dot, cross
 
-# Transform helpers
-
 """
     transform_point(T::NTuple{12,Float32}, p::Vec3f) -> Vec3f
 
@@ -39,9 +37,6 @@ Apply the transpose of T's linear block to a world-space support direction.
 Despite the name, this is not a general inverse; it equals inverse rotation
 only when the block is orthonormal."""
 @inline function inv_transform_dir(T::NTuple{12,Float32}, d::Vec3f)
-    # Transpose of the 3x3 rotation block.
-    # Row 0 of R is (T[1], T[2], T[3]); column 0 of R^T is the same row, so
-    # inv_dir.x = dot( (T[1],T[5],T[9]), d ) etc.
     Vec3f(
         T[1]*d[1] + T[5]*d[2] + T[9]*d[3],
         T[2]*d[1] + T[6]*d[2] + T[10]*d[3],
@@ -49,14 +44,11 @@ only when the block is orthonormal."""
     )
 end
 
-# Minkowski-difference support
-
 """
     support_AB(A, B, T_A, T_B, dir_world) -> Vec3f
 
-Minkowski-difference support point for (A - B) along `dir_world`.
-Both shapes live in their own local frames; the transforms bring them into
-world space.  The returned point is in world space.
+Minkowski-difference support point for (A - B) along `dir_world`, in world space.
+Both shapes live in their own local frames; the transforms bring them to world.
 """
 @inline support_AB(A::ConvexShape, B::ConvexShape,
                    T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32}, dir_world::Vec3f) =
@@ -73,7 +65,7 @@ world space.  The returned point is in world space.
     return s_A, s_B, s_A - s_B
 end
 
-# Fixed four-point tuple plus active count; newest vertex is at index 1.
+# A simplex is a fixed four-point tuple plus an active count, newest at index 1.
 @inline dot3(a::Vec3f) = dot(a, a)
 
 # Break collinear simplex degeneracy using the better of two canonical axes.
@@ -83,10 +75,9 @@ end
     dot3(c1) >= dot3(c2) ? c1 : c2
 end
 
-# Triple-product  cross(cross(A, B), A)  gives a direction perpendicular to A
-# that points toward B.  When A and B are collinear the result is zero; in
-# that case fall back to any direction perpendicular to A (origin is ON the
-# segment, so we just need to break the degeneracy and grow the simplex).
+# cross(cross(A, B), A) is perpendicular to A and points toward B. Collinear A
+# and B give zero (the origin is on the segment), so fall back to any
+# perpendicular to grow the simplex.
 @inline function triple_product_dir(edge::Vec3f, toward::Vec3f)
     c1  = cross(edge, toward)
     dir = cross(c1, edge)
@@ -99,21 +90,17 @@ end
     AO  = -A          # direction from A to origin
     t   = dot(AB, AO)
     if t > 0f0
-        # Origin projects onto the segment AB -- keep both points.
-        # Use triple_product_dir so we handle the degenerate case where
-        # origin lies exactly on the line (AB || AO -> cross = 0).
+        # Origin projects onto segment AB: keep both points. `triple_product_dir`
+        # handles the origin lying on the line.
         dir = triple_product_dir(AB, AO)
         return (A, B, A, A), 2, dir, false
     else
-        # Origin is in the Voronoi region of A alone -- reduce to point A.
+        # Origin in A's Voronoi region: reduce to point A.
         return (A, A, A, A), 1, AO, false
     end
 end
 
-# do_simplex_triangle
-#
-# Simplex has 3 points: A (newest), B, C (oldest).
-# Returns (simplex_4tuple, n, dir, overlap).
+# Three points, A newest, C oldest. Returns (simplex_4tuple, n, dir, overlap).
 @inline function do_simplex_triangle(A::Vec3f, B::Vec3f, C::Vec3f)
     AB   = B - A
     AC   = C - A
@@ -140,34 +127,24 @@ end
         dir = ABC
         return (A, B, C, A), 3, dir, false
     else
-        # Origin below face -- flip winding.
+        # Origin below face: flip winding.
         dir = -ABC
         return (A, C, B, A), 3, dir, false
     end
 end
 
-# do_simplex_tetrahedron
-#
-# Simplex has 4 points: A (newest), B, C, D (oldest).
-# Returns (simplex_4tuple, n, dir, overlap).
+# Four points, A newest, D oldest. Returns (simplex_4tuple, n, dir, overlap).
 @inline function do_simplex_tetrahedron(A::Vec3f, B::Vec3f, C::Vec3f, D::Vec3f)
     AB   = B - A
     AC   = C - A
     AD   = D - A
     AO   = -A
 
-    # Face normals pointing outward (away from the 4th vertex).
-    # Face ABC: outward normal away from D.
+    # Face normals, flipped below to point away from each face's fourth vertex.
     ABC  = cross(AB, AC)
-    # Face ACD: outward normal away from B.
     ACD  = cross(AC, AD)
-    # Face ADB: outward normal away from C.
     ADB  = cross(AD, AB)
 
-    # Flip normals so they point away from the interior (toward origin side).
-    # Interior test: the 4th vertex of each face should be on the negative side.
-    # For face ABC the 4th vertex is D: if dot(ABC, AD) > 0, normal points toward D
-    # (inward), so flip.
     if dot(ABC, AD) > 0f0
         ABC = -ABC
     end
@@ -188,20 +165,15 @@ end
         return (A, B, C, D), 4, Vec3f(0f0), true
     end
 
-    # Origin is outside at least one face.  Find the closest face and recurse.
+    # Reduce to the first face, in this order, that the origin is outside of.
     if outside_ABC
-        # Reduce to triangle ABC (drop D).  Keep A as newest, B, C.
         return do_simplex_triangle(A, B, C)
     elseif outside_ACD
-        # Reduce to triangle ACD (drop B).
         return do_simplex_triangle(A, C, D)
     else
-        # outside_ADB: reduce to triangle ADB (drop C).
         return do_simplex_triangle(A, D, B)
     end
 end
-
-# do_simplex dispatcher
 
 @inline function do_simplex(pts::NTuple{4,Vec3f}, n::Int)
     if n == 1
@@ -220,8 +192,6 @@ end
     end
 end
 
-# GJKResult
-
 """GJKResult
 
 Overlap flag, Minkowski simplex and iteration count. On overlap the simplex
@@ -231,8 +201,6 @@ struct GJKResult
     simplex::NTuple{4, Vec3f}   # valid (encloses origin) iff overlap == true
     iterations::Int              # for telemetry / cap diagnostics
 end
-
-# Main GJK loop
 
 """gjk(A, B, T_A, T_B; max_iters=32, eps=1f-6) -> GJKResult
 
@@ -251,7 +219,6 @@ function gjk(A::ConvexShape, B::ConvexShape,
         dir = Vec3f(1f0, 0f0, 0f0)   # coincident origins: arbitrary starting direction
     end
 
-    # First support point.
     s0  = support_AB(A, B, T_A, T_B, dir)
     pts = (s0, s0, s0, s0)   # 4-tuple; only first `n` entries are valid
     n   = 1
@@ -265,25 +232,22 @@ function gjk(A::ConvexShape, B::ConvexShape,
             return GJKResult(false, pts, iter)
         end
 
-        # New support point on the Minkowski difference.
         s = support_AB(A, B, T_A, T_B, dir)
 
-        # Termination: if the new point doesn't advance past the old frontier
-        # along dir, the origin is not enclosed -- shapes separated.
+        # The new point does not pass the origin along `dir`: separated.
         if dot(s, dir) < 0f0
             return GJKResult(false, pts, iter)
         end
 
-        # Add s as the newest simplex vertex (index 1 by convention).
-        # Shift existing points up by one slot (drop the oldest if n == 4, but
-        # do_simplex_tetrahedron reduces to <= 3 before we'd add a 5th).
+        # Push s as the newest vertex; `do_simplex` leaves n <= 3 unless it
+        # reports overlap, so nothing is dropped.
         if n == 1
             pts = (s, pts[1], pts[3], pts[4])
             n   = 2
         elseif n == 2
             pts = (s, pts[1], pts[2], pts[4])
             n   = 3
-        else  # n == 3 or first time we have a triangle and add to tetrahedron
+        else  # n == 3
             pts = (s, pts[1], pts[2], pts[3])
             n   = 4
         end
@@ -297,7 +261,7 @@ function gjk(A::ConvexShape, B::ConvexShape,
         end
     end
 
-    # Hit iteration cap without convergence -- shapes at numerical contact
-    # boundary; conservatively report no overlap.
+    # Iteration cap without convergence (numerical contact boundary): report no
+    # overlap.
     return GJKResult(false, pts, max_iters)
 end

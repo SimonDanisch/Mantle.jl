@@ -5,11 +5,10 @@
                   printf=false, pool_disabled=false)
 
 Device-construction validation settings. Instrumentation implies validation;
-gpu_av and printf together throw. GPU-AV safe mode defaults on; verify_gpu_av
-checks that instrumentation actually reports faults. Vulkan-only settings include
-GPU-AV shader selection, sync/best-practices checks, printf and pool disabling.
-Metal API/shader validation requires debugenv in the process environment at startup.
-Unsupported settings are refused. Query validating to check what was enabled."""
+gpu_av and printf together throw. verify_gpu_av checks that GPU-AV reports
+faults. GPU-AV shader selection, sync/best-practices checks, printf and
+pool_disabled are Vulkan-only; unsupported settings are refused. Metal
+validation requires debugenv in the process environment at startup."""
 struct DebugConfig
     validation::Bool
     gpu_av::Bool

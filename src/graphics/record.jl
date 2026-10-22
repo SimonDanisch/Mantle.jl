@@ -57,8 +57,7 @@ function colorimage end
 """
     currentimage(window) -> the image this frame draws into
 
-The acquired swapchain image. A [`Window`](@ref)'s, because which one is current
-is the window's bookkeeping and changes every frame.
+The [`Window`](@ref)'s acquired swapchain image; it changes every frame.
 """
 function currentimage end
 
@@ -115,7 +114,6 @@ x * height + y + 1. Reject a transposed matrix or insufficient pixels.
 Other size mismatches with enough storage are allowed during resize transitions."""
 function checkblitsize(a::AbstractMatrix, w::Integer, h::Integer)
     size(a) == (h, w) && return nothing
-    # Permit temporary resize mismatches when the source still has enough pixels.
     size(a) == (w, h) && throw(DimensionMismatch(
         "blit source is $(size(a)) for a $(w)x$(h) target, which is the transpose of " *
         "the $(h)x$(w) it wants. A source is a (height, width) matrix; an image read " *

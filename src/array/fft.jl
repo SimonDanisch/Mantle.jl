@@ -1,13 +1,13 @@
-# Batched FFT/STFT through portable KI kernels and device capabilities.
-# Stockham register/shared-memory arrangement derives from VkFFT (MIT,
-# Dmitrii Tolmachev). Numeric tilings are Mantle's measured choices.
-# Keep real/imaginary shared arrays separate. One shuffle buffer needs uniform
-# barriers both before gathering and between all gathers and all scatters.
+# Batched FFT/STFT through portable KI kernels. The Stockham register and
+# shared-memory arrangement derives from VkFFT (MIT, Dmitrii Tolmachev). Real and
+# imaginary parts live in separate shared arrays; reusing one buffer needs
+# uniform barriers before gathering and between all gathers and all scatters.
 
 """
-Radix-R DFT in registers with separate real/imaginary tuples.
-SIGN=-1 is forward and +1 inverse; Val specialization folds the ±i rotations.
+    fftbutterfly(Val(R), xr, xi, Val(SIGN)) -> (yr, yi)
 
+Radix-R DFT in registers on separate real and imaginary tuples. `SIGN = -1` is
+forward, `+1` inverse; the `Val` folds the ±i rotations.
 """
 @inline function fftbutterfly(::Val{2}, xr::NTuple{2}, xi::NTuple{2}, ::Val{SIGN}) where {SIGN}
     return (xr[1] + xr[2], xr[1] - xr[2]), (xi[1] + xi[2], xi[1] - xi[2])
@@ -24,11 +24,9 @@ end
            (ai + ci, bi + ei, ai - ci, bi - ei)
 end
 
-# Radix 8 as two radix-4s plus the W8 twiddles (Cooley-Tukey):
-#   y[k] = E[k] + W8^k O[k],  y[k+4] = E[k] - W8^k O[k]
-# with E = DFT4(x0,x2,x4,x6) and O = DFT4(x1,x3,x5,x7). Only W8^1 and W8^3 are
-# irrational — W8^0 = 1 and W8^2 = ∓i is a swap-and-negate — so the whole stage
-# costs four real multiplies of twiddle beyond the two radix-4s.
+# Radix 8 as two radix-4s plus W8 twiddles: y[k] = E[k] + W8^k O[k] and
+# y[k+4] = E[k] - W8^k O[k], with E and O the DFT4 of the even and odd samples.
+# Only W8^1 and W8^3 need multiplies.
 
 @inline function fftbutterfly(::Val{8}, xr::NTuple{8}, xi::NTuple{8}, ::Val{SIGN}) where {SIGN}
     er, ei = fftbutterfly(Val(4), (xr[1], xr[3], xr[5], xr[7]),
@@ -42,7 +40,7 @@ end
     # W8^1 = (c, sg*c)
     t2r = or[2] * c - oi[2] * (sg * c)
     t2i = or[2] * (sg * c) + oi[2] * c
-    # W8^2 = (0, sg) — i.e. ∓i, a swap and a negate, no multiply
+    # W8^2 = (0, sg) = ∓i: a swap and a negate
     t3r = -sg * oi[3]
     t3i = sg * or[3]
     # W8^3 = (-c, sg*c)
@@ -55,19 +53,17 @@ end
 end
 
 """
-    fft_kernel!(dst, src, Val(N), Val(LEAD), Val(SIGN))
+    fft_kernel!(dst, src, Val(N), Val(LEAD), Val(SIGN), Val(SKEW), Val(NB))
 
-NB transforms share a workgroup; each transform uses N÷8 threads and eight
-register points per thread. A leading radix-2/4 stage covers powers not divisible
-by eight; it runs first because every twiddle is one at that stage. Remaining
-stages use radix eight. SKEW optionally pads shared indices for bank conflicts.
-
+`NB` transforms share a workgroup, each on `N ÷ 8` threads with eight register
+points per thread. A leading radix-2/4 stage covers powers not divisible by
+eight; it runs first because every twiddle is one there. The other stages are
+radix 8. `SKEW` pads shared indices against bank conflicts.
 """
 function fft_kernel!(
         dst, src, ::Val{N}, ::Val{LEAD}, ::Val{SIGN}, ::Val{SKEW},
         ::Val{NB}) where {N,LEAD,SIGN,SKEW,NB}
-    # Shared extents must be compile-time constants. NB packs small transforms;
-    # SKEW adds i÷32 padding to shared indices.
+    # Shared extents must be compile-time constants; SKEW adds i÷32 padding.
     sre = KI.localmemory(Float32, Val((NB * (SKEW ? N + N ÷ 32 : N),)), Val(1))
     sim = KI.localmemory(Float32, Val((NB * (SKEW ? N + N ÷ 32 : N),)), Val(2))
     @inline sx(i) = SKEW ? i + i ÷ 32 : i
@@ -80,7 +76,7 @@ function fft_kernel!(
     base = (blk * NB + sub) * N              # its slice of the global array
     soff = sub * (SKEW ? N + N ÷ 32 : N)     # and of shared
 
-    # ── load, coalesced: consecutive lanes read consecutive elements.
+    # Coalesced load: consecutive lanes read consecutive elements.
     @inbounds for k in 0:7
         i = tid + k * T
         z = src[base + i + 1]
@@ -124,8 +120,8 @@ function fft_kernel!(
         xr = ntuple(k -> sre[soff + sx(tid + (k - 1) * T) + 1], Val(8))
         xi = ntuple(k -> sim[soff + sx(tid + (k - 1) * T) + 1], Val(8))
 
-        # ── ONE sincos per stage. The eight twiddles are consecutive powers of a
-        # single root, so the rest are complex multiplies off `w`.
+        # One sincos per stage: the eight twiddles are consecutive powers of one
+        # root, so the rest are complex multiplies.
         idx = tid % Ns
         ang = Float32(SIGN) * 2.0f0 * Float32(pi) * Float32(idx) / Float32(Ns * 8)
         s1, c1 = sincos(ang)
@@ -143,7 +139,7 @@ function fft_kernel!(
 
         yr, yi = fftbutterfly(Val(8), tr, ti, Val(SIGN))
 
-        # ── the barrier that lets one buffer do the work of two.
+        # Every read is done before any write, so one buffer is input and output.
         KI.barrier()
         out0 = (tid ÷ Ns) * (Ns * 8) + idx
         for k in 1:8
@@ -161,18 +157,16 @@ function fft_kernel!(
     return nothing
 end
 
-"""Default shared-index padding. Off in the measured workloads; retain the option
-for device-specific tuning rather than assuming fewer bank conflicts is faster."""
+"""Default shared-index padding: off, as it did not help the measured workloads;
+kept for device-specific tuning."""
 const FFT_SKEW = false
 
 """
     fftplan(N) -> (T, lead)
 
-Threads per transform and the radix of the leading stage (1 = none).
-
-`N` must be a power of two and at least 8. `k = log2(N)` decides the plan:
-`k % 3` is 0 for pure radix 8, 1 for a leading radix 2, 2 for a leading radix 4 —
-see [`fft_kernel!`](@ref) for why the odd stage leads rather than trails.
+Threads per transform and the radix of the leading stage (1 = none). `N` must be
+a power of two, at least 8; `log2(N) % 3` is 0 for pure radix 8, 1 for a leading
+radix 2, 2 for a leading radix 4.
 """
 function fftplan(N::Integer)
     (N > 0 && count_ones(N) == 1) ||
@@ -187,13 +181,12 @@ end
 """
     fftgroup(N, T, nbatch, limit, sharedbudget) -> Int
 
-Transforms per workgroup: target 32 threads, then bound by batch divisibility,
-thread limit and half the shared-memory budget. One large transform may use more
-than half the budget. These are measured defaults, not a universal optimum.
-
+Transforms per workgroup: target 32 threads, bounded by batch divisibility, the
+thread limit and half the shared-memory budget (one large transform may use
+more). Measured defaults, not a universal optimum.
 """
 function fftgroup(N::Int, T::Int, nbatch::Int, limit::Int, sharedbudget::Int)
-    want = max(1, cld(32, T))                       # one warp; measured, see above
+    want = max(1, cld(32, T))                       # one warp (measured)
     byshared = max(1, (sharedbudget ÷ 2) ÷ (2 * sizeof(Float32) * N))
     bylimit = max(1, limit ÷ T)
     nb = min(want, byshared, bylimit, nbatch)
@@ -204,17 +197,12 @@ function fftgroup(N::Int, T::Int, nbatch::Int, limit::Int, sharedbudget::Int)
 end
 
 """
-    fft!(dst, src; inverse = false) -> dst
+    fft!(dst, src; inverse = false, skew = FFT_SKEW, group = nothing) -> dst
 
-Batched 1D FFT along the **first** dimension, out of place.
-
-`src` is `(N, batch...)` of `ComplexF32` with `N` a power of two; every trailing
-dimension is a separate transform. Column-major, so the transform axis is the
-contiguous one — which is what makes the load coalesced.
-
-The inverse is **unnormalised**, matching `AbstractFFTs.bfft`: `ifft` is this
-divided by `N`, and leaving the scale out keeps it off the critical path for
-callers who fold it into a later op.
+Batched 1D FFT along the first dimension, out of place. `src` is `(N, batch...)`
+of `ComplexF32` with `N` a power of two; each trailing index is a separate
+transform. The inverse is unnormalised, as `AbstractFFTs.bfft`: `ifft` is this
+divided by `N`.
 """
 function fft!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{ComplexF32};
               inverse::Bool = false, skew::Bool = FFT_SKEW,
@@ -235,16 +223,9 @@ Allocating [`fft!`](@ref).
 fft(src::AbstractGPUArray{ComplexF32}; inverse::Bool = false, skew::Bool = FFT_SKEW) =
     fft!(similar(src), src; inverse, skew)
 
-# ─────────────────────────────────────────────────────────── real-input transform
-#
-# Every audio model here feeds the FFT real samples, and a real transform is
-# half the work and half the shared memory of the complex one it is built from.
-# This is VkFFT's `vkFFT_R2C_even_decomposition.h`.
-#
-# The packing step is **free**. The decomposition wants
-# `z[j] = x[2j] + i x[2j+1]`, and a `Float32` array reinterpreted as
-# `ComplexF32` is exactly that — no kernel, no copy, just a different view of the
-# same bytes. So `rfft!` is one half-length complex FFT plus one cheap pass.
+# Real-input transform, VkFFT's `vkFFT_R2C_even_decomposition.h`: one half-length
+# complex FFT plus one pass. Packing is free, since a `Float32` array
+# reinterpreted as `ComplexF32` is `z[j] = x[2j] + i x[2j+1]`.
 
 """
     rfft_post_kernel!(dst, Z, Val(N), Val(SIGN), scale)
@@ -257,9 +238,8 @@ the conjugate-symmetric pair
     e[k] = (Z[k] + conj(Z[H-k])) / 2        the even-indexed samples' transform
     o[k] = (Z[k] - conj(Z[H-k])) / 2i       the odd-indexed samples'
 
-and `X[k] = e[k] + W_N^k o[k]`. The `mod` on both indices is what makes `k = 0`
-and `k = H` fall out without their own branch: at `k = 0` both reads hit `Z[0]`,
-so `o[0]` is real and `X[0] = e[0] + o[0]` is the DC bin.
+and `X[k] = e[k] + W_N^k o[k]`. The `mod` on both indices handles `k = 0` and
+`k = H` without a branch.
 """
 function rfft_post_kernel!(
         dst, Z, ::Val{N}, ::Val{SIGN}, scale::Float32) where {N,SIGN}
@@ -288,24 +268,18 @@ end
 """
     rfft!(dst, src) -> dst
 
-Batched **real** 1D FFT along the first dimension.
-
-`src` is `(N, batch...)` of `Float32` with `N` even and `N ÷ 2` factorising over
-the supported radices; `dst` is `(N ÷ 2 + 1, batch...)` of `ComplexF32` — the non-redundant
-half, the same convention as `AbstractFFTs.rfft` and `torch.fft.rfft`.
-
-Costs one `N ÷ 2` complex transform plus a linear pass, so roughly half of
-`fft!` on the same `N`.
+Batched real 1D FFT along the first dimension. `src` is `(N, batch...)` of
+`Float32` with `N` even and `N ÷ 2` factorising over the supported radices; `dst`
+is the non-redundant half, `(N ÷ 2 + 1, batch...)` of `ComplexF32`, as
+`AbstractFFTs.rfft` and `torch.fft.rfft`.
 """
 function rfft!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{Float32};
                skew::Bool = FFT_SKEW)
     N,H,nbatch = rfft_geometry(dst,src)
     nbatch == 0 && return dst
-    # The pack, for free: N reals ARE H complex in the interleave the
-    # decomposition wants.
+    # N reals are H complex values in the interleave the decomposition wants.
     z = reshape(reinterpret(ComplexF32, reshape(src, length(src))), H, nbatch)
-    # `fftany!`, not `fft!`: H is 200 for Whisper's 400-point mel and 480 for
-    # DeepFilterNet3's 960, neither a power of two.
+    # `fftany!`: H need not be a power of two (200 for a 400-point mel).
     Z = fftany!(similar(z), z; skew)
     backend = get_backend(src)
     kilaunch!(backend, rfft_post_kernel!, dst, Z, Val(N), Val(-1), 1f0;
@@ -326,20 +300,15 @@ function rfft(src::AbstractGPUArray{Float32}; skew::Bool = FFT_SKEW)
     return dst
 end
 
-# Mixed radices cover non-power-of-two audio lengths such as 400 and 960.
-# Smaller stages run multiple guarded butterflies per thread while keeping
-# all stage gathers before any scatter. The tuned power-of-two kernel stays distinct.
+# Mixed radices for non-power-of-two lengths such as 400 and 960. Smaller stages
+# run several guarded butterflies per thread, all gathers before any scatter.
 
 """
     fftplan_mixed(N; radices = (8, 5, 4, 3, 2)) -> Tuple
 
 The radix sequence for `N`, largest first, or `nothing` if `N` does not
-factorise over `radices`.
-
-Largest-first is not arbitrary: a bigger radix means fewer stages, and a stage
-costs a shared-memory round trip and two barriers. The residue is taken by the
-smaller radices, so `960` plans as `(8, 8, 5, 3)` — four stages — rather than the
-ten a pure radix-2 plan would need.
+factorise over `radices`. Largest first because each stage costs a shared-memory
+round trip and two barriers: `960` plans as `(8, 8, 5, 3)`.
 """
 function fftplan_mixed(N::Integer; radices = (8, 5, 4, 3, 2))
     n = Int(N)
@@ -362,12 +331,9 @@ struct MixedFFTKernel{RS,SIGN} <: Function end
 """
     fftmixed_kernel(RS, sign) -> kernel
 
-Return a zero-size callable specialized by radix sequence and direction.
-Its generated method emits literal Float32 DFT coefficients and fixed indices;
-there are no runtime transcendental coefficient calculations or eval-defined
-methods. Julia owns specialization caching, including downstream precompilation.
-Barriers stay outside guarded butterflies so every workgroup lane reaches them.
-
+A zero-size callable specialized on radix sequence and direction; its generated
+method emits literal Float32 DFT coefficients and fixed indices. Barriers stay
+outside guarded butterflies so every lane reaches them.
 """
 fftmixed_kernel(RS::Tuple, sign::Int) = MixedFFTKernel{RS,sign}()
 
@@ -448,7 +414,7 @@ fftmixed_kernel(RS::Tuple, sign::Int) = MixedFFTKernel{RS,sign}()
             end)
         end
         body = Expr[Expr(:block, gathers...),
-                    :(KI.barrier()),          # UNIFORM, between all reads and all writes
+                    :(KI.barrier()),          # uniform, between all reads and all writes
                     Expr(:block, scatters...)]
         push!(stages, quote
             KI.barrier()
@@ -495,11 +461,8 @@ end
     fftmixed!(dst, src, RS; inverse = false) -> dst
 
 Batched transform over the radix sequence `RS`, for lengths the power-of-two
-kernel cannot take. `prod(RS)` must equal `size(src, 1)`.
-
-Uses one transform per workgroup without skew or batch grouping. The literal
-butterfly generator supports radix sequences beyond the tuned power-of-two path.
-
+kernel cannot take; `prod(RS)` must equal `size(src, 1)`. One transform per
+workgroup, without skew or batch grouping.
 """
 function fftmixed!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{ComplexF32},
                    RS::Tuple; inverse::Bool = false)
@@ -512,11 +475,10 @@ function fftmixed!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{Comp
 end
 
 """
-    fftany!(dst, src; inverse = false) -> dst
+    fftany!(dst, src; inverse = false, skew = FFT_SKEW) -> dst
 
-Select the tuned power-of-two kernel or a supported mixed-radix sequence.
-skew controls the power-of-two shared layout; the mixed layout has no skew option.
-
+Select the tuned power-of-two kernel or a supported mixed-radix sequence. `skew`
+applies to the power-of-two kernel only.
 """
 function fftany!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{ComplexF32};
                  inverse::Bool = false, skew::Bool = FFT_SKEW)
@@ -595,8 +557,6 @@ function fftany_launches(dst,src,c; inverse::Bool=false, skew::Bool=FFT_SKEW)
     return (ArrayLaunch(fftmixed_kernel(RS,inverse ? 1 : -1),(dst,src),T*nbatch,T),)
 end
 
-# ─────────────────────────────────────────────────────── declared graph forms
-
 """Pack adjacent real samples as the complex input used by the real-FFT split."""
 function rfft_pack_kernel!(dst, src)
     i = KI.get_global_id().x
@@ -629,9 +589,8 @@ end
 """
     fftany_dispatch!(graph, dst, src; inverse = false, name = "fft") -> dst
 
-Declare a batched complex FFT along the first dimension.  This is the graph
-form of [`fftany!`](@ref): it selects the same tuned power-of-two or generated
-mixed-radix kernel, but records the launch rather than executing it.
+Declare a batched complex FFT along the first dimension: the graph form of
+[`fftany!`](@ref), with the same kernel selection.
 """
 function fftany_dispatch!(g, dst, src; inverse::Bool = false, skew::Bool = FFT_SKEW,
                           name::AbstractString = "fft")
@@ -640,11 +599,10 @@ function fftany_dispatch!(g, dst, src; inverse::Bool = false, skew::Bool = FFT_S
 end
 
 """
-    rfft_dispatch!(graph, dst, src, packed, spectrum; name = "rfft") -> dst
+    rfft_dispatch!(graph, dst, src, packed, spectrum; scale = 1, name = "rfft") -> dst
 
-Declare a real forward FFT. `packed` and `spectrum` are `(N/2, batch...)`
-complex scratch resources supplied by the caller, so their lifetimes remain
-visible to the graph placer.
+Declare a real forward FFT. `packed` and `spectrum` are `(N/2, batch...)` complex
+scratch resources from the caller, so the placer sees their lifetimes.
 """
 function rfft_dispatch!(g, dst, src, packed, spectrum;
                         scale::Real = 1f0,
@@ -670,8 +628,8 @@ end
     irfft_dispatch!(graph, dst, src, full, transformed; scale = 1, name = "irfft")
 
 Declare an inverse real FFT from the non-redundant half spectrum. `full` and
-`transformed` are full-length complex scratch resources. The underlying inverse
-FFT is unnormalised; `scale` is folded into the final real-component store.
+`transformed` are full-length complex scratch resources. The inverse FFT is
+unnormalised; `scale` is folded into the final real-component store.
 """
 function irfft_dispatch!(g, dst, src, full, transformed;
                          scale::Real = 1f0,
@@ -698,18 +656,13 @@ function irfft_dispatch!(g, dst, src, full, transformed;
     return dst
 end
 
-# ────────────────────────────────────────────────────────────────────────── STFT
-
 """
     stft_frames_kernel!(frames, x, window, Val(NFFT), hop, len, Val(CENTER))
 
 Cut `x` into overlapping windowed frames, `(NFFT, T)`, ready for [`rfft!`](@ref).
-
-`CENTER` matches `torch.stft(center=true)`: the signal is reflect-padded by
-`NFFT ÷ 2` so frame `t` is centred on sample `t * hop`. The reflection is
-computed per sample rather than materialised, so no padded copy of the input
-exists — which matters because the padded signal is the largest array in a mel
-front end and it would be read exactly once.
+`CENTER` matches `torch.stft(center=true)`: reflect-padded by `NFFT ÷ 2`, so
+frame `t` is centred on sample `t * hop`. The reflection is computed per sample,
+so no padded copy of the input exists.
 """
 function stft_frames_kernel!(
         frames, x, window, ::Val{NFFT}, hop::Int, len::Int,
@@ -720,8 +673,8 @@ function stft_frames_kernel!(
     t = g ÷ NFFT                 # which frame
     @inbounds begin
         p = t * hop + i - (CENTER ? NFFT ÷ 2 : 0)
-        # reflect at both ends, without repeating the edge sample — the same
-        # convention as torch's 'reflect' pad.
+        # Reflect at both ends without repeating the edge sample, as torch's
+        # 'reflect' pad.
         if p < 0
             p = -p
         end
@@ -737,20 +690,10 @@ end
 """
     stft(x, nfft, hop, window; center = true) -> AbstractGPUArray{ComplexF32}
 
-Short-time Fourier transform of a real signal, `(nfft ÷ 2 + 1, frames)`.
-
-Matches `torch.stft(x, nfft, hop, window=window, center=center,
-return_complex=true)` — reflect padding, frame `t` centred on `t * hop`, and the
-non-redundant half of each spectrum.
-
-`nfft` need not be a power of two: Whisper's mel is 400 and DeepFilterNet3's is
-960, and [`fftany!`](@ref) covers both.
-
-**Single channel only.** `x` is a vector; a stereo or batched signal has to be
-looped, which is fine for Whisper (mono by definition) and not for Demucs
-(stereo). Batching it is a change to this function and not to the transform —
-`rfft!` underneath is already batched over its trailing dimensions — but it is
-not written, and doing it blind would be guessing at the layout the caller wants.
+Short-time Fourier transform of a real signal, `(nfft ÷ 2 + 1, frames)`, matching
+`torch.stft(x, nfft, hop, window=window, center=center, return_complex=true)`.
+`nfft` need not be a power of two (see [`fftany!`](@ref)). Single channel only:
+`x` is a vector, and a batched signal has to be looped.
 """
 function stft(x::AbstractGPUArray{Float32}, nfft::Int, hop::Int,
               window::AbstractGPUArray{Float32}; center::Bool = true)
@@ -769,9 +712,8 @@ end
 """
     hannwindow(backend, n; periodic = true) -> AbstractGPUArray{Float32}
 
-The Hann window `torch.hann_window` produces: periodic by default, which is what
-every STFT in this repo wants (a symmetric window is for filter design, and using
-it here shifts every bin slightly).
+The Hann window `torch.hann_window` produces. Periodic by default, as an STFT
+wants; a symmetric window shifts every bin slightly.
 """
 function hannwindow(backend, n::Int; periodic::Bool = true)
     d = periodic ? n : n - 1

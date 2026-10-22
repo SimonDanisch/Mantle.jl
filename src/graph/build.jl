@@ -1,31 +1,15 @@
-# Building a graph: the verbs a caller uses to declare passes.
-#
-# These name `Graph` and `Pass`, which are concrete in `graph/types.jl`, so they
-# could not stay in `runtime/api.jl` — that file is included first and declares
-# the vocabulary the graph is built out of, not the graph itself.
+# Graph-building verbs. They name the concrete `Graph` and `Pass` from
+# `graph/types.jl`, so they cannot live in `runtime/api.jl`, which loads first.
 
 """
     dispatch!(graph, kernel, args, ndrange; group = nothing, name = nothing)
 
-One kernel launch, as a pass of its own, ordered against everything else by what
-the kernel does to `args`.
-
-    dispatch!(g, shade!, (radiance, queue, materials), n)
-
-There is nothing else to write. What each argument is read or written by is
-inferred from the kernel body — see [`kerneltouches`](@ref) — so the launch and
-the declaration cannot disagree, which is what they did every time a kernel grew
-an output and its call site did not.
-
-`name` is what the pass is called in a profile, and defaults to the kernel's own
-name. `group` is the workgroup size, worth giving for anything image-shaped: the
-default ([`defaultgroup`](@ref)) fills the first axis first, which for a 2-D range
-makes a workgroup one row of 64, and a pass that reads row-major and writes
-column-major then has one of the two uncoalesced: 1.06 ms against 0.12 ms at
-1280x800.
-
-`ndrange` may be a [`DeviceRange`](@ref), for a count that only exists on the
-device; the dispatch is then ordered after whatever wrote that count.
+One kernel launch as its own pass, ordered by what the kernel does to `args`,
+which is inferred from the kernel body ([`kerneltouches`](@ref)). `name` defaults
+to the kernel's name. `group` is the workgroup size; the default
+([`defaultgroup`](@ref)) makes a 2-D workgroup one row of 64, so image-shaped
+passes should give one. `ndrange` may be a [`DeviceRange`](@ref); the dispatch is
+then ordered after whatever wrote the count.
 """
 function dispatch!(g::Graph, kernel, args::Tuple, ndrange;
                    group = nothing, name = nothing)
@@ -43,24 +27,11 @@ function dispatch!(g::Graph, kernel, args::Tuple, ndrange;
 end
 
 """
-Refuse a dispatch that touches nothing.
+    refusenothing(kernel, args, touches) -> touches
 
-A kernel launched over a non-empty ndrange exists in order to read or write
-something, so `NOTOUCH` for EVERY argument is not a declaration -- it is the
-walk having seen no memory access in a kernel that has one. "No store" is the
-single answer that must never be a guess, because it is the one that removes a
-barrier, and unlike the refusals in `graph/access.jl` this failure is SILENT:
-the walk returns a complete-looking summary.
-
-Found by it, on SAM 2's encoder: `coopmat_gemm_kernel_4!` came back untouched on
-all nine arguments, so its destination transient reached `Place` with no
-interval at all. The cooperative-matrix BLOCK kernels address their operands
-through intrinsics the walk does not yet know; `gemm_cm2!`, which uses the
-tensor intrinsics, comes out exactly right. Without this the declaration was
-merely wrong rather than refused.
-
-A dispatch whose arguments are genuinely all scalars is not a counterexample: it
-would compute nothing observable.
+Throw if `touches` marks no argument as touched. That means the access walk missed
+a memory access (typically an intrinsic without `intrinsic_usage`), and a missed
+store would silently remove a barrier.
 """
 function refusenothing(@nospecialize(kernel), args::Tuple, touches)
     any(touched, touches) && return touches
@@ -73,17 +44,11 @@ function refusenothing(@nospecialize(kernel), args::Tuple, touches)
 end
 
 """
-Refuse an ndrange the caller already knows is empty.
+    refuseempty(kernel, ndrange)
 
-Not skipped: a pass that does nothing is indistinguishable from a pass that was
-meant to do something, and the graph would carry it for ever. Refusing names the
-kernel at `dispatch!`, where the shape was decided, instead of `DivideError`
-from inside `KernelAbstractions.partition` -- which is what a zero ndrange
-actually does, five frames below anything naming the op.
-
-Only a HOST ndrange. A [`DeviceRange`](@ref) is a count the host never sees and
-is legitimately zero at run time; that is the whole reason it exists, and the
-backend's own tail guard handles it.
+Throw for an empty host ndrange, which would otherwise fail as a `DivideError` in
+`KernelAbstractions.partition`. A [`DeviceRange`](@ref) may be zero at run time
+and passes.
 """
 function refuseempty(@nospecialize(kernel), ndrange)
     ndrange isa DeviceRange && return nothing
@@ -98,22 +63,11 @@ end
 """
     dispatch!(graph, call, args; name = nothing)
 
-Declare a CALL: something that submits its own work, ordered by what it reads
-and writes like anything else.
-
-    dispatch!(g, mul!, (C, A, B))
-
-No ndrange, and that is the whole of the distinction — an ndrange is what Mantle
-needs in order to divide work into workgroups, and a `mul!` has none because the
-thing on the other side decides its own launch. See the four-argument form above
-for what a dispatch is, and `runscalls(device)` for which backends can run one.
-
-Nothing here says what it touches either, and for the same reason the four-
-argument form does not: the direction belongs to the function. `mul!` disappears
-into rocBLAS so there is no body to read it off, so it is DECLARED --
-[`argument_usage`](@ref), once, next to the function. A call with no declaration
-raises [`UndeclaredCall`](@ref) naming the method to write; it does not widen to
-read+write and call that an answer.
+Declare a call that launches its own work (e.g. `dispatch!(g, mul!, (C, A, B))`),
+ordered by what it reads and writes. Its accesses come from an
+[`argument_usage`](@ref) method declared next to the function; without one,
+[`UndeclaredCall`](@ref) is thrown. `runscalls(device)` says which backends can
+run calls.
 """
 function dispatch!(g::Graph, call, args::Tuple; name = nothing)
     refuserefs(args)
@@ -126,13 +80,10 @@ function dispatch!(g::Graph, call, args::Tuple; name = nothing)
 end
 
 """
-What to call the pass a bare `dispatch!` makes.
+    passname(kernel, args) -> String
 
-The kernel's own name, except for a higher-order kernel — a queue mapper whose
-first argument is the kernel it runs over the queue — where the caller's name for
-the pass is the INNER one. Every stage of a wavefront tracer is
-`workqueue_map_kernel!` otherwise, and a profile of twenty identically named
-passes says nothing.
+The kernel's name, or the first argument's name when that is a function, so a
+higher-order kernel (a work-queue mapper) is named after the kernel it runs.
 """
 passname(kernel, args::Tuple) =
     (!isempty(args) && first(args) isa Function) ? string(nameof(first(args))) :
@@ -141,14 +92,9 @@ passname(kernel, args::Tuple) =
 """
     declare!(pass, args, touches)
 
-Register what a dispatch does, one usage per device buffer reachable from each
-argument.
-
-The LEAVES and not the argument: a barrier is scoped to a buffer, and a kernel
-is handed containers — a work queue is a payload plus its atomic counter, and on
-the struct-of-arrays path that payload is one buffer per field of the work item,
-several levels down. An argument's `Touch` applies to all of its leaves, which is
-the granularity the call sites that wrote this by hand already used.
+Register one usage per device buffer reachable from each argument, because a
+barrier is scoped to a buffer and arguments may be containers. An argument's
+`Touch` applies to all of its leaves.
 """
 function declare!(h, args::Tuple, touches::Vector{Touch})
     g, p = graphof(h), passof(h)
@@ -159,8 +105,7 @@ function declare!(h, args::Tuple, touches::Vector{Touch})
         resourceleaves!(leaves, g, a)
         for r in leaves
             push!(p.usages, resourceid(g, r) => usagetype(t, resourcekind(r)))
-            # The PARENT is what liveness has to see touched: a slice's interval
-            # is its buffer's, and a transient sliced by one pass is live there.
+            # Liveness tracks the parent: a slice's interval is its buffer's.
             touch!(g, rootresource(r))
         end
     end
@@ -170,20 +115,11 @@ end
 """
     resourceleaves!(acc, graph, x) -> acc
 
-Every device buffer reachable from `x`, appended to `acc`.
-
-A `Resource` and a backend's array are leaves; anything else that can reach
-memory is opened up and its fields walked. The graph is threaded through for the
-one leaf that is not a resource the caller named: a `ResourceView` declares the
-SLICE of its parent that it covers, and a slice is interned per graph.
-
-The walk covers a work queue, a struct of arrays and a tuple of either without
-naming any of them here — the three containers a consumer was reimplementing
-this walk for.
+Append every device buffer reachable from `x` to `acc`. Resources and backend
+arrays are leaves; other values are walked field by field. A `ResourceView`
+yields the slice of its parent it covers, interned per graph so repeated views
+are one resource.
 """
-# A VIEW is what the kernel gets; what the pass touches is the parent, scoped to
-# the elements the view covers — which is a slice, and a slice needs the graph to
-# be the same resource every time it is named.
 resourceleaves!(acc, g, v::ResourceView, seen::Base.IdSet{Any}, depth::Int) =
     (push!(acc, slice(g, v.parent, elementrange(v))); acc)
 
@@ -191,15 +127,12 @@ resourceleaves!(acc, g, x::Resource, seen::Base.IdSet{Any}, depth::Int) = (push!
 resourceleaves!(acc, g, x::BufferRange, seen::Base.IdSet{Any}, depth::Int) = (push!(acc, x); acc)
 resourceleaves!(acc, g, @nospecialize(x)) = resourceleaves!(acc, g, x, Base.IdSet{Any}(), 0)
 
-# An attribute is not a leaf and not a container: `Attribute(p, x)` already
-# declared it, as `Vertices`, which is a different usage from the storage read a
-# shader argument is. Declaring it again from the draw would say the vertex
-# stage reads it as storage, which is not how a vertex buffer is fetched.
+# `Attribute(p, x)` already declared it as `Vertices`; declaring it again would
+# add a storage read the vertex fetch does not do.
 resourceleaves!(acc, g, ::Attr, seen::Base.IdSet{Any}, depth::Int) = acc
 
-# The walk is over an object graph, not a tree, and a device object reaches its
-# pool, which reaches its device. Both guards are needed: identity for the cycle,
-# and a depth for a structure deep enough that nothing useful is left below it.
+# Device objects reach their pool and device, so the walk needs both a cycle
+# guard (`seen`) and a depth limit.
 const LEAFDEPTH = 16
 
 function resourceleaves!(acc, g, @nospecialize(x), seen::Base.IdSet{Any}, depth::Int)
@@ -223,13 +156,9 @@ end
     vertextouches(device, shader, args) -> Vector{Touch}
     fragmenttouches(device, shader, args) -> Vector{Touch}
 
-What each stage of a draw does to the arguments that stage was given.
-
-Two verbs and not one with a stage argument, because they are two different
-signatures: the vertex stage is compiled at the draw's `args`, the fragment
-stage at its `frag_args` — and the fragment's own function takes the varyings as
-a leading argument that no caller passes. A backend answers both the way it
-answers [`kerneltouches`](@ref), through whatever it will actually compile.
+What each draw stage does to its arguments: the vertex stage to `args`, the
+fragment stage to `frag_args` (its function also takes the varyings as a leading
+argument). Backends answer like [`kerneltouches`](@ref), from what they compile.
 """
 function vertextouches end
 function fragmenttouches end
@@ -237,9 +166,8 @@ function fragmenttouches end
 """
     isdevicearray(x) -> Bool
 
-Whether `x` is one of this backend's arrays — memory the graph can order
-accesses to, rather than a container holding some. A backend answers for its own
-array type; everything else is walked into.
+Whether `x` is a backend array, i.e. a leaf for [`resourceleaves!`](@ref).
+Backends answer for their own array type.
 """
 isdevicearray(@nospecialize(x)) = false
 
@@ -247,57 +175,24 @@ isdevicearray(@nospecialize(x)) = false
     repeat!(f, graph, n) -> passes
     repeat!(f, graph, maxiters, count) -> passes
     repeat!(f, graph, maxiters; while_nonzero = flag) -> passes
+    repeat!(graph, kernel, args, ndrange; max, count, while_nonzero, group, name) -> passes
 
-A loop whose body is declared ONCE: `f(i)` is called once and declares the body's
-passes exactly as it would outside a loop, and the plan runs them `n` times. The
-body is compiled once too, whatever the count: fifty steps of a diffusion model are
-one model's passes, not fifty.
+A loop whose body `f(i)` is declared and compiled once and submitted `n` (or
+`maxiters`) times. `i` is a one-element device `Int32` buffer holding the
+1-based iteration. An optional device-side gate, re-read before each iteration,
+lets the body end the loop:
 
-`i` is the iteration the device is on, a one-element `Int32` buffer counting from
-1, which a kernel reads for anything that differs per iteration (a timestep out of
-a schedule buffer, say). It is not a host number: nothing about the loop is
-declared per iteration.
+  * `count`: a device integer; iteration `i` runs while `i <= count[]`.
+  * `while_nonzero`: a device integer; the iteration runs while it is nonzero.
 
-With no gate every one of the `n` iterations runs. With one, the loop runs at most
-`maxiters` times and the DEVICE decides how many. The gate is re-evaluated BEFORE
-EACH ITERATION, from device memory, which is what makes this a loop rather than a
-bounded repeat: the body may move the value the gate reads, so a loop can end on a
-condition it discovers as it goes. That is the shape a wavefront bounce loop has —
-it runs until the ray queue empties, and nothing knows when that is until it
-happens. Two spellings of the gate, one mechanism:
-
-  * `count` — a device integer; iteration `i` runs while `i <= count[]`.
-  * `while_nonzero` — a device integer; the iteration runs while it is not zero.
-    A queue's own live count is usually already this, so the loop needs no
-    bookkeeping of its own.
-
-Nothing about the trip count reaches the host: the body is submitted `maxiters`
-times and iterations the gate turns off are discarded at execution. What a
-discarded iteration still costs is its barriers, its gate dispatch and its
-predicate test; what it saves is the body. So `maxiters` is a bound to be chosen,
-not a free parameter.
-
-Every iteration names the same resources, which is what makes one recording legal.
-A transient the body reads before it writes it, or one the loop shares with the
-passes around it, carries between iterations and lives across the whole body; one
-the body writes and then reads is scoped to its iteration. Each iteration starts
-behind a full barrier, so what one iteration wrote is visible to the next. The
-body may not touch an image, whose layout would have to be the same on the way in
-and out of every iteration, and loops do not nest. A single iteration
-(`maxiters = 1`) is none of this: it never runs behind itself, so it is a gated
-region of the plan like any other, with none of these restrictions.
-
-Recorded, the body is its own run of pieces and every iteration boundary is a
-place the recording can be cut into submissions (see `partitionranges`);
-iterations that fit the plan's budget together go in one.
-
-A loop whose body is ONE dispatch needs no body at all:
-
-    repeat!(g, bump!, (queue, film), DeviceRange(queue.size); max = 8,
-            while_nonzero = queue.size)
-
-which is the same thing with the `do` block written out, and reads as what it is
-— a dispatch that runs until the device says stop.
+Gated-off iterations are discarded at execution but still cost their barriers,
+gate dispatch and predicate test, so `maxiters` should be a tight bound. Each
+iteration starts behind a full barrier. A transient the body reads before
+writing, or shares with surrounding passes, lives across the whole loop; others
+are scoped to one iteration. The body may not touch an image, contain `when!` or
+nest another loop; `maxiters = 1` is a plain gated region without these limits.
+Iteration boundaries are submission cut points (see `partitionranges`). The
+kernel form uses one `dispatch!` as the body.
 """
 function repeat!(g::Graph, kernel, args::Tuple, ndrange;
                  max::Integer, count = nothing, while_nonzero = nothing,
@@ -310,46 +205,14 @@ end
 """
     when!(f, g::Graph, cond)
 
-Declare the passes `f` creates as conditional on `cond`, which the HOST reads at
-submit time.
+Make the passes `f` creates conditional on `cond[]` (usually a `Ref{Bool}`),
+read on the host at every submission. The graph is recorded once with every
+branch; a region whose condition is false is not submitted, whereas a `repeat!`
+device predicate still executes the discarded commands.
 
-`cond` is read as `cond[]` at every submission, so a `Ref{Bool}` is the usual
-one: it is asked once per run, not once per record. A graph is therefore
-declared and recorded ONCE with every branch in it, and each run submits only
-the branches it wants.
-
-    when!(g, needseg) do
-        dispatch!(g, pixel_fusion, …)
-        dispatch!(g, segment, …)
-    end
-
-# Why this and not [`repeat!`](@ref)'s predicate
-
-They answer different questions and cost different amounts. A device predicate
-discards a pass's WORK but the commands are still in the buffer and still
-dispatch — its own docstring prices that: "what a discarded iteration still
-costs is its barriers, its gate dispatch and its predicate test". That is the
-right trade when only the GPU knows the answer.
-
-When the HOST knows it, nothing need be dispatched at all: the recording is
-already a sequence of independently submittable pieces (see [`RecordingParts`](@ref)),
-so the partition a conditional region occupies is simply not submitted. A
-branch that does not run costs one boolean read.
-
-# What it does not do
-
-It does not nest, for the same reason `repeat!` does not: a pass carries one
-condition and nesting would need their conjunction.
-
-The passes a region creates are kept CONTIGUOUS in the recording — the
-partition boundary is drawn where the condition changes — so a region whose
-passes the scheduler would otherwise interleave with unconditional ones is
-still one piece.
-
-Barriers are unaffected, which is what makes a skipped region harmless rather
-than a hole in the ordering: every surviving pass keeps the barriers the graph
-derived for it, and a barrier waiting on a write that did not happen is a wait
-that has already been satisfied.
+The region's passes stay contiguous in the recording. Barriers are unchanged: a
+barrier waiting on a skipped write is already satisfied. Regions do not nest and
+cannot be combined with `repeat!` loops.
 """
 function when!(f, g::Graph, cond)
     first_new = length(passes(g)) + 1
@@ -375,16 +238,15 @@ function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
         "repeat!: give at most one gate — a `count` positionally, or " *
         "`while_nonzero = flag`."))
     gated = count !== nothing || while_nonzero !== nothing
-    # One iteration never runs behind itself: it is a gated region, with no index
-    # to advance, no head barrier and no cut in the recording, and what a loop
-    # refuses (an image, a `when!` inside) is no hazard to it.
+    # A single iteration is a plain gated region: no index, no head barrier, no
+    # recording cut, and none of the loop restrictions.
     looped = maxiters > 1
     index = Buffer(g.dev, Int32[1])
-    # Outside the body: the index starts at 1 on every run.
+    # Outside the body: resets the index to 1 on every run.
     looped && gate!(g, loop_start!, (index,), "repeat!/start")
     firstloop = length(passes(g)) + 1
-    # The gate is the body's first pass and is not gated itself: it WRITES the
-    # flag the rest of the body is gated on, once per iteration.
+    # The gate is the body's first pass and is not itself gated: it writes the
+    # flag the rest of the body is gated on.
     pred = gated ? Buffer(g.dev, [Predicate(0)]) : nothing
     if count !== nothing
         gate!(g, gate_count!, (pred, count, index), "repeat!/gate")
@@ -414,26 +276,22 @@ function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
         pp.predicate === nothing || throw(ArgumentError(
             "repeat!: pass \"$(pp.name)\" already has a predicate."))
         pp.predicate = (pred, 0)
-        # A gated pass whose every dispatch is sized on the device runs nothing
-        # when discarded on ANY backend: the prepare writes zero groups for it
-        # (`emitprepares!`). Fixed-size work — a draw, a host-sized dispatch —
-        # needs the backend to discard the commands themselves. `typeof` and not
-        # the device: a device `show`s its whole pool, and that buries the
-        # sentence that says what went wrong.
+        # Device-sized dispatches are discarded on every backend because the
+        # prepare writes zero groups (`emitprepares!`); fixed-size work needs
+        # backend predication. The message names `typeof(dev)` because showing
+        # a device prints its whole pool.
         supportspredicate(g.dev) || devicesized(pp) || throw(ArgumentError(
             "repeat!: pass \"$(pp.name)\" has fixed-size work and " *
             "$(nameof(typeof(g.dev))) cannot discard recorded work on a " *
             "device-written predicate. Size every dispatch of a gated pass " *
             "on the device (a `DeviceRange`), or loop on the host."))
-        # The predicate READ is a hazard like any other, and declaring it is
-        # what makes the graph put a barrier between the gate that writes the
-        # flag and the passes gated on it.
+        # Declaring the predicate read puts a barrier after the gate's write.
         push!(pp.usages, resourceid(g, pred) => Predicated)
         touch!(g, pred)
     end
     body = passes(g)[firstloop:end]
     looped || return body
-    # The body's last pass: the next iteration reads the next index.
+    # The body's last pass: advances the index for the next iteration.
     gate!(g, loop_advance!, (index,), "repeat!/advance")
     body = passes(g)[firstloop:end]
     loop = Loop(Int(maxiters), index)
@@ -443,60 +301,51 @@ function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
     return body
 end
 
-"""Before a loop: the index every run starts from."""
+"""Reset the loop index to 1; runs once before the loop."""
 function loop_start!(index)
     @inbounds index[1] = Int32(1)
     return nothing
 end
 
-"""The body's last pass: the iteration after this one."""
+"""Increment the loop index; the body's last pass."""
 function loop_advance!(index)
     @inbounds index[1] += Int32(1)
     return nothing
 end
 
 """
-One iteration's go/no-go flag, as the device reads it.
+    Predicate(go::UInt32)
 
-A distinct type rather than a plain `UInt32` because the ELEMENT TYPE is what
-tells a backend how the buffer will be used — the same mechanism
-`DrawIndirectCommand` uses to earn `INDIRECT_BUFFER` usage. A predicate buffer
-needs a usage flag that no ordinary `UInt32` buffer should carry.
-
-Nonzero runs the iteration, zero discards it. That is the Vulkan convention
-(`vkCmdBeginConditionalRenderingEXT` discards on zero) taken as the portable one,
-so a kernel writing predicates reads the same on every backend.
+A device-written gate flag: nonzero runs, zero discards (the Vulkan conditional
+rendering convention, used on every backend). A distinct element type so the
+backend gives the buffer its predicate usage flag, as `DrawIndirectCommand` does
+for indirect usage.
 """
 struct Predicate
     go::UInt32
 end
 
-"""The gate for `repeat!(…, count)`: this iteration runs while `index[] <= count[]`."""
+"""Gate for `repeat!(…, count)`: run while `index[] <= count[]`."""
 function gate_count!(pred, count, index)
     @inbounds pred[1] = Predicate(index[1] <= Int32(count[1]) ? UInt32(1) : UInt32(0))
     return nothing
 end
 
-"""The gate for `repeat!(…; while_nonzero)`: this iteration runs while it is set.
-
-Re-read every iteration, so a body that empties the thing it is draining stops
-the loop, and one that refills it carries on."""
+"""Gate for `repeat!(…; while_nonzero)`: run while `flag[]` is nonzero, re-read
+every iteration."""
 function gate_nonzero!(pred, flag)
     @inbounds pred[1] = Predicate(flag[1] != 0 ? UInt32(1) : UInt32(0))
     return nothing
 end
 
-# One single-item pass -- a gate, or a step of the loop index -- dispatched as a
-# kernel where the device compiles one and as a CALL where it cannot. A device
-# with no KernelInterface compiler that walks its plan on this thread runs a call
-# as the function on the host arrays, which IS the pass: each of these reads and
-# writes element 1 of its arguments and calls no device intrinsic. A device that
-# can do neither is refused by the call form, saying so.
+# A single-item loop-control pass: a kernel where the device compiles one, else
+# a call, which a host-walking device runs on the host arrays (these touch only
+# element 1 and use no intrinsics). The call form refuses devices that can do
+# neither.
 gate!(g::Graph, f, args::Tuple, name) =
     kisupported(g.dev, f) ? dispatch!(g, f, args, 1; name) : dispatch!(g, f, args; name)
 
-# Declared for the call form, which has no body the walk may read; the kernel
-# form would infer the same.
+# Needed by the call form, whose body the access walk does not read.
 argument_usage(::Type{typeof(gate_count!)}, ::Type{<:Tuple{Any,Any,Any}}) =
     (WRITE, READ, READ)
 argument_usage(::Type{typeof(gate_nonzero!)}, ::Type{<:Tuple{Any,Any}}) = (WRITE, READ)
@@ -506,72 +355,38 @@ argument_usage(::Type{typeof(loop_advance!)}, ::Type{<:Tuple{Any}}) = (READ | WR
 """
     supportspredicate(device) -> Bool
 
-Whether this device can discard fixed-size recorded work — a draw, a host-sized
-dispatch — on a value it reads from a buffer at execution time.
-
-Not what every [`repeat!`](@ref) needs: a gated pass whose dispatches are all
-sized on the device is discarded by the prepare writing zero groups, on every
-backend. This decides only whether a gated pass may also hold fixed-size work.
-`true` in core, because a backend that walks its passes on the host reads the
-flag between them and can skip anything; a recording backend answers with
-whether its driver can.
+Whether the device can discard fixed-size recorded work (a draw, a host-sized
+dispatch) on a predicate read at execution time. Only needed when a gated
+[`repeat!`](@ref) pass holds fixed-size work. `true` in core, since a
+host-walking backend reads the flag between passes; recording backends override.
 """
 supportspredicate(::Any) = true
 
-"""Every dispatch of the pass reads its size on the device, and it draws nothing:
-discarded, it runs nothing, whatever the backend can do."""
+"""Whether the pass has no draws and only `DeviceRange` dispatches, so a
+discarded run executes nothing on any backend."""
 devicesized(p::Pass) = isempty(p.draws) && all(d -> d.ndrange isa DeviceRange, p.dispatches)
 
 """
     resourceid(graph, r) -> Int
 
 The graph's id for a resource, interning it on first sight.
-
-Here rather than beside the other `resourceid` methods in `runtime/dispatch.jl`
-because it names the concrete `Graph`, and that file is included before the
-graph exists.
 """
 resourceid(g::Graph, r) = resourceid(g.ids, r)
 
 
-# ── Building and running a graph ──────────────────────────────────────────────
-#
-# 114 definitions, moved out of `src/vulkan/graph.jl` because not one of them
-# names a driver type. They are the graph itself: constructing passes, interning
-# resources, deciding what a pass touches, laying out argument memory, walking
-# the plan. A backend records and submits what they produce — `graph/backend.jl`
-# is the ten functions that takes.
-#
-# What stayed behind is the other half of that file: barrier emission, command
-# recording, and the driver objects those need.
-
-# `Device()` with no argument picks a backend, which core cannot do — it is in
-# the Vulkan extension, and a Metal one will add its own.
-
 """
-Usage bits an element type asks for beyond the ordinary ones, which is one type
-and one bit: a buffer of draw commands is read by the command processor, and a
-buffer without `INDIRECT_BUFFER_BIT` is a validation error at the draw rather
-than where it was allocated.
+    extrausage(T) -> UInt32
 
-This is `bufferusage`'s answer for this backend — "what memory can host a
-`T`" is Vulkan vocabulary, so the backend owns it.
+Backend buffer-usage bits a buffer of element type `T` needs beyond the default,
+0 in core. Vulkan adds indirect usage for `DrawIndirectCommand` and conditional
+rendering for `Predicate`; a missing bit is a validation error at the draw.
 """
 extrausage(::Type) = UInt32(0)
 
 Surface(g, win) = (s = WindowSurface(win); push!(g.surfaces, s); s)
 
-# Forwarded to the WINDOW, which is the backend's.
-#
-# These four read `s.win.views[s.win.current_image_idx + 1]`, `s.win.extent.width`
-# and `s.win.format` directly — a Vulkan swapchain's anatomy, spelled out in the
-# shared graph. Nothing else in core knew what a window is made of, and a backend
-# whose window is a `CAMetalLayer` handing out one drawable at a time has no
-# `views` array and no `current_image_idx` to index it with.
-#
-# The QUESTIONS are the same four every attachment answers, so a window answers
-# them the same way a `TransientImage` does and the render pass cannot tell them
-# apart.
+# Attachment queries forward to the backend's window type, so a window answers
+# them like a `TransientImage` does.
 target_view(s::WindowSurface)   = target_view(s.win)
 
 target_image(s::WindowSurface)  = target_image(s.win)
@@ -580,10 +395,8 @@ target_extent(s::WindowSurface) = target_extent(s.win)
 
 target_format(s::WindowSurface) = target_format(s.win)
 
-# The pixel type, which is what `attachment_format` reads to pick the formats a
-# pipeline is compiled for. A window is an attachment like any other and has to
-# answer the same question — and core cannot name `BGRA{N0f8}`, so the window
-# does.
+# The pixel type `attachment_format` compiles pipelines for; only the backend
+# window can name it.
 Base.eltype(s::WindowSurface) = eltype(s.win)
 
 initial_usage(::WindowSurface) = Present
@@ -595,36 +408,26 @@ initial_state(s::WindowSurface) = initial_usage(s)
 DrawCall(shader, args, count) =
     DrawCall(shader, args, count, (), nothing, nothing, nothing, 1)
 
-# One type for every viewport, so `CompiledDraw`'s `V` parameter is the same
-# whether the caller wrote integers or floats. Both APIs take a float rect, and
-# the HEIGHT keeps its sign — a negative one is how a caller says "clip +y at the
-# top", and rounding it into an unsigned extent is the bug that spelling exists
-# to avoid.
+# Always `NTuple{4,Float32}`, so `CompiledDraw`'s `V` parameter does not depend on
+# the caller's number type. The height keeps its sign: negative puts +y at the top.
 asviewport(::Nothing) = nothing
 asviewport(v) = NTuple{4,Float32}(v)
-
-# `Pass` is Mantle's now — see `src/graph/types.jl`.
 
 Pass(name, kind) = Pass(String(name), kind, Any[], LoadOp[], nothing, nothing, nothing, nothing,
                         DrawCall[], Pair{Int,Type}[], Any[], nothing, nothing, nothing)
 
 first_target(p::Pass) = isempty(p.targets) ? p.depth : first(p.targets)
 
-# ── A declared view of a resource ────────────────────────────────────────────
-
 """
     viewof(parent, dims...; offset = 0) -> ResourceView
 
-A `dims`-shaped window onto `parent`, `offset` elements in. Declares nothing by
-itself — handing it to a dispatch is what tells the graph about it, as a slice
-of the parent covering the view's elements.
+A `dims`-shaped view of `parent` starting `offset` elements in. Passing it to a
+dispatch declares a slice of the parent covering the view's elements.
 """
 viewof(parent, dims::Integer...; offset::Integer = 0) =
     viewof(parent, map(Int, dims); offset)
 function viewof(parent, dims::Dims{N}; offset::Integer = 0) where {N}
-    # Checked here, because here is where it is checkable: a declaration knows
-    # the parent's extent, and a view past the end is otherwise a read of
-    # someone else's bytes at run time with nothing to point at it.
+    # Past the end would silently read other resources' bytes at run time.
     prod(dims) + Int(offset) <= length(parent) || throw(ArgumentError(
         "viewof: a $(dims) view at offset $(offset) covers " *
         "$(prod(dims) + Int(offset)) elements of a parent that has " *
@@ -632,12 +435,8 @@ function viewof(parent, dims::Dims{N}; offset::Integer = 0) where {N}
     return ResourceView{eltype(parent),N,typeof(parent)}(parent, dims, Int(offset))
 end
 
-# A view of a view is a view of the SAME resource, one offset further in, and
-# never a nested one. A view's whole content is `(resource, dims, offset)`, so
-# composing costs an addition; nesting would mean walking the chain in `storage`
-# and in `use` — and `use` forwards a `range` to its parent, which the
-# `ResourceView` method has no way to take. An ATen graph reshapes a reshape
-# (`view_9` of `view_8` of a convolution's output), so this is the ordinary case.
+# A view of a view is flattened onto the same parent with the offsets added, so
+# `storage` and `use` never walk a chain.
 viewof(parent::ResourceView, dims::Dims{N}; offset::Integer = 0) where {N} =
     viewof(parent.parent, dims; offset = parent.offset + Int(offset))
 
@@ -649,56 +448,40 @@ Base.length(v::ResourceView) = prod(v.dims)
 Base.parent(v::ResourceView) = v.parent
 describe(v::ResourceView{T}) where {T} = "view($T, $(v.dims)) of $(describe(v.parent))"
 
-"""The elements of the parent this view covers, which is what scopes the
-barrier: two disjoint views of one buffer are disjoint claims."""
+"""The parent elements this view covers; barriers are scoped to this range."""
 elementrange(v::ResourceView) = (v.offset + 1):(v.offset + length(v))
 
-# The shaped array itself, over storage the parent owns. Two methods rather than
-# a backend verb: a device array answers `GPUArrays.derive`, which is the
-# GPUArrays contract for exactly this and which every backend array here already
-# implements, and a host array is a `reshape` of a `view`.
+# The shaped array over the parent's storage: `GPUArrays.derive` for device
+# arrays, a reshaped `view` for host arrays.
 storage(v::ResourceView{T}) where {T} = deriveview(T, storage(v.parent), v.dims, v.offset)
 deriveview(::Type{T}, a::GPUArrays.AbstractGPUArray, dims::Dims, off::Int) where {T} =
     GPUArrays.derive(T, a, dims, off)
 deriveview(::Type{T}, a::AbstractArray{T}, dims::Dims, off::Int) where {T} =
     reshape(view(a, (off + 1):(off + prod(dims))), dims)
 
-# A transient buffer's shape is what it was declared with — core, because a
-# `TransientBuffer` is core and its extents are not a driver's.
 Base.length(t::TransientBuffer) = prod(t.dims)
 Base.size(t::TransientBuffer) = t.dims
 Base.size(t::TransientBuffer, d::Integer) = d <= ndims(t) ? t.dims[d] : 1
-# A transient is a dense region of its arena, so its strides are its shape's —
-# the answer `strides(::Buffer)` gives, with no array to ask. Flash attention's
-# plan reads it to check that the innermost dimension is the contiguous one.
+# Dense, column-major strides, as `strides(::Buffer)` gives.
 Base.strides(t::TransientBuffer) = Base.size_to_strides(1, size(t)...)
 Base.ndims(::TransientBuffer{<:Any,N}) where {N} = N
 Base.eltype(::TransientBuffer{T}) where {T} = T
 
-"""The device base address of a region's bytes. Core: a `Region` is `Pool`'s and
-a `BufferBlock`'s `address` is a plain `UInt64`, so the arithmetic names no
-driver type."""
-
-# A window surface is open while its window is — core forwards, the backend's
-# `isopen(win)` answers.
 Base.isopen(s::WindowSurface) = isopen(s.win)
 
 
-# The load op, lowered. `Discard` is the one that needs saying: it is the only
-# way to reach DONT_CARE, and a pass that covers every pixel should not pay to
-# load what it is about to overwrite.
-
+# The colour a load op clears to, `nothing` unless it is a `Clear`.
 clearvalue(::LoadOp) = nothing
 
 clearvalue(c::Clear) = NTuple{4,Float32}(c.value)
 clearvalue(c::Clear{NTuple{4,UInt32}}) = c.value
 
-"""What a depth attachment clears to. One number, not four, and `nothing` loads."""
+"""The depth clear value, or `nothing` unless the load op is a `Clear`."""
 depthclear(::LoadOp) = nothing
 
 depthclear(c::Clear) = Float32(c.value)
 
-"""What to call a transient in an error, since it has no name of its own."""
+"""A transient's name in error messages."""
 describe(t::TransientBuffer{T}) where {T} =
     "Transient.Buffer($T, $(ndims(t) == 1 ? only(t.dims) : t.dims))"
 
@@ -708,9 +491,7 @@ stride(::TransientBuffer) = 1
 
 nbytes(t::TransientBuffer{T}) where {T} = checkedbytes(T,t.dims)
 
-# Asked of the device, not of the transient: both backends place the same
-# `TransientBuffer`, and what they need it aligned to differs. 256 is Vulkan's
-# `minStorageBufferOffsetAlignment` worst case; the host wants a cache line.
+# Asked of the device: backends need different alignments for the same transient.
 alignment(c::Compile, t) = alignment(c.graph.dev, t)
 
 arena(::TransientBuffer) = Buffers()
@@ -718,18 +499,9 @@ arena(::TransientBuffer) = Buffers()
 """
     imageusage(device, T) -> backend usage mask
 
-What an image of this element type is for, in the backend's own vocabulary.
-
-Asked of the DEVICE, because the answer is a driver value: Vulkan wants
-`VkImageUsageFlags`, Metal wants `MTLTextureUsage`, and there is no portable
-encoding of "colour attachment" the two could share. What IS portable is the
-question — the element type decides, so a target's usage and its aspect cannot
-disagree. `Float32` is a depth attachment on both, because it lowers to a
-single-component 32-bit depth format on both and nothing else does.
-
-It has to be a hook rather than a default: a colour default naming a Vulkan
-constant lived in this file and threw `UndefVarError` the moment a second
-backend asked, since the constant only exists when the Vulkan extension loads.
+The backend usage flags (`VkImageUsageFlags`, `MTLTextureUsage`) for an image of
+element type `T`. The element type decides, so usage and aspect agree: `Float32`
+is a depth attachment on every backend. No core default; each backend answers.
 """
 function imageusage end
 
@@ -738,55 +510,28 @@ refit!(::Device, ::TransientResource) = false
 """
     refit!(plan) -> Bool
 
-Give every tracking transient the size its source now has, and recompile if any
-moved.
-
-`true` means the plan is a different plan: different offsets, possibly
-different arenas, and a fresh argument memory. Its recording is dropped — the
-commands name the old placement's image handles and argument bytes — and the
-next `run!` records again. (A move that changes nothing but addresses never
-comes through here: it is patched — see `notify_move!`.)
-
-Not `any`, which short-circuits — the first transient that moved would be the
-only one refitted, and the rest would keep a size their source no longer has.
-
-The caller is `run!`, once per frame, after the frame's image is acquired and
-before anything is recorded: the acquire is the last place a resize is noticed,
-so this is where the size is final. Failing here hands the image back untouched
-(`abandonframe!`), while the same check inside recording left a half-recorded
-frame.
+Resize every tracking transient to its source and recompile if any changed, or
+if `remap!` marked the plan `replaced`. `true` means new offsets, arenas and
+argument memory; the recording is dropped and the next `run!` records again.
+Address-only moves are patched instead (`notify_move!`). `run!` calls this once
+per frame after acquiring the image and before recording, so a failure can hand
+the image back untouched (`abandonframe!`).
 """
 function refit!(pl::Plan)
-    # A moved arena is a move like any tracking transient's, and takes the same
-    # recompile — see `remap!`.
+    # Set by `remap!` on a backend that cannot patch.
     moved = pl.replaced
     pl.replaced = false
-    # MEASURED 2026-09-14: this loop allocates 96 bytes per transient per frame,
-    # and it is the only thing that allocates in a recorded `run!` — a 64-link
-    # chain came to 6,144 bytes a run against zero for everything else, on both
-    # backends. It is not either method's body: `refit!(dev, t)` on a
-    # concretely-typed vector of the SAME transients allocates nothing, and a
-    # single-method function called the same way allocates nothing. It is the
-    # dynamic dispatch of a TWO-method function over
-    # `Vector{TransientResource}`, whose answer gets boxed per call.
-    #
-    # Not fixed here, because the two fixes that exist are both decisions.
-    # Collapsing the methods into one with an `isa` inside trades multiple
-    # dispatch for a type test; keeping the dispatch means the graph holding its
-    # tracking transients in a concretely-typed container of their own, which is
-    # a change to `Graph` and to every `Transient.*` constructor — and which
-    # would also stop walking the ones that cannot track. A graph whose
-    # transients are all buffers refits nothing and pays for the walk anyway.
+    # `|=`, not `any`, so every transient is refitted. The dynamic dispatch over
+    # `Vector{TransientResource}` boxes its result (96 bytes per transient), the
+    # only allocation in a recorded `run!`.
     for t in pl.graph.transients
         moved |= refit!(pl.graph.dev, t)
     end
     moved || return false
-    # Dropped before the recompile — the commands name the old placement —
-    # and `run!` writes it again against the new one before it submits.
+    # The recording names the old placement; `run!` re-records before submitting.
     invalidate!(pl)
     c = compile!(Compile(pl.graph; pl.alias, pl.coalesce, pl.policy))
-    # What a pass was measured to cost belongs to the pass, not to its position:
-    # the recompile may schedule the passes in another order.
+    # Costs are keyed by pass: the recompile may reorder passes.
     cost = IdDict{Any,Float64}(pp.pass => pl.passcost[i] for (i, pp) in enumerate(pl.passes))
     pl.transitions, pl.passes, pl.pipelines = c.transitions, c.passes, c.pipelines
     pl.passcost = [get(cost, pp.pass, NaN) for pp in pl.passes]
@@ -794,17 +539,13 @@ function refit!(pl::Plan)
     let a = analysis(c)
         pl.slabs, pl.arenas, pl.offsets, pl.parts = a.regions, a.arenas, a.offsets, a.parts
         pl.peak, pl.naive = a.peak, a.naive
-        # Re-registered: the recompile may have been placed into a different set
-        # of arenas, and `tenant!` is idempotent for the ones it was already in.
+        # The recompile may use other arenas; `tenant!` is idempotent.
         for ar in a.arenas
             tenant!(pool(pl.graph.dev), ar, pl)
         end
     end
-    # A recompile can change the draws and therefore the layout, so the argument
-    # memory is laid out again with them. The old slots may still be read by
-    # frames in flight, which is why the outgoing region is RETIRED rather than
-    # released: `reclaim!` hands it back one submission boundary later, by which
-    # point the frames that named it have run.
+    # New argument layout. The old region is retired, not released: frames in
+    # flight may still read it, and `reclaim!` frees it after they complete.
     let am = pl.args
         am === nothing || retire!(pool(pl.graph.dev), pl.graph.dev, am.store)
     end
@@ -812,14 +553,11 @@ function refit!(pl::Plan)
     return true
 end
 
-# ── Transient render targets ─────────────────────────────────────────────────
-
 Base.size(t::TransientImage) = (t.width, t.height)
 Base.eltype(::TransientImage{T}) where {T} = T
 describe(t::TransientImage{T}) where {T} = "Transient.Image($T, ($(t.width), $(t.height)))"
 nbytes(t::TransientImage) = t.req.size
-# `::Device`, not `::Any`: `alignment(c::Compile, t)` above would be ambiguous
-# with an unconstrained first argument, and a `Compile` is not a device.
+# `::Device`, since `::Any` would be ambiguous with `alignment(::Compile, t)`.
 alignment(::Device, t::TransientImage) = t.req.alignment
 arena(::TransientImage) = Images()
 resourcekind(::TransientImage) = ImageKind()
@@ -829,7 +567,7 @@ target_image(t::TransientImage) = t.image
 isdepth(::TransientImage{T}) where {T} = isdepth(T)
 target_extent(t::TransientImage) = (Int(t.width), Int(t.height))
 target_format(t::TransientImage) = t.format
-# Nothing has been written into it and after aliasing it is back in that state.
+# Undefined at first use, and again after aliasing.
 initial_usage(::TransientImage) = Undefined
 initial_state(t::TransientImage) = initial_usage(t)
 
@@ -837,18 +575,11 @@ initial_state(t::TransientImage) = initial_usage(t)
     Transient.Image(graph, T, (width, height); srgb = false, usage = imageusage(dev, T))
     Transient.Image(graph, T, target)
 
-A render target the compiler places, so two targets whose lifetimes do not
-overlap share bytes.
-
-`T` is the pixel type and is the whole format: `RGBA{Float16}` is
-`R16G16B16A16_SFLOAT` on Vulkan and `MTLPixelFormatRGBA16Float` on Metal.
-Readback of one gives a `Matrix{T}` and a kernel writing one writes `T`, which
-an enum would not have given.
-
-Given a *target* rather than a size, it follows that target: a depth buffer for a
-window is `Transient.Image(g, Float32, screen)`, and it is resized with the
-window. A fixed size is the right answer only when it genuinely is fixed, because
-an attachment that stops covering the render area is undefined rendering.
+A render target placed by the compiler, so targets with disjoint lifetimes share
+memory. The pixel type `T` is the whole format (`RGBA{Float16}` is
+`R16G16B16A16_SFLOAT` on Vulkan). Given a `target` instead of a size, the image
+follows that target's extent on resize, e.g. a window's depth buffer
+`Transient.Image(g, Float32, screen)`.
 """
 function Transient.Image(g::Graph, ::Type{T}, size::Tuple{Integer,Integer};
                          srgb::Bool = false, source = nothing,
@@ -863,12 +594,11 @@ Transient.Image(g::Graph, ::Type{T}, source; kw...) where {T} =
     Transient.Image(g, T, target_extent(source); source, kw...)
 
 """
-Give a tracking transient the size its source now has, and say whether it moved.
+    refit!(device, t::TransientImage) -> Bool
 
-The image is recreated rather than resized, because an image has its extent from
-creation on every backend this runs on. That invalidates the placement — a
-different size needs different offsets — which is why the caller recompiles
-rather than patching the old plan.
+Resize a tracking image to its source; `true` if it changed. Images have a fixed
+extent, so it is recreated, which invalidates the placement and makes the caller
+recompile.
 """
 function refit!(dev::Device, t::TransientImage)
     t.source === nothing && return false
@@ -882,11 +612,10 @@ function refit!(dev::Device, t::TransientImage)
 end
 
 """
-Record that this pass touches `t`.
+    touch!(graph, t)
 
-The interval recorded here is in declaration order and is provisional: Liveness
-recomputes it from the scheduled order, because reordering passes is exactly what
-changes a transient's lifetime.
+Record that the newest pass touches `t`. The interval is in declaration order and
+provisional; Liveness recomputes it from the scheduled order.
 """
 function touch!(g::Graph, t::TransientResource)
     i = length(g.passes)
@@ -898,52 +627,28 @@ end
 
 touch!(g::Graph, x) = (resourceid(g, x); x)
 
-# `resourceid(g::Graph, r)` is NOT defined here: `runtime/dispatch.jl` has it,
-# and a second method of the same name in this module would agree with that one
-# only by coincidence.
-
 """
-What kind of resource an id names, so barrier tracking starts in the right state
-machine. Images have layouts and buffers do not, and a buffer tracked as an image
-would emit layout transitions for a resource that has none.
+    resourcekind(r) -> BufferKind() or ImageKind()
+
+Selects the barrier state machine; only images have layouts.
 """
 resourcekind(::Any) = BufferKind()
 
 resourcekind(::WindowSurface) = ImageKind()
 
 """
-A render pass. `target => clear` clears; a bare target loads what is there.
+    render!(f, graph, name, attachments...; viewport = nothing) -> Pass
 
-The target is a usage like any other, recorded before the body runs so it is
-first in the sequence. Deriving it from `initial_usage` instead would be a second
-statement of the same thing, and would be wrong the moment two passes render to
-one target: the second would transition from the target's declared initial state
-rather than from the colour attachment the first left it in.
+A render pass. Each attachment is `target => loadop` (`Clear(value)`, `Keep`,
+`Discard`) or a bare target, which keeps its contents. A target with `isdepth`
+(a `Float32` image) is the depth attachment, at most one; the others are colour
+attachments in order, and a fragment shader returning a tuple writes element `i`
+to attachment `i`. A depth-only pass (a shadow map) takes its render area from
+the depth target and its fragment shader returns `nothing`. Attachment usages
+are recorded before `f` runs, so they come first in the pass.
 
-A depth target is another attachment, spelled the same way, and which slot an
-attachment fills comes from the target rather than from its position or a keyword:
-
-    z = Transient.Image(g, Float32, (w, h))
     render!(g, "scene", screen => Clear(bg), z => Clear(1f0)) do p
-
-`z` is a depth attachment because a `Float32` image is `D32_SFLOAT` and nothing
-else in Vulkan is a single-component 32-bit float attachment. Its barrier and its
-layout are then derived from the `Depth` usage like any other.
-
-Several colour attachments are the same list again, in order, and the fragment
-shader writes them by returning a tuple — element `i` goes to attachment `i`:
-
-    render!(g, "gbuffer", albedo => Clear(bg), normals => Discard, z => Clear(1f0)) do p
-        draw!(p, GBUF, bind(p, mesh, mvp), mesh.positions)   # fragment returns (c, n)
-    end
-
-A pass with only a depth target is a pass all the same, and it is what a shadow
-map is: nothing is shaded, and the render area comes from the depth attachment
-because there is nothing else to take it from. Its fragment shader returns
-`nothing`, which is how a shader says it writes no attachment.
-
-    render!(g, "shadow", shadowmap => Clear(1f0)) do p
-        draw!(p, DEPTHONLY, args, drawcmd)
+        draw!(p, shader, args, n)
     end
 """
 function render!(f, g::Graph, name::AbstractString, attachments...; viewport = nothing)
@@ -961,9 +666,8 @@ function render!(f, g::Graph, name::AbstractString, attachments...; viewport = n
             p.depth === nothing ||
                 throw(ArgumentError("a pass takes one depth target, and this one was given two"))
             p.depth, p.depth_load = tgt, load
-            # Tested and written, and no stencil aspect: `NoAccess` is what says
-            # the image has none, which is what picks the combined layout over the
-            # separate-aspect ones.
+            # Read and written depth; `NoAccess` stencil selects the combined
+            # depth layout over the separate-aspect ones.
             push!(p.usages, resourceid(g, tgt) => Depth{ReadWrite,NoAccess,discards(load)})
         else
             push!(p.targets, tgt)
@@ -976,32 +680,27 @@ function render!(f, g::Graph, name::AbstractString, attachments...; viewport = n
     p
 end
 
-# `PassHandle` is Mantle's now — see `src/graph/types.jl`.
-
-# `Attr` is Mantle's now — see `src/graph/types.jl`.
-
 stride(a::Attr) = a.stride
 
 count(a::Attr) = count(a.resource)
 
-"""Constructing a usage is how a pass gets a binding. There is no path from a
-resource to a draw that skips it."""
+"""
+    Attribute(pass, r) -> Attr
+
+A vertex attribute binding of `r`, declared as a `Vertices` usage of the pass.
+This is the only way a resource becomes a vertex binding.
+"""
 function Attribute(p::PassHandle, r)
     push!(p.pass.usages, resourceid(p.graph, r) => Vertices)
     Attr{eltype(r),typeof(r)}(r, Int32(stride(r)))
 end
 
-# `Commands` is Mantle's now — see `src/graph/types.jl`.
-
 """
-What a draw takes its vertex count from.
+    drawover(pass, n)
 
-A number is one. A resource is its length, so a draw over a buffer of points
-covers exactly the points there are. A buffer of `DrawIndirectCommand` is the
-third answer and the only one the host never learns: the count is read by the
-command processor from device memory, so a compute pass in the same frame can
-decide it. The element type is what says which, because a buffer of draw commands
-is not something anything else would be.
+A draw's count: a number, a resource (its length), or a `DrawIndirectCommand`
+buffer, which is declared as an `Indirect` usage and read by the device at draw
+time.
 """
 drawover(p::PassHandle, n) = n
 
@@ -1018,13 +717,10 @@ end
 """
     draw!(pass, shader, binding; frag_args, viewport, bindings)
 
-Declare a draw whose count, indices, instances and argument values all come from
-a [`DrawBinding`](@ref) the host rewrites between runs.
-
-The binding's CURRENT contents are what the plan compiles against — their types
-fix the pipeline, and its texture table fixes the descriptor set layout on a
-backend that needs one — and every run after that reads whatever the cell holds
-then.
+Declare a draw whose count, indices, instances and arguments come from a
+[`DrawBinding`](@ref) the host may rewrite between runs. The plan compiles
+against its contents at declaration (types fix the pipeline, the texture table
+fixes the descriptor layout); each run reads what the cell holds then.
 """
 draw!(p::PassHandle, shader, b::DrawBinding; frag_args = (), viewport = nothing,
       bindings = b.bindings) =
@@ -1034,37 +730,15 @@ draw!(p::PassHandle, shader, b::DrawBinding; frag_args = (), viewport = nothing,
 function draw!(p::PassHandle, shader, args, n; frag_args = (),
                viewport = nothing, bindings = nothing, indices = nothing,
                instances::Integer = 1)
-    # Through `drawargs`, so a rebindable cell is checked by its CONTENTS: what
-    # a shader is handed is the tuple inside it, and that is what these two
-    # questions are about.
+    # A rebindable cell's contents are what the shader receives and what the
+    # draw touches; rebinding keeps the same types and resources.
     va = drawargs(args)
     refuserefs(va)
     refuserefs(frag_args)
-    # What the two stages touch, read off the two stages. `va` and not `args`:
-    # a rebindable cell's CONTENTS are what the shader is handed, and they are
-    # also the resources this draw is recorded touching — rebinding later
-    # replaces values of the same types, never a different resource.
-    # Here rather than at compile: the pipeline has one push constant range, so
-    # two DIFFERENT argument lists are a mistake in the call, and by the time a
-    # shader is compiled it surfaces as one stage failing to take an argument it
-    # never declared.
-    #
-    # And before the two `declare!`s below. Those walk each stage's arguments,
-    # and a stage handed an argument belonging to the other one is what the walk
-    # cannot infer, so it would refuse first with a message about a signature it
-    # cannot read rather than about the call. Telling needs only `va` and
-    # `frag_args`.
-    #
-    # The SAME list on both stages is not that mistake and is refused nowhere
-    # else: one range, two stages declaring the same layout over it. Every Makie
-    # render object is shaped that way — a scatter's fragment stage reads the
-    # colormap its vertex stage indexed — which is why the hand-recorded path
-    # spells `compile_draw(dev, p, …, args, args)`. Refusing it made the graph
-    # unable to draw a figure while `pass!` could.
-    # `===` and not `==`: the question is whether this is the SAME list, and a
-    # tuple holding a NaN — or an array holding one — is not `==` to itself. That
-    # made `barplot` refuse to draw, because somewhere in a line's arguments
-    # there is a NaN and `va == va` was false.
+    # One push constant range per pipeline: the stages take the same list (Makie
+    # objects do), or only one takes any. Checked before `declare!`, whose walk
+    # would fail first with a less useful message. `===`, since a list holding a
+    # NaN is not `==` to itself.
     isempty(va) || isempty(frag_args) || va === frag_args || throw(ArgumentError(
         "draw!: two DIFFERENT argument lists were given to the two stages, and a " *
         "pipeline has one push constant range. Put them on the stage that reads " *
@@ -1077,16 +751,9 @@ function draw!(p::PassHandle, shader, args, n; frag_args = (),
                                  asviewport(viewport), bindings, indices, Int(instances)))
 end
 
-# `BufferRange` is Mantle's now — see `src/graph/types.jl`.
-
 storage(v::BufferRange) = storage(v.parent)
 
-# A declaration is about the ARGUMENT, not a thing of its own: what the library
-# is handed, what the plan resolves and what liveness sees is the value inside.
-
-# An attribute is a BINDING of a resource, not a resource — its storage is
-# whatever it was made from. Beside `BufferRange` for the same reason: both are
-# views, and `rootresource` already forwards through both.
+# An attribute is a binding, not a resource: its storage is its resource's.
 storage(a::Attr) = storage(a.resource)
 
 resourcekind(::BufferRange) = BufferKind()
@@ -1095,19 +762,12 @@ resourcekind(::BufferRange) = BufferKind()
 """
     slice(graph, x, range) -> BufferRange
 
-`range` elements of `x`, as a resource of its own.
-
-What a dispatch is HANDED is still the whole buffer — a slice is a claim about
-which part of it the pass touches, not a different pointer — so two passes over
-disjoint slices get no barrier between them, and one that names a slice gets a
-barrier scoped to those bytes.
-
-One object per `(resource, range)` per graph, so the same slice named twice is
-the same resource and stays ordered against itself.
+Elements `range` of `x` as a resource of its own, interned per
+`(resource, range)` in the graph. Kernels still receive the whole buffer; the
+slice only scopes barriers, so passes over disjoint slices are not ordered.
 """
 function slice(g::Graph, x, range::UnitRange{Int})
-    # `length`, not `length(storage(x))`: a transient has no storage until the
-    # placer gives it some, and a range is declared while the graph is built.
+    # Not `length(storage(x))`: a transient has no storage until placement.
     n = length(x)
     (first(range) >= 1 && last(range) <= n) || throw(ArgumentError(
         "slice(): range $range is outside the buffer's 1:$n."))
@@ -1117,18 +777,6 @@ function slice(g::Graph, x, range::UnitRange{Int})
     end
 end
 
-# Whether a dispatch was given a workgroup size is a type, not a branch: the
-# launch is per pass per frame and this keeps the call site one expression.
-
-# `kernelfor` names a backend's KA backend object, so its methods are the
-# backend's — see the Vulkan and host ones. Only the generic is core's.
-
-
-# The body goes in `dispatches` beside the `Dispatch`es rather than in a field of
-# its own: the compile walks that vector and this is one more thing it can find
-# there, so `Pass` does not grow a field only one kind ever sets.
-# The four hooks core's `custom!`/`compute!` are written against.
-
 newpass(::Graph, name::AbstractString, kind) = Pass(name, kind)
 
 handle(g::Graph, p::Pass) = PassHandle(g, p)
@@ -1137,7 +785,8 @@ dispatches(p::Pass) = p.dispatches
 
 passes(g::Graph) = g.passes
 
-"""The pass every host store lands in, so one pair of barriers covers them all."""
+"""The graph's first pass, created on demand, that every host store lands in, so
+one pair of barriers covers them all."""
 function updates_pass!(g::Graph)
     for p in g.passes
         p.kind === :update && return p
@@ -1147,35 +796,20 @@ function updates_pass!(g::Graph)
     p
 end
 
-# What a host store can be waiting on, and so what `hostwritten!` collects.
+# What `hostwritten!` collects. A transient only if declared `hostwritten = true`:
+# its `CopyDst` usage in the update pass starts its live interval there, so the
+# placer cannot alias those bytes with anything live at that point.
 hostwritable(::Buffer) = true
 hostwritable(::GPURef) = true
-# A transient only if it was DECLARED `hostwritten = true`. Registering it is
-# what makes the write SAFE against aliasing rather than merely possible: the
-# `CopyDst` below is a usage, so `Liveness` — which derives every interval from
-# use — starts this transient's interval at the update pass instead of at the
-# first pass that reads it, and the placer will not give those bytes to anything
-# still live at that point. That safety is also the cost, which is why it is
-# declared: see the `hostwritten` field.
 hostwritable(t::TransientBuffer) = t.hostwritten
 hostwritable(::Any) = false
 
 """
     hostwritten!(graph) -> Tuple
 
-Every `Buffer`, `GPURef` and `TransientBuffer` a pass of `graph` declares,
-registered as a `CopyDst` of the update pass — once each, however many passes name it — and
-returned as a tuple with every element's concrete type in the tuple's type,
-which is what `Plan.hostwritten` holds and `run!` walks.
-
-"Declares" is every usage, followed through `rootresource`: a vertex `Attr`, a
-`BufferRange` slice and a `Commands` buffer all reach the `Buffer` under them,
-and a transient is its own root.
-A resource handed to a kernel and declared by nothing is not here, which is
-what undeclared means. The "once" is worth having: several passes reading one
-buffer are one hazard against the store, and a usage list that repeats it
-makes the barrier phase derive the same dependency twice. Idempotent, so a
-recompile (`refit!`) sees the registrations `Plan` made.
+Register every host-writable resource a pass declares (through `rootresource`)
+once as a `CopyDst` of the update pass, and return them as a concretely typed
+tuple for `Plan.hostwritten`. Idempotent, so a recompile keeps the registrations.
 """
 function hostwritten!(g::Graph)
     found = Any[]
@@ -1199,23 +833,11 @@ end
 """
     copy!(g, name, dst, src; region = nothing) -> Pass
 
-A pass that reads an IMAGE and writes a buffer: a framebuffer readback, which is
-`vkCmdCopyImageToBuffer` and not a dispatch.
-
-`src` has to be something that answers `target_image` — a window, a framebuffer,
-a transient image. A BUFFER source is refused here, because the emitter would
-reach `target_image` on it and raise a `MethodError` about a function the caller
-never named, several phases after the declaration that caused it.
-
-`region = (x,y,width,height)` copies only that zero-based image rectangle into a
-tightly packed destination. The default copies the whole image.
-
-There is deliberately no buffer-to-buffer form. `vkCmdCopyBuffer` is a transfer
-command, so it is not a pass whose accesses the walk can read off a kernel body,
-and a graph that wants those bytes moved declares the kernel that moves them —
-one `ew!` with `identity` is the whole of it, and then `Barriers` orders it like
-anything else. `copyto!` on two device arrays is the ad hoc form, outside a
-graph.
+A pass copying image `src` (anything answering `target_image`) into buffer
+`dst`, e.g. a framebuffer readback. `region = (x, y, width, height)` copies that
+zero-based rectangle, tightly packed; the default is the whole image. Buffer
+sources are refused: move buffer bytes with a kernel, so the access walk can
+order it.
 """
 function copy!(g::Graph, name::AbstractString, dst, src; region = nothing)
     hasmethod(target_image, Tuple{typeof(src)}) || throw(ArgumentError(
@@ -1242,38 +864,25 @@ function copy!(g::Graph, name::AbstractString, dst, src; region = nothing)
     p
 end
 
-# ── plan ──────────────────────────────────────────────────────────────────────
-# `CompiledDraw` is Mantle's now — see `src/graph/types.jl`.
-
-# `CompiledDispatch` is Mantle's now — see `src/graph/types.jl`.
-
-# `ArgMemory` is Mantle's now — see `src/graph/types.jl`.
-
 argalign(n::Integer) = (Int(n) + 255) & ~255
 
 """
-One `VkDispatchIndirectCommand`'s worth of the plan's memory, 256-byte aligned so
-a device address derived from it satisfies every backend's indirect-buffer
-alignment. Twelve bytes are used; the alignment is what decides the stride.
+Stride of one indirect dispatch command (12 bytes used) in the plan's argument
+memory, 256 so every backend's indirect-buffer alignment holds.
 """
 const INDIRECT_STRIDE = 256
 
 """
-Where this dispatch's workgroup counts live, or `nothing` if the host already
-knows its ndrange.
+    indirectof(argmemory, k) -> view or nothing
 
-The one lookup a recording does per device-sized dispatch, and it is an index
-rather than an allocation: `ArgMemory` built the view when it laid the arguments
-out.
+The workgroup-count slot of indirect index `k`, or `nothing` for `k == 0` (a
+host-sized dispatch). The views are prebuilt by `ArgMemory`, so this does not
+allocate.
 """
 indirectof(am::ArgMemory, k::Int) = k == 0 ? nothing : am.indirect[k]
 
-# ── lowering a transition into a Vulkan barrier ───────────────────────────────
-
-# Whether a compiled thing sizes itself on the device, one method per compiled
-# kind. The recording kinds carry the `ndrange` they were declared with; a
-# KernelAbstractions `Launch` resolved its count at `bake` and says so beside
-# its definition.
+# Whether a compiled dispatch reads its size on the device; `Launch` and `Call`
+# answer in `kalaunch.jl`.
 devicesized(d::CompiledDispatch) = countresource(d.ndrange) !== nothing
 devicesized(t::CompiledTrace) = countresource(t.ndrange) !== nothing
 
@@ -1281,38 +890,21 @@ PassPlan(pass, draws, dispatches, images, pre, barrier) =
     PassPlan(pass, draws, dispatches, images, pre, barrier,
              any(devicesized, dispatches))
 
-# `Profiler` is Mantle's now — see `src/graph/types.jl`.
-
-"""Keep the last `NSAMPLES`, so a plan that runs for an hour does not grow."""
+"""Append `x`, keeping only the last `NSAMPLES`."""
 function sample!(ring::Vector{Float64}, x::Real)
     push!(ring, x)
     length(ring) > NSAMPLES && popfirst!(ring)
     ring
 end
 
-# Mutable because a window resize re-places every transient, and what comes back
-# is a different set of slabs and different barriers. The plan is the user's
-# handle, so it is updated rather than replaced.
-# `Plan` is Mantle's now — see `src/graph/types.jl`.
-
-# `adaptor` builds a backend's argument adaptor; it is the backend's.
-
-# In two steps, and the order matters for one thing: an acceleration structure.
-# `rawargs` is what the caller gave, with Mantle's own resources resolved to
-# their storage; `devargs` is that after Lava's conversion. A ray
-# query needs the `VulkanTLAS` bound as a descriptor, and adapting an
-# `AdaptedAccel` deliberately strips it — the device side of a ray query is a
-# variable, not a pointer the kernel carries. So the HWTLAS is looked for in the
-# RAW arguments, which is where it still exists. Asking the adapted ones finds
-# nothing, and a shading kernel then compiles with ray query disabled and fails
-# in the emitter rather than at the call site.
-
+# `rawargs` resolves Mantle resources to their storage; `devargs` adapts that for
+# the device. Look for a TLAS in the raw arguments: adapting strips it, since a
+# ray query binds it as a descriptor.
 rawargs(args::Tuple) = argmap(storage, args)
 
 devargs(ad, raw::Tuple) = argmap(a -> Adapt.adapt(ad, a), raw)
 
-"""The resource a usage ultimately names: a slice and a vertex binding both
-forward their storage to a parent, so neither has an identity of its own to test."""
+"""The resource a usage names, following slices and vertex bindings to their parent."""
 rootresource(x) = x
 
 rootresource(v::BufferRange) = rootresource(v.parent)
@@ -1323,16 +915,8 @@ Compile(g::Graph; alias = true, coalesce = true, policy = Overlap()) =
     Compile(g, alias, coalesce, policy, Analysis(), Transition[],
             IdDict{Pass,Vector{Transition}}(), PassPlan[], Set{Any}())
 
-# What core's phases ask of a compilation context, and it is now only what
-# DIFFERS from every other backend. The seven field accessors — `analysis`,
-# `passes`, `policy`, `alias`, `transients`, `transientbyid`, `device` — were
-# written verbatim here and in `MantleHostExt`, so they come from
-# `Compilation` and neither writes them.
-#
-# These three stay because they are genuinely this backend's: how a pass records
-# its usages, whether two ids can name the same bytes (this backend HAS slices,
-# so it is not `a == b`), and which pool the memory comes from.
-
+# Compilation hooks beyond the generic `Compilation` field accessors: usages,
+# slice-aware overlap, and the memory pool.
 usages(p::Pass) = p.usages
 
 overlapping(c::Compile, a::Int, b::Int) = overlapping(c.graph, a, b)
@@ -1340,35 +924,23 @@ overlapgroup(c::Compile, id::Int) = overlapgroup(c.graph, id)
 
 pool(c::Compile) = c.graph.dev.pool
 
-# `nbytes`, `arena` and `describe` are answered per concrete transient, above.
-#
-# There were `::TransientResource` fallbacks here that read `nbytes(t) = nbytes(t)`
-# — each one calling itself. Unreachable while every transient is a `TransientBuffer`
-# or a `TransientImage`, both of which have a specific method, and an infinite
-# recursion the moment a third kind is added. Deleted rather than fixed: a
-# fallback that cannot say anything useful should be a MethodError naming the
-# type that has not answered.
-
-# ── Dag ───────────────────────────────────────────────────────────────────────
+# `nbytes`, `arena` and `describe` have no `TransientResource` fallback, so a new
+# transient kind without them is a `MethodError`.
 
 writes_it(U) = writes(U)
 
 """
-Whether two resource ids can name the same bytes.
+    overlapping(graph, a, b) -> Bool
 
-Equal ids do. So does a slice against its own parent, and two slices of one
-parent whose ranges intersect — those are different ids, and a scheduler told
-they are unrelated is free to reorder two passes that write the same memory.
+Whether ids `a` and `b` can name the same bytes: equal ids, a slice and its
+parent, or two intersecting slices of one parent.
 """
 function overlapping(g::Graph, a::Int, b::Int)
     a == b && return true
     ra, rb = get(g.ids.by_id, a, nothing), get(g.ids.by_id, b, nothing)
     (ra isa BufferRange || rb isa BufferRange) || return false
-    # `get`, not `resourceid`: this answers a question and must not hand out an
-    # id doing it. A slice's parent is always registered first — `use` touches it
-    # before `slice` is reached — so the fallback is unreachable, but a query that
-    # can grow `by_id` while the compiler is indexing by id is not worth leaving
-    # to that invariant holding.
+    # `get`, not `resourceid`: a query must not intern ids while the compiler
+    # indexes by id. Parents are registered before their slices.
     pa = ra isa BufferRange ? get(g.ids.ids, ra.parent, 0) : a
     pb = rb isa BufferRange ? get(g.ids.ids, rb.parent, 0) : b
     (pa == 0 || pb == 0) && return false
@@ -1378,28 +950,21 @@ function overlapping(g::Graph, a::Int, b::Int)
     !isempty(intersect(ra.range, rb.range))
 end
 
-"""The id of a slice's parent, and any other id itself: see [`overlapgroup`](@ref)."""
+"""The id of a slice's parent, or `id` itself for anything else."""
 function overlapgroup(g::Graph, id::Int)
     r = get(g.ids.by_id, id, nothing)
     r isa BufferRange || return id
     p = get(g.ids.ids, r.parent, 0)
-    # An unregistered parent overlaps nothing (`overlapping` answers false), so
-    # the slice is a group of its own.
+    # An unregistered parent overlaps nothing, so the slice is its own group.
     return p == 0 ? id : p
 end
 
-"""Give a placed transient its storage.
+"""
+    materialize!(device, t::TransientBuffer, mem, offset)
 
-Two shapes of answer, and the split is not per backend. A backend whose
-placement needs the buffer IDENTITY keeps the block — a Vulkan buffer barrier
-scopes to (VkBuffer, offset, size), which an array view cannot name — and builds
-the array in `storage` on demand. A backend driving KernelAbstractions builds it
-once, here, and `storage` hands it straight back.
-
-The second of those is THIS method, over [`deviceslice`](@ref). A transient's
-extents are core's property, so they are written once here; what differs between
-backends is only which array type wraps the memory, and that is the one line
-each answers.
+Give a placed transient its storage. A `BufferBlock` is kept as is, because
+Vulkan barriers need the buffer identity, and `storage` builds the array on
+demand; any other memory is wrapped once via [`deviceslice`](@ref).
 """
 function materialize!(::Device, t::TransientBuffer, blk::BufferBlock, offset::Int)
     t.block, t.offset = blk, offset
@@ -1413,12 +978,10 @@ function materialize!(dev::Device, t::TransientBuffer{T}, mem, offset::Int) wher
 end
 
 """
-What a pass does to one resource, or `nothing` if it does not name it.
+    usage_of(pass, id, graph) -> usage type or nothing
 
-A slice counts as naming its parent. The handover asks this about a *transient*,
-and a pass that names only a slice of one would otherwise answer `nothing` — on
-which the caller skips the barrier entirely, which is the hazard no per-resource
-sequence can see going missing without a word.
+What `pass` does to resource `id`, counting overlapping slices, or `nothing`.
+The aliasing handover skips its barrier on `nothing`, so a slice must count.
 """
 function usage_of(p::Pass, id::Int, g::Graph)
     for (rid, U) in p.usages
@@ -1428,13 +991,10 @@ function usage_of(p::Pass, id::Int, g::Graph)
 end
 
 """
-Every id one resource is tracked under: itself, plus each slice of it.
+    sliceindex(graph) -> Dict{Int,Vector{Int}}
 
-Built once per compile rather than rediscovered per handover. Finding them by
-scanning every tracked state and asking `overlapping` is O(resources) inside a
-per-pass loop: invisible on a twenty-pass render graph, 1.75 s of a 2 s compile
-at the fourteen hundred a model graph arrives at. Resources without slices get
-an empty entry and the O(1) path.
+Map each sliced resource's id to its slices' ids, built once per compile because
+scanning with `overlapping` per handover is quadratic on large model graphs.
 """
 function sliceindex(g::Graph)
     idx = Dict{Int,Vector{Int}}()
@@ -1445,10 +1005,10 @@ function sliceindex(g::Graph)
 end
 
 """
-Everything the old tenant was last doing, across however many ids it is tracked
-under. Whole and sliced usages of one transient live under different ids, and the
-handover has to wait for all of them, not for whichever the transient itself
-happens to be keyed by.
+    lastuses(states, slices, id) -> Vector{Type}
+
+The distinct current usages of resource `id` and all of its slices, which live
+under different ids; an aliasing handover must wait for all of them.
 """
 function lastuses(states::Dict{Int,ResourceState}, slices::Dict{Int,Vector{Int}},
                   id::Int)
@@ -1465,28 +1025,17 @@ function lastuses(states::Dict{Int,ResourceState}, slices::Dict{Int,Vector{Int}}
     out
 end
 
-# ── Barriers ──────────────────────────────────────────────────────────────────
-
 dispatchrange(n::Integer) = n
 
 dispatchrange(t::Tuple) = t
 
 dispatchrange(x) = count(x)
 
-# A `DeviceRange` is never read here: the count lives on the device and reading
-# it would be the host readback the whole mechanism exists to avoid. The kernel
-# is compiled against a CEILING so `__validindex` lets every thread through, and
-# the real bound is the count the GPU reads at dispatch time — the kernel's own
-# `i <= n` check does the rest. Same contract as `ka_launch_indirect!`,
-# which is what records it.
-
 """
-The thread count a `DeviceRange` kernel is COMPILED against, when it declares no
-`max` of its own.
-
-Here and not in a backend: it is a compile-time bound on a kernel's index
-space, and every backend needs the same one. In a backend, core raises an
-`UndefVarError` the first time anything dispatches over a device-side count.
+The index space a `DeviceRange` kernel is compiled against when it gives no
+`max`. The host never reads the device count: `__validindex` passes every thread
+up to this ceiling and the kernel's own bounds check against the device count
+does the rest.
 """
 const INDIRECT_CEILING = 1024 * 1024
 
@@ -1495,14 +1044,10 @@ dispatchrange(r::DeviceRange) = something(r.max, INDIRECT_CEILING)
 """
     checkextents(plan)
 
-Verify every pass renders into attachments that agree on size.
-
-Core, over [`target_extent`](@ref): a mismatch is a graph error, not a driver
-one — Vulkan calls the result undefined (VUID-VkRenderingInfo-pNext-06079) and
-RADV draws it anyway, so without this it is a wrong picture rather than a
-message. A resize follows the swapchain and not a transient sized when the
-graph was built, so this is what catches a plan run at a size it was not
-compiled for.
+Throw if an attachment of a render pass is smaller than the render area (the
+first target's extent), e.g. a fixed-size transient after a window resize.
+Vulkan leaves that undefined (VUID-VkRenderingInfo-pNext-06079) and RADV renders
+garbage silently.
 """
 function checkextents(pl::Plan)
     for pp in pl.passes
@@ -1523,26 +1068,21 @@ function checkextents(pl::Plan)
 end
 
 """
-    Plan(graph; alias = true, coalesce = true, profile = false, policy = Overlap())
+    Plan(graph; alias = true, coalesce = true, profile = false, policy = Overlap(),
+         budget = submissionbudget(device))
 
-Compile `graph` into a plan.
-
-Generic over the backend. Compiling, reading the analysis out and registering
-the plan as a tenant of every arena it was placed into are the same on all of
-them; the two things that are not are hooks — [`makeprofiler`](@ref) and
-[`makeargmemory`](@ref) — which default to `nothing` for a backend that has
-neither.
+Compile `graph` into a plan and register it as a tenant of its arenas. Backend
+specifics come through [`makeprofiler`](@ref) and [`makeargmemory`](@ref).
+`budget` is the estimated GPU seconds per submission the recording is cut to.
 """
 Plan(g::Graph; coalesce::Bool = true, alias::Bool = true,
             profile::Bool = false, policy::Policy = Overlap(),
             budget::Real = submissionbudget(g.dev)) =
-    # Before the compile: registering the host-written resources adds the update
-    # pass and its `CopyDst` usages, which the barrier phase derives from.
+    # Before the compile: adds the update pass and its `CopyDst` usages.
     let hw = hostwritten!(g), c = compile!(Compile(g; alias, coalesce, policy))
         let a = analysis(c)
-            # A device that can time a pass gets a profiler whether or not the
-            # caller asked: the plan measures itself once, to cut its recording
-            # into submissions that fit the budget (see `partitionranges`).
+            # With timestamps and a finite budget, profile even unasked: the plan
+            # measures itself once to partition its recording (`partitionranges`).
             prof = profile || (timestamps(g.dev) && isfinite(budget)) ?
                    makeprofiler(g.dev, c.passes, true) : nothing
             pl = Plan(g, c.transitions, c.passes, c.pipelines, a.regions, a.arenas,
@@ -1551,24 +1091,17 @@ Plan(g::Graph; coalesce::Bool = true, alias::Bool = true,
                           makeargmemory(g.dev, c.passes), nothing,
                           Float64(budget), profile, fill(NaN, length(c.passes)),
                           UnitRange{Int}[], loopspans([pp.pass for pp in c.passes]),
-                          # `stamped`: a walked plan (a window's) writes timestamps
-                          # when it was asked to profile; `recordplan!` decides it
-                          # again for a recording.
+                          # `stamped`; `recordplan!` decides it again for a recording.
                           profile,
                           Dict{UInt64,Vector{Tuple{Any,Int}}}(),
                           Tuple{Any,Int,UInt64}[], hw, false, false, false)
-            # After construction, because a plan cannot be a tenant before it is a
-            # plan — and the arena it was just placed into may grow for the NEXT
-            # plan, which is when this registration earns its keep.
+            # So a later plan growing the arena patches or invalidates this one.
             for ar in a.arenas
                 tenant!(pool(g.dev), ar, pl)
             end
-            # A plan dropped without a `free!` gives its arenas, its argument
-            # memory and its recording back on its own. Tearing one down is not
-            # finalizer-safe — it unlistens from the pool's move listeners and
-            # destroys a command buffer — so this hands it to the pool and
-            # `reclaim!` does the work on the owning thread, which `run!` calls
-            # every submission.
+            # Teardown is not finalizer-safe (move listeners, command buffers), so
+            # the finalizer queues the plan and `reclaim!` frees it on the owning
+            # thread at the next submission.
             finalizer(p -> retireplan!(pool(p.graph.dev), p), pl)
             pl
         end
@@ -1578,10 +1111,6 @@ Plan(g::Graph; coalesce::Bool = true, alias::Bool = true,
     Graph(device) -> Graph
 
 An empty graph for `device`.
-
-Generic: a graph holds passes, surfaces, transients and an id table, and not one
-of those is a backend's. Both backends defined this identically before it moved
-here.
 """
 Graph(dev::Device) =
     Graph{typeof(dev)}(dev, Pass[], WindowSurface[], TransientResource[],
@@ -1591,20 +1120,10 @@ Graph(dev::Device) =
 """
     Transient.Buffer(graph, T, dims...; hostwritten = false) -> TransientBuffer
 
-A buffer the graph owns: the placer decides where it lives and which other
-transient it may share those bytes with, and it has no storage until `Plan` has
-run.
-
-Shaped, and the one-argument form is the N = 1 case rather than a different
-thing — a kernel gets `size(t)` extents and does not have to be told them
-separately. See the note on the struct for why a DECLARED graph needs this:
-`use` interns by object identity, so the shape has to live on the handle rather
-than on a view of it.
-
-`hostwritten = true` says this graph will store into it from the host between
-runs (`t[:] = data`), which buys the aliasing safety for those bytes and costs
-the aliasing everywhere else in its arena — so it is declared here rather than
-assumed of every transient. `setindex!` refuses one that did not ask for it.
+A shaped buffer owned by the graph, placed (and possibly aliased with other
+transients) by `Plan`; it has no storage before that. Empty shapes throw.
+`hostwritten = true` allows host stores between runs (`t[:] = data`) by keeping
+its bytes unaliased from the update pass on; `setindex!` refuses other transients.
 """
 Transient.Buffer(g::Graph, ::Type{T}, n::Integer; kw...) where {T} =
     Transient.Buffer(g, T, (Int(n),); kw...)
@@ -1613,7 +1132,6 @@ Transient.Buffer(g::Graph, ::Type{T}, dims::Integer...; kw...) where {T} =
 function Transient.Buffer(g::Graph, ::Type{T}, dims::Dims{N};
                           hostwritten::Bool = false) where {T,N}
     checkedbytes(T,dims)
-    # Empty transients have no dispatch or placement; skip them at the shape decision.
     prod(dims) == 0 && throw(ArgumentError(
         "Transient.Buffer: $(dims) has no elements. An empty result needs no " *
         "buffer and no pass -- skip it where the shape is decided."))
@@ -1622,57 +1140,38 @@ function Transient.Buffer(g::Graph, ::Type{T}, dims::Dims{N};
     t
 end
 
-# `overlapping(::Graph, a, b)` is above, with the Dag phase. It is already
-# generic: a backend that never creates a `BufferRange` falls through to
-# `a == b`, which is the floor its docstring describes.
-
 npipelines(pl::Plan) = length(pl.pipelines)
 
 """
-Nanoseconds between a pass's two timestamps, or `nothing` if the pair cannot be
-from one frame.
+    elapsed(lo, hi, period) -> Float64 or nothing
 
-The queries are `UInt64`, so an end that precedes its start does not come out
-negative — it wraps to about 1.8e19 ns, which `timings` then reports as a
-hundred billion milliseconds. That happens: the pool is reset at the head of
-every frame's recording, and a read that races the reset can take the start word
-from one frame and the end word from the next, with both availability bits set.
-There is no time to report for such a pair, so it is dropped rather than
-averaged in.
+Time between two timestamp ticks, or `nothing` if `hi < lo`. A read racing the
+per-frame query pool reset can pair words from two frames, and the `UInt64`
+difference would wrap.
 """
 elapsed(lo::UInt64, hi::UInt64, period) = hi < lo ? nothing : Float64(hi - lo) * period
 
-"""Whether this plan's commands have been written — see `record!`."""
+"""Whether this plan holds a recording (see `record!`)."""
 recorded(pl::Plan) = pl.recording !== nothing
 
-"""_Whether this plan is free of a recording whose baked addresses constrain the
-pool. `movable` asks it for the block trim: trimming destroys whole blocks, which
-patching cannot follow. Arena GROWTH does not ask — a buffers arena patches
-its recorded tenants (see `notify_move!`), an images arena re-records them.
+"""
+    remappable(plan) -> Bool
 
-KNOWN GAP (2026-09-21): patching is not enough for a plan whose arena MOVED.
-`bake` resolves every dispatch's arguments into concrete device arrays when the
-plan is BUILT, and `remap!` rebinds the transients without re-resolving those.
-On Vulkan `notify_move!` patches the recorded BDAs and hides it; the HOST
-backend has neither a recording nor BDAs, so a remapped plan keeps writing the
-old block while `storage` reads the new one. Reproduced from the editor: two
-live compositions of different sizes, the smaller one wrong in 100% of pixels
-after the larger was built. Changing this predicate does NOT fix it — the
-buffers path never consults it."""
+Whether the plan has no recording with baked addresses. The block trim
+(`movable`) is skipped otherwise, since destroyed blocks cannot be patched; arena
+growth instead patches a recorded plan in a buffers arena (`notify_move!`) and
+invalidates one in an images arena.
+"""
 remappable(pl::Plan) = pl.recording === nothing
 
 """
     invalidate!(pl)
 
-Throw a recording away that something other than this plan made wrong, and
-have `run!` write it again before it next submits. For the one kind of move
-patching cannot express — an image, whose `VkImage` and view the commands name
-directly — and for a refit that re-laid the plan out. Nothing for a plan that
-was never recorded: `run!` refuses those instead of recording them.
-
-Marked and restored rather than recorded here, because an images arena grows
-under whichever thread is compiling the OTHER plan, inside the pool's lock, and
-a recording is written on the owning thread only.
+Drop the recording and mark the plan stale so `run!` re-records before its next
+submit. Used when an images arena moves (commands name image handles) and after
+a refit. No-op for an unrecorded plan. Re-recording is deferred because arena
+growth runs on another plan's thread under the pool lock, and only the owning
+thread records.
 """
 function invalidate!(pl::Plan)
     pl.recording === nothing && return pl
@@ -1684,14 +1183,13 @@ end
 """
     droprecording!(pl)
 
-Throw the recording away. The patch table goes with it: its offsets are into
-the argument memory the next recording rewrites.
+Release the recording and clear the patch table, whose offsets point into the
+argument memory the next recording rewrites.
 """
 function droprecording!(pl::Plan)
     pl.recording === nothing && return pl
-    # Stop listening FIRST: a patch target can be a region the recording owns,
-    # so no move may be allowed to queue a write into it once `release!` has
-    # handed the bytes back to the pool.
+    # Unlisten first: a move must not queue a patch into a region `release!`
+    # has already returned to the pool.
     unlisten_moves!(pool(pl.graph.dev), pl)
     release!(pl.recording)
     pl.recording = nothing
@@ -1705,27 +1203,11 @@ lp_of(d::CompiledDispatch) = d.launch
 """
     runonce!(g) -> nothing
 
-Plan, record and run one graph, then free the plan.
-
-The whole verb for work that happens ONCE and is afterwards only read: packing
-a checkpoint's weights, quantising them, growing a cache. Such work is a kernel
-like any other and belongs in a `Graph`, which is the only thing that knows
-where a kernel's intrinsics come from and what its arguments are — there is no
-immediate-launch entry point in this API, by design.
-
-Declaring buys two things a bare launch cannot. `Plan` puts a barrier between a
-pass and the pass that reads what it wrote, inferred from what each kernel
-touches rather than left to the queue's ordering; and the `Graph` already
-carries the device, which is more specific than a backend.
-
-No wait. `free!` retires the plan's regions rather than destroying them, and
-`reclaim!` runs the destroy only once the device has passed the submission —
-see `free!` below. The buffers the graph wrote are NOT freed: they are the
-result, and the plan owns only its recording, argument memory and arenas.
-
-It is not free: `Plan` and `record!` cost roughly a millisecond for a small
-graph, so this is for work done once and not per step. Work that recurs wants
-one plan recorded once and replayed with `run!`.
+Plan, record and run `g` once, then free the plan, for one-off work such as
+packing weights (there is no immediate-launch API). Does not wait: `free!`
+retires the plan's regions. Buffers the graph wrote are not freed. Planning and
+recording cost about a millisecond, so recurring work should reuse a plan with
+`run!`.
 """
 function runonce!(g::Graph)
     plan = Plan(g)
@@ -1736,28 +1218,20 @@ function runonce!(g::Graph)
 end
 
 """
-Give this plan's regions back to the pool — its transients', and the argument
-memory its recording reads. The pipelines are ordinary backend objects and the
-GC reclaims those; a region is the thing only an explicit call can return,
-because nothing here finalizes.
+    free!(plan)
 
-No precondition: the regions are retired, so a plan freed immediately after its
-last `run!` — the ordinary case, with its recording still in flight — is fine.
+Drop the recording and retire the plan's transient regions and argument memory
+to the pool. Safe right after `run!`: regions are reclaimed only once the device
+has passed them. Idempotent; a dropped plan is freed by its finalizer through
+`reclaim!`.
 """
 function free!(pl::Plan)
-    # At most once: a plan that is explicitly freed and then collected must not
-    # give the same regions back twice, and the CAS is what makes `free!`
-    # optional rather than required.
+    # At most once: an explicit `free!` and the finalizer may both run.
     _, won = @atomicreplace pl.freed false => true
     won || return pl
-    # The recording too, and before the regions: it holds a command buffer, a
-    # descriptor set per acceleration structure it binds, and a reference to
-    # every resource its commands name. Dropping the plan alone would leave all
-    # of that to the GC, which does not know it is holding device memory. This
-    # also takes the plan off the move listeners and drops its patch table.
+    # Before the regions: the recording holds a command buffer, descriptor sets
+    # and references to every resource it names, and listens for moves.
     droprecording!(pl)
-    # The argument memory is a region like the transients' are, so it goes back
-    # the same way, and this call is its one owner.
     let am = pl.args
         am === nothing || retire!(pool(pl.graph.dev), pl.graph.dev, am.store)
     end
@@ -1765,27 +1239,22 @@ function free!(pl::Plan)
     giveup!(pool(pl.graph.dev), pl.graph.dev, pl.slabs, pl.arenas, pl)
 end
 
-"""Re-materialise this plan's transients of `kind` into the arena's new region.
-Its own offsets are unaffected by the arena moving; only the base changed."""
+"""
+    remap!(plan, kind, region)
+
+Re-materialise the plan's transients placed in arena `kind` at the same offsets
+in the arena's new `region`.
+"""
 function remap!(pl::Plan, kind, region)
     ts = pl.graph.transients
     for (i, t) in enumerate(ts)
-        # The key it was PLACED in, which is `arena(t)` unless its kind needed
-        # more than one allocation; see `ArenaPart`.
+        # The placement key: `arena(t)` unless split across parts (`ArenaPart`).
         pl.parts[i] == kind || continue
         materialize!(pl.graph.dev, t, memoryof(region), offset(region) + pl.offsets[i])
     end
-    # …and on a backend that cannot patch, the plan is now inconsistent with
-    # itself: `bake` resolved every dispatch's arguments into device arrays over
-    # the OLD region when the plan was built, and nothing above touches those.
-    # Vulkan patches those addresses (`notify_move!`), which is what
-    # [`patchable`](@ref) answers and why it is asked here rather than assumed
-    # either way; a backend with neither a recording nor addresses to patch
-    # wrote the old block and read the new one — 100% wrong pixels,
-    # silently. A recompile is the only thing that re-resolves them, so the
-    # plan is marked and `refit!` — which `run!` calls before every submit —
-    # does it. NOT done here: this runs while the pool is mid-growth, and a
-    # recompile would re-enter placement.
+    # `bake` resolved dispatch arguments over the old region. Unless the backend
+    # patches them (`patchable`), mark the plan so `refit!` recompiles before the
+    # next submit; recompiling here would re-enter placement mid-growth.
     patchable(pl.graph.dev) || (pl.replaced = true)
     return pl
 end
@@ -1794,28 +1263,17 @@ end
 """
     kernelfor(kernel, group, backend)
 
-The KernelAbstractions kernel object for a launch, from whichever backend is
-running it.
-
-Declared here, answered by each backend: `k(backend)` and `k(backend, group)`
-are the same two lines everywhere, but `backend` is the backend's own KA object.
+The KernelAbstractions kernel object for a launch: `k(backend)`, or
+`k(backend, group)` when a group is given (methods in `kalaunch.jl`).
 """
 function kernelfor end
 
 """
-A materialised transient's storage, from whatever `materialize!` put in `block`.
+    storage(t::TransientBuffer)
 
-Two backends out of three put the finished array there — a `Vector` view on the
-host, a borrowed `MtlArray` on Metal — and hand it straight back. Vulkan cannot:
-`block` holds a [`BufferBlock`](@ref), because placement needs the
-`VkBuffer` identity and an array view does not carry it, so the `LavaArray` is
-built over the block on demand.
-
-Dispatch on the block and not one method per backend, which is what this was:
-the backend wrote `storage(t::TransientBuffer{T}) where {T}`, the same signature
-as an untyped `TransientBuffer`, so it OVERWROTE this rather than specialising
-it — fatal during precompilation, and had it loaded, whichever module was
-included last would have decided the answer for every backend at once.
+The array `materialize!` stored in `t.block`, returned as is, or built on demand
+when the block is a [`BufferBlock`](@ref) (Vulkan). Backends specialise on the
+block type: a method on `TransientBuffer{T}` itself would overwrite this one.
 """
 storage(t::TransientBuffer) = storage(t, t.block)
 storage(::TransientBuffer, block) = block

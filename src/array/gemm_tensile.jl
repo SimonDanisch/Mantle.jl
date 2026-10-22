@@ -1,58 +1,16 @@
-# ── The Tensile kernel ───────────────────────────────────────────────────────
-#
-# rocBLAS's fp16 GEMM for RDNA3, ported. rocBLAS 7.2 answers every FLUX.2-klein
-# projection in Mantle's own layout — `C (M x N) = A (M x K) * B (K x N)`, all
-# column-major, which is rocBLAS's "NN" — with one Tensile kernel:
-#
-#     Cijk_Ailk_Bljk_HHS_BH_MT128x128x16_MI16x16x16x1_SN_1LDSB0_..._GLVWA8_GLVWB8_
-#     ..._LPA0_LPB8_..._PGR1_PLR1_..._TLDS1_UMLDSA0_UMLDSB1_..._WG32_4_1_WGM4
-#
-# and this is that kernel's structure, read from its disassembly
-# (`TensileLibrary_Type_HH_HPA_Contraction_l_Ailk_Bljk_Cijk_Dijk_gfx1100.co`):
-#
-#   * a 128 x 128 tile per workgroup, k in steps of 16, four subgroups of 64 x 64
-#     — each a 4 x 4 block of 16 x 16 cooperative matrices;
-#   * two LDS buffers, so one barrier per k step;
-#   * per step each lane moves two 16-byte chunks of A and two of B, global to
-#     LDS, unconverted and untransposed: A stays m-major and unpadded, B k-major
-#     with padded rows;
-#   * per step a subgroup loads four A and four B fragments and issues their 4 x 4
-#     outer product;
-#   * workgroups in groups (Tensile's WGM).
-#
-# Measured on an RX 7900 XTX (RADV, gfx1100) against rocBLAS in the same process
-# on the same random data, FLUX's four shapes, median TFLOP/s:
-#
-#     shape (tokens x features x K)   staged prefetch   this    rocBLAS
-#     4480 x 27648 x 3072                    51           88       98
-#     9088 x 27648 x 3072                    51           92       99
-#     9088 x  3072 x 12288                   53           88       95
-#     4480 x  9216 x 3072                    53           81       90
-#
-# and on an RTX 4000 Ada 40-43 -> 47-50. Three things got it from the 75% of
-# rocBLAS a literal port reached to the 91% above, each found by ablation:
-#
-#   1. **Addressing.** Each lane forms its four 32-bit byte offsets once, and a
-#      workgroup-uniform base moves by one k step. Indexing the arrays instead
-#      made ACO recompute 64-bit addresses in VALU every step (69 VALU per two
-#      steps against Tensile's none); this form is `global_load v_off, s[base]`.
-#   2. **Store first.** ACO hoists the LDS stores, and the barrier with them,
-#      above the WMMAs however the source orders them. Storing the tile that was
-#      fetched a whole step ago, before fetching the next, makes that harmless:
-#      the stores wait on loads that have long landed.
-#   3. **Grouping along N.** Eight column blocks walked down N, the weight tile
-#      shared by the eight while it is in cache: +5% over grouping along M.
-#
-# What is left (per-clock ablations, `fluxbench/infra/RESULTS.md`): Mesa caps LDS
-# reads at 64 bits, so B fragments are 4 x ds_load_b64 where Tensile issues
-# 2 x ds_load_b128, and ACO places the barrier before the WMMAs where Tensile has
-# it after. Neither is reachable from SPIR-V.
+# rocBLAS's fp16 NN GEMM for RDNA3 (Tensile MT128x128x16_MI16x16x16x1, gfx1100),
+# ported from its disassembly: a 128 x 128 tile per workgroup, k steps of 16, four
+# 64 x 64 subgroups of 4 x 4 cooperative matrices, two LDS buffers (one barrier per
+# step). About 91% of rocBLAS on an RX 7900 XTX, from three choices: lanes address
+# through 32-bit byte offsets from a uniform base (indexing makes ACO recompute
+# 64-bit addresses every step); each step stores the tile fetched a step earlier
+# before fetching (ACO hoists LDS stores above the WMMAs anyway); workgroups group
+# along N. The rest of the gap is not reachable from SPIR-V.
 
 """
-Whether `coopmat_gemm!` takes the Tensile kernel for the products it accepts
-(`tensile_gemm_ok`). On: it is faster than every staged tiling on both devices it
-was measured on, see the table above. A benchmark of the staged family passes
-`tensile = false`.
+Whether `coopmat_gemm!` takes the Tensile kernel for the products
+`tensile_gemm_ok` accepts. On because it beats every staged tiling on the RX 7900
+XTX and the RTX 4000 Ada; a benchmark of the staged family passes `tensile = false`.
 """
 const GEMM_TENSILE_DEFAULT = true
 
@@ -65,23 +23,18 @@ const TENSILE_BK = 16                # k per step: one cooperative matrix deep
 const TENSILE_WG = 4 * COOPMAT_SUBGROUP
 
 """
-B's LDS row in fp16: the step's 16 values plus 24 of padding.
-
-A cooperative-matrix load needs a 16-byte multiple for its stride
-(VUID-RuntimeSpirv-OpCooperativeMatrixLoadKHR-08986). Of those, 40 measured best
-on gfx1100: 32 puts a subgroup's rows on the same banks (-25%), 24 loses 15-20%
-on two of FLUX's shapes. 36 — IREE's padding, not a 16-byte multiple and
-only working because RADV splits the reads — is within 2%. Tensile's own scheme,
-8 halfs of padding per 128, has no single stride, so a cooperative-matrix load
-cannot express it.
+B's LDS row in fp16: the step's 16 values plus 24 of padding. A cooperative-matrix
+load needs a stride that is a 16-byte multiple
+(VUID-RuntimeSpirv-OpCooperativeMatrixLoadKHR-08986); of those, 40 measured best
+on gfx1100, while 32 puts a subgroup's rows on the same banks. Tensile's own
+padding has no single stride, so a cooperative-matrix load cannot express it.
 """
 const TENSILE_LDB = 40
 
 """
-Column blocks per group of workgroups. Groups of 8 consecutive workgroups take
-eight column blocks of one row block, so the row block's A tile is read by all
-eight while it is in cache; 4 and 16 are within noise of 8, and grouping row
-blocks instead is 5% slower.
+Column blocks per group of workgroups: eight consecutive workgroups take eight
+column blocks of one row block and share its A tile in cache. 4 and 16 are within
+noise; grouping row blocks instead is slower.
 """
 const TENSILE_GROUP = 8
 
@@ -109,10 +62,9 @@ what lets the compiler keep `p` uniform and `off` per lane.
     unsafe_load(reinterpret(Core.LLVMPtr{GemmU4,A}, p + off), 1, Val(16))
 
 """
-Store a 128-bit load into `f16vec4` LDS at element `i`, as its two 64-bit halves
-(the compilers fuse them back into one 128-bit or a paired 64-bit store). The LDS
-is `f16vec4` because that is the vector type every backend can load a
-cooperative matrix from.
+Store a 128-bit load into `f16vec4` LDS at element `i` as its two 64-bit halves,
+which the compilers fuse back into one store. `f16vec4` because every backend can
+load a cooperative matrix from it.
 """
 @inline function stage16!(s, i, v::GemmU4)
     lo = Base.llvmcall("""
@@ -129,9 +81,8 @@ cooperative matrix from.
 end
 
 let
-    # The three pieces of a k step, spliced into the kernel below where they run:
-    # the body is written once and its locals (the four staged chunks, the sixteen
-    # accumulators) stay plain SSA values, as the emitter needs them to be.
+    # The three pieces of a k step, spliced into the kernel below so the body is
+    # written once and its locals stay plain SSA values, as the emitter needs.
     SA = TENSILE_BK * TENSILE_BM ÷ 4       # one A buffer, in f16vec4
     LB = TENSILE_LDB ÷ 4                   # one B row, in f16vec4
     SB = TENSILE_BN * LB                   # one B buffer, in f16vec4
@@ -169,15 +120,10 @@ let
 
         `C = epi.(A * B .+ bias)` for fp16 `A` (`M x K`) and `B` (`K x N`), fp32
         accumulation, `C` fp16 or fp32. One workgroup of `TENSILE_WG` lanes per
-        128 x 128 tile; `M` and `N` multiples of 128, `K` of 32, `A` and `B`
-        16-byte aligned (`tensile_gemm_ok`). See the comment at the top of
-        `gemm_tensile.jl` for where every choice comes from.
-
-        The k loop runs steps in pairs, one per LDS buffer, so the buffer offsets
-        are constants. Each step stores the tile fetched one step earlier, fetches
-        the next, multiplies, and synchronises — a store into the buffer the
-        previous step read is safe after that step's barrier, and the buffer it
-        multiplies was stored before it.
+        128 x 128 tile, under the constraints `tensile_gemm_ok` checks. The k loop
+        runs steps in pairs, one per LDS buffer, so buffer offsets are constants.
+        Each step stores the tile fetched one step earlier into the buffer the
+        previous step's barrier freed, fetches the next, multiplies, synchronises.
         """
         function coopmat_gemm_tensile_kernel!(C, A, B, bias, epi,
                                               ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
@@ -245,7 +191,7 @@ reads 16 bytes at a time and walks the whole of K in one plane:
   * one batch, `splitk == 1`;
   * `M` and `N` multiples of 128 and `K` of 32 (k steps run in pairs);
   * `A` and `B` 16-byte aligned (`basealignment`), since the loads step from their
-    bases — a view at an odd offset takes the staged kernels instead;
+    bases;
   * each operand under 4 GiB, since lanes address it with 32-bit byte offsets.
 """
 @inline function tensile_gemm_ok(C, A, B, M::Int, N::Int, K::Int, nbatch::Int, splitk::Int)

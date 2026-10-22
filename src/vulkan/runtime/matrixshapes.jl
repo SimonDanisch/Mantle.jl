@@ -1,28 +1,9 @@
-# The driver's cooperative-matrix table, and the two mappings that read it.
-#
-# Split out of `device/acceleratedmatrix.jl`, which holds `CoopMatrix` — the TYPE
-# a kernel is compiled against. These are device QUERIES: they read
-# `ctx.coopmat_shapes`, which is a Vulkan property array fetched at device
-# creation, so they belong with the runtime and not with the type.
-#
-# `caps(ctx)` calls `matrixshapes` to fill `DeviceCaps.shapes`, and from there
-# `KernelInterface`'s `supports` / `bestshape` answer for the device without
-# anything else asking the driver again.
+# Queries of the driver's cooperative-matrix table, `ctx.coopmat_shapes`, read
+# at device creation. `caps(ctx)` fills `DeviceCaps.shapes` from `matrixshapes`.
 
-"""
-    coopmat_shape(ctx, T, M, N, K) -> Bool
-
-Whether the running device implements this tile. The hardware supports a fixed
-set of `(M, N, K, dtype)` combinations, so a kernel picks one of those or uses
-`MMatrix` instead.
-"""
-# VkComponentTypeKHR. Only the types a cooperative-matrix operand can currently
-# have in Lava; an unmapped type reports "no such shape" rather than matching one
-# by accident.
-#
-# The table is written once, in one direction, and the inverse is derived from it
-# — two hand-written tables are two chances for one entry to disagree, and the
-# symptom would be a shape silently reported as a type it is not.
+# `VkComponentTypeKHR` codes in order (code = index - 1), only the types Lava
+# maps; an unmapped type matches no shape. The inverse is derived from this one
+# table so the two cannot disagree.
 const VK_COMPONENT_TYPES = (Float16, Float32, Float64, Int8, Int16, Int32, Int64,
                             UInt8, UInt16, UInt32, UInt64)
 
@@ -39,13 +20,9 @@ const VK_SCOPE_WORKGROUP = UInt32(2)
 """
     matrixshapes(ctx) -> Vector{MatrixShape}
 
-The driver's cooperative-matrix table as [`MatrixShape`](@ref)s.
-
-`ctx.coopmat_shapes` is queried at device creation, and this is that data in
-the vocabulary Mantle can also name, so a kernel picks its tile from what the
-device said rather than from a constant that happens to be right on one card.
-
-Entries whose component type Lava does not map are dropped rather than guessed.
+The driver's cooperative-matrix table as [`MatrixShape`](@ref)s, so kernels
+pick tiles from what the device reports. Entries with an unmapped component type
+or scope are dropped.
 """
 function matrixshapes(ctx::VkContext)
     out = MatrixShape[]
@@ -62,17 +39,14 @@ function matrixshapes(ctx::VkContext)
     return out
 end
 
-# `T` is the A/B operand type and it is part of the match, not accepted and
-# ignored in favour of M, N and K. A device can report the same extents for
-# completely different component types — this one lists 16x16x16 for
-# (Float16 -> Float32), (Float16 -> Float16), (UInt8 -> Int32) and
-# (Int8 -> Int32) — so an extent-only match says "yes" for Float16 on hardware
-# that only does the integer forms, and the kernel then emits cooperative-matrix
-# instructions the device cannot execute.
-#
-# The accumulator type is not checked because the signature does not carry one;
-# callers that care (`coopmat_gemm_available`) rely on the operand type plus the
-# extents, which is what distinguishes the shapes in practice.
+"""
+    coopmat_shape(ctx, T, M, N, K) -> Bool
+
+Whether the device implements a subgroup-scope `M×N×K` cooperative-matrix tile
+with A/B operand type `T`. `T` is matched, not only the extents: devices list
+16×16×16 for both Float16 and Int8 operands, and an extent-only match emits
+instructions the device cannot run. The accumulator type is not checked.
+"""
 function coopmat_shape(ctx::VkContext, ::Type{T}, M::Integer, N::Integer,
                        K::Integer) where {T}
     ctx.coopmat_available || return false

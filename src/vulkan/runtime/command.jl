@@ -1,67 +1,20 @@
-# Command buffers, closed, and their submission.
-#
-# A command buffer is never open when a Mantle call returns. A plan's
-# `Recording` is written once at `record!` and submitted every run; everything
-# else — an ad hoc launch, an upload, a readback, a run's host stores, a frame
-# — is a `OneShot`, written and sealed inside one call (`oneshot`). Both reach
-# the driver through `submit!(bq, closed...)`, which submits the moment it is
-# called, and the `Submission` that carried them is what the queue keeps until
-# the timeline says the device is done: it owns the one-shots and pins the
-# recordings, and the sweep (`drain!`, over core `sweep!`) gives the first back
-# and drops the second.
-#
-# GC safety: every launch `pin!`s its arguments, pipelines and every other GPU
-# object it names through `hold!`, and core keeps the reference until the
-# submission's token has passed (`graph/lifetime.jl`). A Vulkan destructor fired
-# by Julia's GC records the destroy with `retire!` rather than running it, and
-# core runs it at the first drain after the work that named the buffer is done.
-#
-# Cross-queue sync: at `submit!`, core's `crosswaits!` reads the stamp of every
-# buffer these command buffers name and answers with the (channel, token) pairs
-# to wait on; this file lowers a pair to a timeline semaphore and a value, and
-# `stamp!` records the new owner once the submission has gone.
+# Command buffers and their submission. No command buffer is open when a Mantle
+# call returns: a plan's `Recording` is written once and submitted every run;
+# everything else is a `OneShot` written and sealed inside one call. Both reach
+# the driver only through `submit!`/`submitlist!`, which submit immediately.
+# Everything a command names goes through `hold!` and stays alive until the
+# submission's token has passed. Cross-queue order: core's `crosswaits!` maps the
+# named buffers' stamps to (channel, token) waits, lowered here to timeline
+# semaphore waits, and `stamp!` records the new owner after a successful submit.
 
-# Flush counter for benchmarking (atomic for thread safety)
-
-# Global dispatch counter for debugging (total dispatches across all flushes)
-
-# Dispatch info for debugging DEVICE_LOST
-
-# Ring buffer of last N dispatch names for crash debugging
+# Capacity of the per-context dispatch log ring.
 const MAX_DISPATCH_LOG = 2000
 
-# Toggle dispatch logging (disabled by default for zero-alloc dispatch path).
-# Enable with `ctx.diag.dispatch_logging = true` for debugging.
-# On DEVICE_LOST, the error handler re-enables logging automatically.
-# TEMP DEBUG: if true, submit! waits for the batch it just submitted to complete
-# and records wall-clock GPU time in BATCH_WAIT_TIMES. This SERIALIZES the pipeline
-# — only for measurement, not production. Used to identify batches whose actual
-# GPU execution time is near the amdgpu TDR threshold (~10 s).
-
 """
-Path to mirror the dispatch log to, or `nothing`.
-
-The in-memory ring buffer is worthless for the failure it exists to diagnose: a
-dispatch that never completes leaves the process blocked inside
-`vkWaitForFences`, where nothing can print it and SIGINT does not land, so the
-log dies with the session. Set this and each dispatch name is appended and
-flushed as it is recorded, which makes the last line in the file the kernel that
-hung.
-
-Off by default — it is a write and a flush per dispatch, on a path whose whole
-point is to allocate nothing.
-"""
-
-"""
-Build a dispatch's log string, behind an `invokelatest`.
-
-String interpolation reaches `print`/`show`, and `show` is a function every
-plotting package adds methods to — so a launch path that *infers* this depends
-on all of them, and loading GLMakie throws the precompiled launch code away.
-Measured: `Base.println` is the root of 2 121 of the rejected verification
-groups when SAM 2's image loads after VideoEditor.
-
-It only runs when dispatch logging is on, so the dynamic call is free.
+Build a dispatch's log string. Called through `invokelatest` so the launch path
+does not infer `print`/`show`: those gain methods from every plotting package,
+and loading GLMakie would invalidate the precompiled launch code. Runs only when
+dispatch logging is on.
 """
 @noinline dispatch_log_string(args...) = string(args...)
 
@@ -73,17 +26,16 @@ function log_dispatch!(bq::SubmitChannel{<:VulkanQueue}, info::String)
         popfirst!(log)
     end
     push!(log, info)
+    # `dispatch_log_file` mirrors each entry to disk, flushed per line: a hung
+    # dispatch blocks the process in a fence wait where the in-memory ring cannot
+    # be printed, so the file's last line names the kernel that hung.
     f = d.dispatch_log_file
     f === nothing || open(io -> (println(io, info); flush(io)), f, "a")
     return
 end
 
-# Register cleanup callback for reset_device!
-
-# Pre-allocated barrier buffer using raw VkMemoryBarrier (isbits).
-# VK.jl's MemoryBarrier wrapper allocates ~1.2KB per cmd_pipeline_barrier call
-# due to high-level → low-level struct conversion. Using direct ccall with the raw
-# VkMemoryBarrier struct is zero-alloc. Saves ~16MB/render for 13k dispatches.
+# Raw `VkMemoryBarrier` through a direct ccall: VK.jl's `MemoryBarrier` wrapper
+# allocates about 1.2 KB per `cmd_pipeline_barrier`.
 import Vulkan.VkCore: VkMemoryBarrier, VK_STRUCTURE_TYPE_MEMORY_BARRIER,
     VkAccessFlags, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
     VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -92,32 +44,21 @@ import Vulkan.VkCore: VkMemoryBarrier, VK_STRUCTURE_TYPE_MEMORY_BARRIER,
     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
     VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
     VK_PIPELINE_STAGE_TRANSFER_BIT, VkDependencyFlags
-# Function pointer for vkCmdPipelineBarrier — resolved in the VkContext constructor
-# Was `const CMD_PIPELINE_BARRIER_FPTR = Ref{Ptr{Nothing}}(C_NULL)`. A device
-# function pointer is per device, so it lives on `VkContext` now — see the field
-# there for what a global one did the first time two contexts existed.
+# `vkCmdPipelineBarrier` is a per-device pointer, resolved in the `VkContext`
+# constructor.
 @inline barrier_fptr(bq::SubmitChannel{<:VulkanQueue}) = (ctxof(bq)).cmd_pipeline_barrier_fptr
 
-# Despite the `_2_` in its name, VK.jl types PIPELINE_STAGE_2_ALL_COMMANDS_BIT
-# as the *sync1* `PipelineStageFlag`, while `Submission.wait_semaphores` is
-# sync2-typed — so pushing the constant straight in threw a MethodError on every
-# cross-queue wait. Same numeric value (0x10000); only the wrapper type differs.
+# VK.jl types `PIPELINE_STAGE_2_ALL_COMMANDS_BIT` as the sync1
+# `PipelineStageFlag`; sync2 fields need a `PipelineStageFlag2` (same value, 0x10000).
 const STAGE2_ALL_COMMANDS = VK.PipelineStageFlag2(VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
-
-# ── Closed command buffers ───────────────────────────────────────────────────
-#
-# `Recording` and `OneShot` are declared in `device.jl`, ahead of the queue
-# that holds them. What is here is how each is opened, sealed, submitted and
-# given back — and `submit!`, the one way either reaches the driver.
 
 """
     recpatch!(owner, address, at)
 
-Note that the eight bytes at `at` (a host pointer into memory the recording
-owns) hold the device address `address`. Called by `pack_arg!` for every
-pointer it writes. A [`Recording`](@ref) collects these so `record!` can build
-the plan's patch table — the map a resource move consults; anything else emits
-once and forgets, so the default is a no-op.
+Record that the eight bytes at host pointer `at`, in memory the recording owns,
+hold device address `address`. `pack_arg!` calls it for every pointer it writes.
+A [`Recording`](@ref) collects them for the plan's patch table, which a resource
+move consults (`closerecording!`); other owners ignore them.
 """
 recpatch!(owner, address::UInt64, at::Ptr{UInt8}) = nothing
 recpatch!(rec::Recording, address::UInt64, at::Ptr{UInt8}) =
@@ -126,23 +67,12 @@ recpatch!(rec::Recording, address::UInt64, at::Ptr{UInt8}) =
 """
     recpatchfields!(owner, T, at)
 
-Note every device pointer inside a just-packed value of type `T` whose bytes are
-at `at`.
-
-WHICH fields those are is core's answer (`devicepointeroffsets`), not this
-backend's: a plain struct holding a device array has to be patched like any
-other, and one copy of that knowledge per backend drifts.
-
-The COLLECTION stays here: Vulkan notes host pointers into the recording and
-resolves them to `(region, offset)` when it seals (`patchtarget`), which a
-backend whose argument memory is not a pool region does differently.
-
-Named for `recpatch!`, which it wraps, and deliberately NOT for core's
-`notepacked!`: core never calls this, the signatures are unrelated, and sharing
-the name made it look like a vocabulary hook to
-`test/vulkan/test_backend_vocabulary.jl` — which is right, since a backend adding
-a method to a core function outside the vocabulary is exactly what that test is
-for.
+[`recpatch!`](@ref) every nonzero device pointer inside the packed `T` at `at`.
+Which fields hold pointers is core's `devicepointeroffsets`; collecting host
+pointers and resolving them to `(region, offset)` at seal (`patchtarget`) is
+this backend's. Not a method of core's `notepacked!`: core never calls it, and
+`test/test_backend_vocabulary.jl` rejects backend methods on core functions
+outside the vocabulary.
 """
 @inline function recpatchfields!(owner, ::Type{T}, at::Ptr{UInt8}) where {T}
     fields = devicepointeroffsets(T)
@@ -155,20 +85,17 @@ for.
     return nothing
 end
 
-"""One primary command buffer from the queue's pool. A recording keeps its for
-as long as it lives; a one-shot's stays with the one-shot, which the queue
-pools for ever."""
+"""Allocate one primary command buffer from the queue's pool. It stays with its
+`OneShot`, which core pools; a `Recording` borrows it until `release!`."""
 function allocate_cmd(bq::SubmitChannel{<:VulkanQueue})
     alloc_info = VK.CommandBufferAllocateInfo(driver(bq).cmd_pool, VK.COMMAND_BUFFER_LEVEL_PRIMARY, 1)
     return throw_if_error(bq, "vkAllocateCommandBuffers",
         VK.allocate_command_buffers(vkdevice(bq), alloc_info))[1]
 end
 
-# The two infos this file opens command buffers with, built ONCE. The
-# low-level `_` struct is a boxed value (it carries a deps vector for GC
-# rooting), so constructing one per open cost ~100 bytes of a `run!` that
-# allocates nothing. They name no handle — only flags — so one instance per
-# flag set is correct for every device and every command buffer.
+# Begin infos built once: the low-level struct is boxed (it carries a GC deps
+# vector), so one per begin allocated about 100 bytes in an allocation-free
+# `run!`. They hold only flags, so one instance serves every command buffer.
 const BEGIN_INFO_ONE_TIME =
     VK._CommandBufferBeginInfo(flags = VK.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
 const BEGIN_INFO_SIMULTANEOUS =
@@ -177,26 +104,18 @@ const BEGIN_INFO_SIMULTANEOUS =
 """
     recording!(bq) -> Recording
 
-Open a plan's command buffer, and begin it.
-
-**`SIMULTANEOUS_USE`, and it is required rather than chosen.** A command buffer
-without it must not be pending execution when it is submitted again, and there is
-one recording per plan: nothing stops `run!` being called twice before the device
-has finished the first, so two runs routinely overlap on the queue.
-
-`ONE_TIME_SUBMIT` is not a candidate: it means "submitted once, then reset or
-freed".
+Open and begin a plan's command buffer with `SIMULTANEOUS_USE`, which is
+required: there is one recording per plan, and `run!` may submit it again while
+the previous run is still pending.
 """
 function recording!(bq::SubmitChannel{<:VulkanQueue})
     ownthread(bq)
     device_lost(ctxof(bq)) && throw(LavaError(
         "recording!", "Vulkan device is lost — cannot record",
         "Call reset_device!() to reinitialize, or restart Julia."))
-    # The command buffer comes from the same pool a one-shot's does — core's
-    # `acquire!`, which sweeps first, hands back a reset buffer and opens the
-    # hold frame this recording will take at `seal!`. The `OneShot` shell around
-    # it is dropped here and rebuilt by `release!`: what is pooled is the
-    # command buffer, and a recording is what it is being used AS.
+    # Same pool as a one-shot: core's `acquire!` sweeps, returns a reset buffer
+    # and opens the hold frame this recording takes at `seal!`. The `OneShot`
+    # shell is dropped here and rebuilt by `release!`.
     o = acquire!(bq)
     throw_if_error(bq, "vkBeginCommandBuffer",
         VK._begin_command_buffer(o.cmd, BEGIN_INFO_SIMULTANEOUS))
@@ -204,8 +123,8 @@ function recording!(bq::SubmitChannel{<:VulkanQueue})
                      Tuple{UInt64,Ptr{UInt8}}[], nothing, VkManagedBuffer[])
 end
 
-"""Close a command buffer. Nothing more may be emitted into it, and it can be
-submitted."""
+"""Close a command buffer: nothing more may be emitted, and it can be submitted.
+Idempotent."""
 function seal!(c::Closed)
     c.open || return c
     throw_if_error(queueof(c), "vkEndCommandBuffer", VK.end_command_buffer(c.cmd))
@@ -214,34 +133,23 @@ function seal!(c::Closed)
     return c
 end
 
-# What a closed buffer does with the channel's hold frame, which is the one
-# place the two lifetimes differ. A one-shot is submitted once, so its holds
-# belong to that submission and `submitted!` takes them. A recording is
-# submitted every run and must outlive all of them, so it takes the frame
-# itself and keeps it until `release!`; each submission of it then holds only
-# the recording.
+# A one-shot is submitted once, so its hold frame goes to that submission
+# (`submissionholds!`). A recording is submitted every run and must outlive all
+# of them, so it takes the frame at seal and keeps it until `release!`.
 sealed!(::OneShot) = nothing
 sealed!(rec::Recording) = (rec.holds = takeholds!(queueof(rec)); nothing)
 
-# …and the other half of the same rule: a recording took its frame at seal, so
-# handing it over must NOT pop a second one. See `submissionholds!`.
+# A recording took its frame at seal; handing it over must not pop another.
 submissionholds!(::SubmitChannel, ::Recording) = nothing
 
 """
     release!(rec::Recording)
 
-Give back everything the recording holds: its regions, its holds, its descriptor
-sets and its command buffer. Running it afterwards is an error.
-
-Explicit because the caller knows when a recording is dead and the GC does not
-know it is holding device memory; `Mantle.free!` on a plan calls it.
-
-It WAITS if the last submission of this recording has not completed, and that is
-not a precondition moved onto the caller — the regions are retired rather than
-released, so they cost nothing either way, but the command buffer goes on to
-serve one-shots from here, and re-beginning one the device is still reading is
-undefined behaviour. `CapturedSequence` dropped its buffers on the floor instead,
-which left VK.jl's finalizer to free them at whatever moment the GC chose.
+Give back the recording's regions, holds, descriptor sets and command buffer;
+running it afterwards is an error. `Mantle.free!` on a plan calls it. Waits for
+the recording's last submission: the regions are only retired, but the command
+buffer goes on to serve one-shots, and re-beginning one the device still reads
+is undefined behaviour.
 """
 function release!(rec::Recording)
     bq = queueof(rec)
@@ -251,8 +159,8 @@ function release!(rec::Recording)
     end
     rec.token = 0
     rec.open && seal!(rec)          # takes the hold frame if it is still open
-    # The list itself goes back to the channel's spares, and the recording is
-    # left with none — `sealed!` takes a fresh frame if it is recorded again.
+    # The hold list goes back to the channel's spares; `sealed!` takes a fresh
+    # frame if this is recorded again.
     unhold!(bq, rec.holds)
     rec.holds = nothing
     empty!(rec.sync)
@@ -263,17 +171,13 @@ function release!(rec::Recording)
     end
     empty!(rec.regions)
     empty!(rec.sets)
-    # The command buffer outlives the recording as a one-shot's: core's free
-    # list is where every command buffer this channel has allocated ends up.
+    # The command buffer returns to core's free list as a one-shot.
     finishrecording!(bq, OneShot(bq, rec.cmd, Region[], VkManagedBuffer[], false))
     return nothing
 end
 
-# ── The four recording primitives core asks of a backend — 2.3 ──────────────
-#
-# Core owns the free list, the reuse discipline and the moment each of these is
-# called (`graph/lifetime.jl`). What is here is a `VkCommandBuffer` being
-# allocated, reset and freed, and nothing else.
+# The recording primitives core calls (`graph/lifetime.jl`); core owns the free
+# list and decides when each runs.
 
 makerecording(bq::SubmitChannel{<:VulkanQueue}) =
     OneShot(bq, allocate_cmd(bq), Region[], VkManagedBuffer[], false)
@@ -289,24 +193,15 @@ destroyrecording!(bq::SubmitChannel{<:VulkanQueue}, o::OneShot) =
     VK.free_command_buffers(vkdevice(bq), driver(bq).cmd_pool, [o.cmd])
 
 """
-Give a one-shot back to core's free list, and what it borrowed back to the pool.
-
-Called once the submission that carried it has passed, or when it never reached
-the device (`release!`) — which is why the regions are RELEASED outright rather
-than retired: both paths establish that nothing can be reading them, and
-retiring would hold the span for one more submission boundary on top of a wait
-that has already happened.
-
-Clearing `sync` here and not in `resetrecording!` is the difference between a
-pooled one-shot that holds a buffer alive until it is next used and one that
-holds nothing: the list is a strong reference to every `VkManagedBuffer` the
-commands named.
+Give a one-shot back to core's free list and its regions back to the pool.
+Called once its submission has passed or when it never reached the device, so
+nothing reads the regions and they are released, not retired. `sync` is cleared
+here rather than in `resetrecording!` so a pooled one-shot keeps no
+`VkManagedBuffer` alive.
 """
 function finishrecording!(bq::SubmitChannel{<:VulkanQueue}, o::OneShot)
-    # A build that threw hands back a command buffer that was BEGUN and never
-    # ended. `vkResetCommandBuffer` would take it either way, but a pooled
-    # one-shot that reads as open is indistinguishable from one that is being
-    # written, and every assertion about the pool has to special-case it.
+    # A build that threw returns a begun, never-ended buffer; seal it so no
+    # pooled one-shot reads as open.
     o.open && seal!(o)
     if !isempty(o.regions)
         for r in o.regions
@@ -319,9 +214,8 @@ function finishrecording!(bq::SubmitChannel{<:VulkanQueue}, o::OneShot)
     return nothing
 end
 
-"""Emit an allocation-free memory dependency with caller-supplied stage/access
-masks. One-shots use the all-command head barrier for unknown prior work;
-compute dispatches and overlapping stores use their narrower domains."""
+"""Emit an allocation-free global memory barrier with the given stage and access
+masks."""
 @inline function memorybarrier!(cmd::VK.CommandBuffer, ctx::VkContext,
                                srcstage, dststage, srcaccess, dstaccess)
     barrier_ref = Ref(VkMemoryBarrier(VK_STRUCTURE_TYPE_MEMORY_BARRIER, C_NULL,
@@ -350,42 +244,20 @@ end
 
 """
     oneshot(f, bq) -> OneShot
-    oneshot!(f, bq; tag = :oneshot) -> token      (core, `graph/lifetime.jl`)
+    oneshot!(f, bq; tag = nothing) -> token      (core, `graph/lifetime.jl`)
 
-A command buffer written, sealed and — with the bang — submitted inside one
-call:
-
-    oneshot!(bq) do e            # e is an Emitter over a pooled OneShot
-        emit_barrier!(e, …)
-        emit_dispatch!(e, …)
-    end                          # sealed and submitted on the way out
-
-`f` gets the emitter and writes what it needs. Nothing it writes is visible to
-any other call and nothing another call wrote is visible to it: the one-shot
-opens with the global barrier [`headbarrier!`](@ref) writes, because nothing
-has declared what these commands touch — that is what an ad hoc launch, an
-upload or a readback IS — and everything against everything is the only sound
-ordering against whatever ran before.
-
-The form without the bang seals and hands the one-shot back unsubmitted, for
-the caller who has to put it in ONE submission with something else: `run!`
-puts the run's host stores and pointer patches in front of the plan's
-recording that way, and `submit!(bq, closed...)` is the only way two closed
-buffers ever share a submission.
-
-What it costs is a `vkBeginCommandBuffer`/`vkEndCommandBuffer` pair and a
-`vkQueueSubmit2` per call, accepted: how many ad hoc launches are batched efficiently is a question for a
-graph built to hold them, not for the queue to answer with a buffer and a
-threshold.
+Write a command buffer inside one call: `f` gets an `Emitter` over a pooled
+`OneShot`. `oneshot!` also submits it; `oneshot` seals it and returns it
+unsubmitted, for a caller that submits it together with other work (a frame
+with its swapchain semaphores). Every one-shot opens with
+[`headbarrier!`](@ref), since nothing declares what its commands touch.
 """
 function oneshot(f, bq::SubmitChannel{<:VulkanQueue})
     o = openoneshot(bq)
     try
         f(Emitter(o, nothing))
     catch
-        # What was written goes with the buffer: given back to core with the
-        # holds it took, and sealed on the way (`finishrecording!`) so it can be
-        # begun again.
+        # Back to core with its holds; `finishrecording!` seals it.
         release!(bq, o)
         rethrow()
     end
@@ -393,8 +265,8 @@ function oneshot(f, bq::SubmitChannel{<:VulkanQueue})
     return o
 end
 
-"""Open a one-shot and hand it back open, for a caller that emits into it over
-several calls — a run's front, a windowed frame — and seals it itself."""
+"""Open a one-shot and return it open, for a caller that emits into it over
+several calls (a run's front one-shot, a windowed frame) and seals it itself."""
 function openoneshot(bq::SubmitChannel{<:VulkanQueue})
     ownthread(bq)
     ctx = ctxof(bq)
@@ -402,14 +274,12 @@ function openoneshot(bq::SubmitChannel{<:VulkanQueue})
         "oneshot", "Vulkan device is lost — cannot record",
         "Call reset_device!() to reinitialize, or restart Julia. " *
         "All existing LavaArrays are invalid after reset and must be re-allocated."))
-    # Core sweeps, drains the destroys that were waiting on those submissions,
-    # and hands back a reset buffer with a hold frame open on it.
+    # `acquire!` drains, then returns a reset buffer with a hold frame open.
     return begin!(acquire!(bq), BEGIN_INFO_ONE_TIME)
 end
 
-# Begin a pooled command buffer and write the head barrier into it. The one
-# place a `OneShot` becomes writable, so core's `recorder` and this backend's
-# `openoneshot` cannot disagree about what a started recording is.
+# Begin a pooled command buffer and write the head barrier. Shared by core's
+# `recorder` and `openoneshot` so both start a one-shot the same way.
 function begin!(o::OneShot, info)
     bq = queueof(o)
     throw_if_error(bq, "vkBeginCommandBuffer", VK._begin_command_buffer(o.cmd, info))
@@ -418,21 +288,16 @@ function begin!(o::OneShot, info)
     return o
 end
 
-# What core's `oneshot!` records through — see `graph/lifetime.jl`.
+# The emitter core's `oneshot!` records through.
 recorder(bq::SubmitChannel{<:VulkanQueue}, o::OneShot) = Emitter(begin!(o, BEGIN_INFO_ONE_TIME), nothing)
 
 """
     hold!(owner::Closed, obj) -> obj
     hold!(e::Emitter, obj) -> obj
 
-Everything a command names goes through here: the channel keeps a reference
-until the submission that carries these commands has passed (core's
-[`hold!`](@ref)), and a buffer is additionally recorded in `owner.sync`, which
-is what the ordering between channels is derived from at submit.
-
-This is what `pin!` was, at the same 35 sites, with the decision on the other
-side of the line: what has to stay alive and until when is core's, and what is
-here is the driver fact "these commands name this buffer".
+Every object a command names goes through here. The channel keeps it alive until
+the submission carrying these commands has passed (core's [`hold!`](@ref)), and
+a buffer is also recorded in `owner.sync` for cross-channel ordering at submit.
 """
 @inline function hold!(owner::Closed, obj)
     hold!(queueof(owner), obj)
@@ -444,23 +309,10 @@ end
     syncbuf!(owner, obj)
 
 Record that these commands name `obj`'s buffer, for `crosswaits!` and `stamp!`
-at submit. A no-op for anything with no device-visible bytes of its own.
-
-Deduplicated through the buffer's `syncpos`: where it last went into a list. If the
-owner's list holds this buffer at that position it is listed already; otherwise it
-is appended and the position recorded. One comparison, no hashing, nothing
-allocated.
-
-It was an identity SCAN of the list, on the grounds that lists are short — at
-|list| = 4 a scan beat a hash, 0.04 µs against 0.221 µs. A frame of a 1000-widget
-RayMakie GUI is a one-shot naming thousands of buffers, so the scan made every
-frame quadratic in its draws: 12 % of a `gui_1000` raster frame on a Radeon 8060S,
-and the reason giving each mesh draw four more (one-element instance) buffers cost
-that frame 13 % (measured 2026-10-07, interleaved A/B on Bosgame).
-
-A buffer listed by two owners in turn can be listed twice by one of them; `syncpos`
-names only the latest list. `crosswaits!` and `stamp!` read a buffer twice to the
-same effect, so a repeat costs a second look and nothing else.
+at submit; a no-op for objects without device-visible bytes. Deduplicated in
+O(1) through `buf.syncpos`, the buffer's index in the list it last joined; an
+identity scan made a frame naming thousands of buffers quadratic. A buffer
+alternating between owners can appear twice in one list, which is harmless.
 """
 @inline syncbuf!(::Closed, @nospecialize(obj)) = nothing
 @inline function syncbuf!(owner::Closed, buf::VkManagedBuffer)
@@ -475,26 +327,15 @@ end
 """
     submit!(bq, closed...; waits = (), signals = (), fence = nothing) -> token
 
-Hand closed command buffers to the device in one `vkQueueSubmit2`, in the
-order given, and return the timeline value that submission signals.
+Submit closed command buffers immediately, in order, in one `vkQueueSubmit2`,
+and return the timeline value the submission signals. Buffers share a
+submission only by being passed together. `waits` and `signals` are extra
+`(semaphore, value, stage)` triples for presentation, beside the derived
+cross-channel waits and the timeline signal; `fence` is signalled on completion.
 
-The moment it is called. There is no list on the queue for them to join and
-no threshold that decides when they go: what a caller closed is what the
-driver gets, and several closed buffers go together only by being passed
-together here. `run!` puts a run's stores and patches in front of the plan's
-recording that way; a frame's one-shot goes with the swapchain's semaphores
-and the frame's fence.
-
-`waits` and `signals` are extra `(semaphore, value, stage)` triples beside the
-cross-channel waits core derives and the timeline signal every submission
-makes; `fence` is signalled when the submission completes. All three exist for
-the present path and nothing else.
-
-**It does not record the submission.** What was handed over and what has to
-outlive it is the caller's to say — `submitted!(bq, token, Submission(oneshot,
-takeholds!(bq)))` — because only the caller knows whether the recording it
-submitted is a pooled one-shot it is giving away or a plan's, submitted again
-next run. Core's `oneshot!` is the common case written once.
+Does not record the submission: the caller hands it to core (`handover!`),
+since only the caller knows whether it gives away a one-shot or will resubmit
+a recording.
 """
 submit!(bq::SubmitChannel{<:VulkanQueue}, closed::Closed...;
         waits = (), signals = (), fence::Union{Nothing,VK.Fence} = nothing) =
@@ -503,10 +344,9 @@ submit!(bq::SubmitChannel{<:VulkanQueue}, closed::Closed...;
 """
     submitlist!(bq, front, closed; waits, signals, fence) -> token
 
-[`submit!`](@ref) of `front` (a one-shot, or `nothing`) followed by every element of
-`closed`, which may be a tuple or a vector and may name one recording several times
-— a loop body's pieces, once per iteration, in one submission. A vector the caller
-keeps is what lets a run submit several pieces without allocating.
+[`submit!`](@ref) of `front` (a one-shot or `nothing`) followed by every element
+of `closed`, a tuple or vector that may name one recording several times (a loop
+body's pieces). A caller-kept vector lets a run submit without allocating.
 """
 function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Closed}, closed;
                      waits = (), signals = (), fence::Union{Nothing,VK.Fence} = nothing)
@@ -516,19 +356,14 @@ function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Clos
     device_lost(ctx) && throw(LavaError(
         "submit!", "Vulkan device is lost — cannot submit",
         "Call reset_device!()"))
-    # Sealing here rather than refusing an open buffer: submitting IS the moment
-    # nothing more can be added, and `seal!` is idempotent, so the caller that
-    # closed its own buffer (`oneshot`, a frame) pays nothing.
+    # Submitting is when nothing more can be added; `seal!` is idempotent.
     front === nothing || seal!(front)
     for c in closed
         seal!(c)
     end
     Threads.atomic_add!(ctx.diag.flush_counter, 1)
-    # Give back what the device has finished — the command buffers this call
-    # takes from the free list, and the destroys that were waiting on them.
-    # Once per SUBMISSION: per launch it is a `Dict` lookup for the device plus
-    # a dynamic `passed` on an `Any` token, 171 bytes, pinned by
-    # `test_dispatch_allocation.jl`.
+    # Reclaim finished work once per submission: per launch it allocates
+    # (`test_dispatch_allocation.jl`).
     drain!(bq)
 
     nf = front === nothing ? 0 : 1
@@ -542,10 +377,8 @@ function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Clos
             VK.vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, C_NULL, c.cmd.vks, UInt32(0))
     end
 
-    # What this submission has to wait for, derived by core from the buffers
-    # these command buffers name and the stamps core wrote on them. The
-    # decision is `crosswaits!`'s; what is here is the lowering of a (channel,
-    # token) pair to a timeline semaphore and a value.
+    # Core derives the waits from the named buffers' stamps; lowered below to
+    # timeline semaphore waits.
     cross = q.waits
     empty!(cross)
     front === nothing || crosswaits!(bq, front.sync, cross)
@@ -553,9 +386,8 @@ function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Clos
         crosswaits!(bq, c.sync, cross)
     end
 
-    # The value this submission will signal. Deliberately NOT rolled back if the
-    # submit fails: nothing is stamped with it either, and giving a value back
-    # would risk handing it to two submissions.
+    # Not rolled back if the submit fails: nothing is stamped with it, and
+    # reusing a value could give it to two submissions.
     q.next_timeline += 1
     token = q.next_timeline
 
@@ -586,10 +418,8 @@ function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Clos
             sem.vks, UInt64(v), UInt64(stage), UInt32(0))
     end
 
-    # Pre-submit safety scan: catch stale-BDA-in-argument-memory corruption
-    # BEFORE the GPU sees it.  Off by default (`ctx.diag.presubmit_scan = true`
-    # to turn on for debugging).  Cost ~hundreds-of-µs per submit; never on by
-    # default.
+    # Opt-in debug scan for stale device addresses in argument memory before the
+    # GPU reads them; costs hundreds of µs per submit.
     if ctx.diag.presubmit_scan
         unknowns = scan_slabs_for_unknown_bdas(bq)
         if !isempty(unknowns)
@@ -603,8 +433,8 @@ function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Clos
         end
     end
 
-    # SLAB DUMP for cascade investigation: if `ctx.diag.slab_dump_target` is
-    # non-zero, search the unified arena for any UInt64 == target and log offsets.
+    # Opt-in debug: log the offsets in the unified arena that hold
+    # `slab_dump_target`.
     if ctx.diag.slab_dump_target != UInt64(0)
         target = ctx.diag.slab_dump_target
         hits = Int[]
@@ -623,8 +453,7 @@ function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Clos
     end
 
     raw_subs = q.raw_submits
-    # The fptr, not the symbol: the dispatch table's answer for this device,
-    # looked up per submit (a Dict{Symbol, Ptr} read — it allocates nothing).
+    # This device's pointer from the dispatch table; the lookup allocates nothing.
     fptr = VK.function_pointer(VK.global_dispatcher[], vkdevice(bq), :vkQueueSubmit2)
     vkfence = fence === nothing ? VK.vk.VkFence(C_NULL) : fence.vks
     submit_result = GC.@preserve raw_cbs raw_waits raw_sigs raw_subs begin
@@ -635,10 +464,8 @@ function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Clos
         VK.vk.vkQueueSubmit2(vkqueue(bq).vks, UInt32(1), pointer(raw_subs), vkfence, fptr)
     end
     if submit_result != VK.vk.VK_SUCCESS
-        # The raw fast path gets no ResultTypes wrapper, so what `mark_if_lost!`
-        # does happens directly: flip device_lost on DEVICE_LOST and throw.
-        # Nothing was stamped, so nothing waits for a token that will never be
-        # signalled.
+        # The raw call has no result wrapper, so mark device loss here. Nothing
+        # was stamped, so nothing waits for this token.
         submit_result == VK.vk.VK_ERROR_DEVICE_LOST && (ctx.device_lost = true)
         throw(LavaError("vkQueueSubmit2",
             "queue submission failed with $(submit_result) " *
@@ -646,9 +473,7 @@ function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Clos
             "If the device is lost, call reset_device!() or restart Julia."))
     end
 
-    # It ran, so it is now the work that last named these buffers: core writes
-    # the stamp the next `crosswaits!`, the next explicit destroy and every
-    # host readback read.
+    # Submitted: this token is now the last work naming these buffers.
     front === nothing || stamp!(bq, token, front.sync)
     for c in closed
         stamp!(bq, token, c.sync)
@@ -656,8 +481,7 @@ function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Clos
 
     q.prev_dispatch_info = q.last_dispatch_info
     dg = ctx.diag
-    # DEBUG: synchronous per-submission wall-clock timing. Serializes the
-    # pipeline but lets us see GPU execution time per submission. Opt-in.
+    # Opt-in debug: wait for each submission to time it; serializes the queue.
     if dg.batch_timing
         t0 = time()
         wr = VK.wait_semaphores(vkdevice(bq),
@@ -666,26 +490,18 @@ function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Clos
         push!(dg.batch_wait_times, time() - t0)
         push!(dg.batch_wait_info, driver(bq).last_dispatch_info)
         push!(dg.batch_wait_dispatches, ncb)
-        # Don't throw from here — let the next call surface it normally — but
-        # do mark device_lost so the next gate fires.
+        # Do not throw here; mark device loss so the next gate fires.
         mark_if_lost!(bq, wr)
     end
     return token
 end
 
 """
-The timeline semaphore of another channel this submission has to wait on.
-
-The lowering half of `crosswaits!`, and the two checks that belong to it are
-driver facts rather than decisions:
-
-  * a timeline semaphore belongs to the device that created it, so waiting on
-    one from a different `VkContext` hands device B a handle from device A,
-    which the driver takes as a segfault inside `vkQueueSubmit2` — no Julia
-    frame, nothing to grep for. That state means two contexts exist and buffers
-    have been mixed between them; say so here.
-  * a RELEASED channel was idle when it went, so its work has landed and its
-    semaphore is gone with it. Waiting on it is both unnecessary and unsafe.
+The timeline semaphore of another channel this submission waits on. Throws if
+that channel belongs to another `VkContext`: a semaphore of device A in a device
+B submit segfaults inside `vkQueueSubmit2`. A released channel was flushed first
+(`release_batch_queue!`), so `crosswaits!` finds its tokens passed and never
+asks for it.
 """
 @inline function crosssemaphore(bq::SubmitChannel{<:VulkanQueue}, other)
     o = other::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
@@ -697,27 +513,14 @@ driver facts rather than decisions:
     return timelineof(o)
 end
 
-# ── The emitter ─────────────────────────────────────────────────────────────
-#
-# Where commands go, and who keeps alive what they name. Every `emit_*` takes one
-# of these and never a queue, which is what keeps a split threshold, an elision
-# tracker or a skip-barrier flag from firing here: none of them can be reached
-# from something that has no queue to consult. That also deleted all
-# five outright, so what a queue can still decide is when to submit.
-
 """
     Emitter(owner, args)
 
-`owner` is a [`Recording`](@ref) when the plan was recorded once and a
-[`OneShot`](@ref) when the work belongs to this call alone (a run's stores, a
-frame, the unmodelled launch path). Both answer `hold!` and `scratch!`, which
-is all an emitter asks of one.
-
-`args` is the plan's `ArgMemory`, or `nothing` off the plan path, where
-arguments come from a scratch region instead.
-
-No `base::Int` for the argument slot being written: there is one copy of a
-plan's arguments, so the base is zero everywhere.
+Where commands are written. Every `emit_*` takes an emitter and never a queue,
+so no queue state can change what a command buffer contains. `owner` is a
+[`Recording`](@ref) for a plan recorded once or a [`OneShot`](@ref) for work
+belonging to this call; both answer `hold!` and `scratch!`. `args` is the plan's
+`ArgMemory`, or `nothing` off the plan path, where arguments go to scratch.
 """
 struct Emitter{O,C,A}
     cmd::VK.CommandBuffer
@@ -728,31 +531,20 @@ end
 
 Emitter(c::Closed, am) = Emitter(c.cmd, c, ctxof(queueof(c)), am)
 
-# The emit sites hold through the emitter — see `hold!(::Closed, obj)` above.
-# Here rather than beside it because `Emitter` is declared after the closed
-# types it wraps.
 @inline hold!(e::Emitter, obj) = hold!(e.owner, obj)
 
 """The queue an emitter's commands will be submitted on."""
 queueof(e::Emitter{O}) where {O<:Closed} = queueof(e.owner)
 
 """
-    emit_dispatch!(emitter, pipeline, argaddr, groups, tlas, name = "")
-    emit_dispatch_indirect!(emitter, pipeline, argaddr, indirect, tlas, name = "")
+    emit_dispatch!(emitter, pipeline, argaddr, groups, tlas = nothing, name = "")
+    emit_dispatch_indirect!(emitter, pipeline, argaddr, indirect, tlas = nothing, name = "")
 
-Write one compute dispatch. Bind, push the argument address, dispatch — and
-nothing else.
-
-**No barrier.** A plan already knows: what each pass touches is read off its
-kernels, the compile derives the hazards, and `emitpass!` emits exactly
-those. Between independent passes it emits nothing and the GPU pipelines them.
-The unmodelled path gets the one barrier a closed buffer opens with
-([`headbarrier!`](@ref)), because nothing has told it what its kernels touch.
-
-The acceleration structure goes through [`bindtlas!`](@ref), which is a no-op
-for `nothing` — so there is one body here rather than one per HWTLAS-ness, and
-no `pipeline.needs_tlas_descriptor` branch. The set it binds belongs to the
-emitter's owner rather than being allocated per dispatch; see [`tlasset!`](@ref).
+Write one compute dispatch: bind, push the argument address, dispatch. No
+barrier: a plan emits its derived hazards (`emitpass!`), and a one-shot opens
+with [`headbarrier!`](@ref). The acceleration structure goes through
+[`bindtlas!`](@ref), a no-op for `nothing`; its descriptor set belongs to the
+emitter's owner ([`tlasset!`](@ref)).
 """
 @inline function emit_dispatch!(e::Emitter, pipeline::LavaComputePipeline, argaddr::UInt64,
                         groups::NTuple{3,<:Integer}, tlas = nothing,
@@ -781,8 +573,7 @@ end
     ts = maybe_write_dispatch_start_timestamp!(e.ctx, cmd, name)
     VK.cmd_dispatch_indirect(cmd, mb.buffer, UInt64(indirect.offset))
     maybe_write_dispatch_end_timestamp!(e.ctx, cmd, ts, e.ctx.cmd_pipeline_barrier_fptr)
-    # The workgroup counts are READ BY THE DEVICE from this buffer, so it has to
-    # outlive the dispatch exactly as an argument does.
+    # The device reads the workgroup counts from this buffer.
     hold!(e, indirect)
     emitted!(e, name)
     return nothing
@@ -792,17 +583,15 @@ end
     bindtlas!(emitter, pipeline, tlas)
 
 Bind an acceleration structure at set 0, binding 0, and hold everything a ray
-query walks into. A no-op without one — the `VulkanTLAS` method is in
-`raytracing/hwtlas.jl`, where the type exists.
+query reads. A no-op for `nothing`; the `VulkanTLAS` method is in
+`raytracing/hwtlas.jl`.
 """
 @inline bindtlas!(::Emitter, ::LavaComputePipeline, ::Nothing) = nothing
 
 """
-Note that a dispatch was written, for the log a DEVICE_LOST error prints.
-
-At EMIT time, which for a recorded plan is once rather than once per run. That is
-the honest place for it: the log answers "which kernel is in the command buffer
-that died", and the command buffer is built here.
+Log a written dispatch for the DEVICE_LOST report. Runs at emit time, so once
+per recording rather than per run: the log names the kernels in the command
+buffer that failed.
 """
 @inline function emitted!(e::Emitter, name::AbstractString)
     d = e.ctx.diag
@@ -815,18 +604,10 @@ end
 
 
 """
-How long `flush!` waits for the queue to drain before it gives up, in
-nanoseconds. `0` waits forever.
-
-`typemax(UInt64)` to `vkWaitSemaphores` is not a timeout: a dispatch that never
-completes gives a process that can only be killed, taking the in-memory dispatch
-log with it. That is the failure this wait exists to survive, so it gets a
-budget: long enough that no legitimate submission comes near it (a whole VAE
-decode is ~30 s of device work), short enough that a hang is a diagnosable error
-instead of a wedged session.
+Poll interval of `flush!` within its budget `driver(bq).flush_timeout_ns`
+(nanoseconds, `0` waits forever). Polling turns a TDR or a hung dispatch into an
+error, where one unbounded `vkWaitSemaphores` leaves a process only a kill ends.
 """
-
-"""Poll interval inside that budget, so a TDR is noticed without waiting it out."""
 const FLUSH_WAIT_QUANTUM_NS = UInt64(2) * 1_000_000_000
 
 
@@ -834,7 +615,7 @@ const FLUSH_WAIT_QUANTUM_NS = UInt64(2) * 1_000_000_000
 """
     push_constants!(cmd, layout, stage_flags, push_data)
 
-Record push constant update. No-op if push_data is empty.
+Record a push constant update; a no-op for empty `push_data`.
 """
 function push_constants!(cmd::VK.CommandBuffer, layout::VK.PipelineLayout,
                           stage_flags, push_data::Vector{UInt8})
@@ -869,12 +650,9 @@ end
 """
     checkexceptions!(ctx)
 
-Throw if a kernel on `ctx` threw since the last check, and clear the flag so the
-next check starts clean. Called after a wait, so whatever raised it has finished.
-
-The invocation that threw stopped where it threw; the others ran to the end. What
-the kernel wrote is therefore what it would have written without the invocations
-that stopped, which is why this is an error and not a warning.
+Throw if a kernel on `ctx` threw since the last check, and clear the flag. Call
+after a wait. The invocation that threw stopped there while the others finished,
+so the kernel's output is incomplete: an error, not a warning.
 """
 function checkexceptions!(ctx::VkContext)
     p = Ptr{UInt32}(ctx.exception_flag.mapped_ptr)
@@ -891,9 +669,8 @@ end
 """
     push_constants_bda!(cmd, layout, stage_flags, bda)
 
-Record an 8-byte BDA push constant update. Uses a stack-allocated Ref
-(concurrency-safe and still zero-heap-alloc since Refs of primitives are
-stack-promoted by the Julia compiler).
+Record an 8-byte push constant holding device address `bda`. The `Ref` does not
+escape, so this allocates nothing.
 """
 @inline function push_constants_bda!(cmd::VK.CommandBuffer, layout::VK.PipelineLayout,
                                       stage_flags, bda::UInt64)
@@ -906,12 +683,9 @@ stack-promoted by the Julia compiler).
 end
 
 """
-What to log and to label a timestamp with, or `""` when nobody is looking.
-
-`suffix...` and not one built string: the caller's pieces have to stay UNBUILT
-past the gate, or a dispatch pays for a name nothing reads. That is 835 bytes per
-dispatch when the pieces are `" g="` and a tuple — measured, and
-`test_dispatch_allocation.jl` is the test that measures it.
+What to log and label a timestamp with, or `""` when neither dispatch logging
+nor timing is on. Takes the pieces unbuilt so a dispatch pays nothing for a name
+nobody reads (835 bytes per dispatch otherwise, `test_dispatch_allocation.jl`).
 """
 @inline function dispatchinfo(bq::SubmitChannel{<:VulkanQueue}, suffix...)
     d = (ctxof(bq)).diag
@@ -920,13 +694,10 @@ dispatch when the pieces are `" g="` and a tuple — measured, and
 end
 
 """
-Between an unmodelled prepare and the indirect launch that reads what it wrote,
-inside one one-shot: the prepare's shader write, made visible to the command
-processor's indirect read and to the launch's own reads. A plan's fused prepare
-gets this from `emitprepares!`; the ad hoc paths (`ka_launch_indirect!`,
-`trace_rays_indirect!`) write both commands into one closed buffer and need it
-between them. `dst_stage` and `extra_dst_access` name the consumer — a compute
-dispatch or a ray-tracing launch.
+Barrier between an unmodelled prepare and the indirect launch that reads what it
+wrote, inside one one-shot: makes the prepare's shader writes visible to the
+indirect read and the launch's own reads. Plans get this from `emitprepares!`.
+`dst_stage` and `extra_dst_access` name the consumer (compute or ray tracing).
 """
 @inline function indirectbarrier!(e::Emitter, dst_stage::VK.PipelineStageFlag,
                                   extra_dst_access::VK.AccessFlag)
@@ -937,36 +708,18 @@ dispatch or a ray-tracing launch.
     return nothing
 end
 
-# ── Flush ──
-
 """
     query_timeline(bq::SubmitChannel{<:VulkanQueue}) -> UInt64
 
-Return the current counter of `timelineof(bq)`.  Replaces the old
-`try ... catch; typemax(UInt64); end` sentinel:
-
-  * On success, return the real counter value.
-  * On any `VulkanError`, set `ctxof(bq).device_lost` (if the code is
-    `ERROR_DEVICE_LOST`) and throw `LavaVulkanError`.  No silent fallback —
-    every caller must either have cleared the device-lost flag upstream
-    (so the happy path runs) or be prepared to propagate the throw.
-
-Callers are expected to gate on `device_lost(ctxof(bq))` themselves before
-calling this.  The only way the throw path fires is the race window where
-the device died between that upstream check and this query — and in that
-case, loud is correct: we want the dispatcher / finalizer log to show it.
+Current counter of `timelineof(bq)`. Raw and allocation-free because every sweep
+calls it; on error it repeats the query through the checked wrapper, marks
+device loss and throws `LavaVulkanError`. Callers gate on `device_lost` first,
+so the throw only fires if the device died in between.
 """
-# Raw and refilled, because this runs in every sweep: the checked wrapper
-# allocates a result box and a counter cell per call (~80 bytes), and a `run!`
-# allocates nothing. Errors take the cold path — the same query through the
-# checked wrapper, which fails the same way and throws with full context.
 @inline function query_timeline(bq::SubmitChannel{<:VulkanQueue})::UInt64
-    # The shared cell is the owning thread's. A finalizer asks the same question
-    # from the GC thread (see `deferred_as_frees`), and two threads writing one
-    # RefValue would hand each other torn or wrong counter values — a monotone
-    # counter read early is a premature "passed", which is a use-after-free.
-    # Off the owning thread the answer costs one fresh Ref, which is exactly
-    # the right price for how rare that call is.
+    # The shared counter cell belongs to the owning thread; another thread gets a
+    # fresh `Ref`. Two threads writing one cell could return a wrong counter, and
+    # a token reported passed too early is a use-after-free.
     ref = Threads.threadid() == bq.thread ?
           (driver(bq).slots).counter : Ref(UInt64(0))
     fptr = VK.function_pointer(VK.global_dispatcher[], vkdevice(bq),
@@ -988,16 +741,13 @@ end
 """
     wait_timeline!(bq, val)
 
-Block until this queue's timeline reaches `val`. The one-semaphore case of
-`wait_semaphores!`, raw and refilled out of the queue's slots: a fresh
-`SemaphoreWaitInfo` and its two vectors were ~300 bytes of every `waitfor!`.
-Errors fall through to the checked wrapper, which throws with context.
+Block until this queue's timeline reaches `val`. Raw, through the queue's slots,
+so a wait allocates nothing; errors fall through to the checked wrapper, which
+throws with context.
 """
 function wait_timeline!(bq::SubmitChannel{<:VulkanQueue}, val::UInt64)
-    # Same discipline as `query_timeline`: the slots are the owning thread's.
+    # The slots belong to the owning thread; other threads take the checked wrapper.
     if Threads.threadid() != bq.thread
-        # Not a path with a fast lane: a caller off the owning thread gets the
-        # checked wrapper, fresh info and all.
         wait_semaphores!(bq, VK.SemaphoreWaitInfo([timelineof(bq)], [val]))
         return nothing
     end
@@ -1019,12 +769,9 @@ end
 """
     waitfor!(bq, token)
 
-Block until THIS queue's timeline reaches `token`. The device-level
-`waitfor!(dev, tok)` asks the device's primary queue, which is right for a
-plan's run and wrong for a one-shot submitted on any other queue — a download
-of a buffer last written on a second queue, an acceleration-structure build
-on a queue the caller chose. A token is a value of one queue's timeline, and
-this waits on that queue.
+Block until this queue's timeline reaches `token`. A token belongs to one queue's
+timeline; the device-level `waitfor!(dev, tok)` waits on the primary queue and is
+wrong for work submitted on another.
 """
 function waitfor!(bq::SubmitChannel{<:VulkanQueue}, tok::UInt64)
     passed(bq, tok) && return nothing
@@ -1032,22 +779,16 @@ function waitfor!(bq::SubmitChannel{<:VulkanQueue}, tok::UInt64)
     return nothing
 end
 
-# ── Vulkan call helpers: single source of truth for device-lost handling ──
-#
-# Every Vulkan call that can fail should funnel through `throw_if_error` (or
-# its non-throwing sibling `mark_if_lost!` for callers with custom recovery).
-# This is the SOLE place the "VkResult → device_lost flag" rule lives, so
-# the gate at `oneshot` reliably fires after any
-# DEVICE_LOST regardless of which low-level call surfaced the error.
+# Fallible Vulkan calls go through `throw_if_error`, or `mark_if_lost!` for
+# callers with their own recovery, so every DEVICE_LOST sets the flag the entry
+# gates (`oneshot`, `submit!`, `flush!`) check.
 
 """
     mark_if_lost!(bq::SubmitChannel{<:VulkanQueue}, result)
     mark_if_lost!(ctx::VkContext, result)
 
-Mark `ctx.device_lost = true` iff `result` is a Vulkan `ERROR_DEVICE_LOST`.
-Does not unwrap, does not throw.  Use this when a caller needs to do its
-own recovery before throwing (`submit!`, `flush!`).  Otherwise prefer
-`throw_if_error` which handles the whole pattern.
+Mark the device lost if `result` is `ERROR_DEVICE_LOST`; never unwraps or
+throws. For callers that recover before throwing; otherwise use `throw_if_error`.
 """
 @inline function mark_if_lost!(ctx::VkContext, result)
     iserror(result) || return
@@ -1066,14 +807,9 @@ device_lost_hint(call) =
     throw_if_error(ctx::VkContext, result)
     throw_if_error(ctx_or_bq, call::String, result)       # adds a call name
 
-Canonical "do everything" Vulkan-call wrapper.
-On success → returns the unwrapped value.
-On error   → marks `ctx.device_lost` (if the error is `DEVICE_LOST`) and
-             throws `LavaVulkanError` with a hint.
-
-Replace any `unwrap(VK.foo(...))` with `throw_if_error(ctx, VK.foo(...))`
-to get the device-lost handling for free.  The wrappers below
-(`queue_submit!`, `wait_for_fences!`, ...) are thin spellings of this.
+Return the unwrapped value on success. On error, mark device loss for
+`ERROR_DEVICE_LOST` and throw `LavaVulkanError` naming `call`. Use instead of
+`unwrap(VK.foo(...))`.
 """
 @inline function throw_if_error(ctx::VkContext, call::String, result)
     iserror(result) || return unwrap(result)
@@ -1088,8 +824,7 @@ end
 """
     queue_submit!(bq, submits; fence=VK.Fence(C_NULL))
 
-`vkQueueSubmit` wrapper.  Auto-marks device_lost on failure and throws
-`LavaVulkanError`.
+`vkQueueSubmit` through `throw_if_error`.
 """
 @inline queue_submit!(bq::SubmitChannel{<:VulkanQueue}, submits::AbstractVector{VK.SubmitInfo};
                       fence=VK.Fence(C_NULL)) =
@@ -1098,7 +833,7 @@ end
 """
     queue_submit_2!(bq, submits; fence=VK.Fence(C_NULL))
 
-`vkQueueSubmit2` wrapper.  Auto-marks device_lost on failure.
+`vkQueueSubmit2` through `throw_if_error`.
 """
 @inline queue_submit_2!(bq::SubmitChannel{<:VulkanQueue}, submits::AbstractVector{VK.SubmitInfo2};
                         fence=VK.Fence(C_NULL)) =
@@ -1107,7 +842,7 @@ end
 """
     wait_for_fences!(bq, fences; wait_all=true, timeout=typemax(UInt64))
 
-`vkWaitForFences` wrapper.  Auto-marks device_lost on failure.
+`vkWaitForFences` through `throw_if_error`.
 """
 @inline wait_for_fences!(bq::SubmitChannel{<:VulkanQueue}, fences;
                          wait_all::Bool=true, timeout::UInt64=typemax(UInt64)) =
@@ -1116,63 +851,32 @@ end
 """
     wait_semaphores!(bq, info; timeout=typemax(UInt64))
 
-`vkWaitSemaphores` wrapper.  Auto-marks device_lost on failure.
+`vkWaitSemaphores` through `throw_if_error`.
 """
 @inline wait_semaphores!(bq::SubmitChannel{<:VulkanQueue}, info::VK.SemaphoreWaitInfo;
                          timeout::UInt64=typemax(UInt64)) =
     throw_if_error(bq, "vkWaitSemaphores", VK.wait_semaphores(vkdevice(bq), info, timeout))
 
 """
-    flush!(bq::SubmitChannel{<:VulkanQueue}, dev::Device)
+    flush_stall_report(bq, target) -> String
 
-Block until every submission on `bq` has been signalled on the queue's
-timeline semaphore.  Uses a single `wait_semaphores` call on the HIGHEST
-signal value — the timeline is monotonic, so once that value is reached every
-lower value is too. Nothing is submitted here: nothing recorded is ever
-unsubmitted.
+The queue's state when `flush!` timed out, as text for the error. Separates a
+slow or wedged kernel (counter one below `target`, its submission in flight)
+from a wait on a value nothing will signal (every in-flight submission already
+signalled): the queue runs in order, so the second is a deadlock, not slowness.
 """
-# What the queue looked like when `flush!` gave up, as text for the error.
-#
-# A bare "timed out waiting for timeline value N" does not distinguish the two
-# things that produce it, and they want opposite responses:
-#
-#   * a kernel that is genuinely slow or wedged — the counter sits one below
-#     `target`, the batch that signals it is in flight, and the dispatch log
-#     names the shader;
-#   * a wait on a value nothing will signal — every in-flight batch has already
-#     been signalled (`signal_value <= counter`) yet `target` is higher, or a
-#     batch waits on a value above the counter that no queued batch signals. A
-#     queue runs its submissions in order, so a batch blocked on such a wait
-#     also blocks the batch that would have signalled past it: a deadlock, not
-#     slowness.
-#
-# The second is what the intermittent decode-loop hang looks like from outside
-# (4 in-flight batches, a target that never arrives), and it could not be told
-# from the first without this. Cheap: three queries, only on the failure path.
-#
-# A comment, not a docstring: `flush!`'s own docstring follows immediately, and
-# two adjacent strings make `@doc` document the second one.
 function flush_stall_report(bq::SubmitChannel{<:VulkanQueue}, target::UInt64)
     io = IOBuffer()
     ctx = ctxof(bq)
-    # The one place a swallow is right, and it is narrowed to say why: this
-    # builds the diagnostic printed when a flush has ALREADY stalled, and the
-    # device may be lost. Failing to read the counter must not replace the report
-    # the caller is waiting for — but only a Vulkan error is tolerated, and the
-    # reason is printed rather than left blank.
+    # Runs after a stall on a possibly lost device: a failed counter read (a
+    # Vulkan error only) goes into the report instead of replacing it.
     cur = try
         unwrap(VK.get_semaphore_counter_value(ctx.device, timelineof(bq)))
     catch err
         err isa VK.VulkanError || rethrow()
         err
     end
-    # `readable`, and NOT `cur !== nothing`: the `catch` above binds `cur` to the
-    # EXCEPTION, so it is never `nothing` and that guard was dead. Both
-    # comparisons below then ran `b.signal_value <= cur` against a
-    # `VK.VulkanError` — a `MethodError` from inside the report, on the one path
-    # that builds it: after a flush has stalled, on a device that may be lost,
-    # which is exactly when the counter read fails. The report the caller waited
-    # for was replaced by a crash in the reporter.
+    # `cur` is the exception when the read failed, never `nothing`.
     readable = cur isa Integer
     println(io, "  timeline counter = ", readable ? cur : "unreadable ($cur)",
                 ", next_timeline = ", driver(bq).next_timeline,
@@ -1192,23 +896,22 @@ function flush_stall_report(bq::SubmitChannel{<:VulkanQueue}, target::UInt64)
     return String(take!(io))
 end
 
-# `::Device`, core's abstract type, and not `LavaDevice`: this file is included
-# before `graph.jl` declares that one. What matters is the ARGUMENT — the
-# portable `flush!(channel, device)` takes the Mantle device, which is what
-# `deviceof` answers and what core's one-argument form fills in.
+# `::Device` because `LavaDevice` is declared later, in `graph.jl`.
+"""
+    flush!(bq::SubmitChannel{<:VulkanQueue}, dev::Device)
+
+Block until the newest submission on `bq` has signalled the queue's timeline,
+then drain and check kernel exceptions and this context's validation messages.
+Submits nothing. Waits in quanta of `FLUSH_WAIT_QUANTUM_NS`, probing for device
+loss between them; throws on device loss or after `driver(bq).flush_timeout_ns`.
+"""
 function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
     ownthread(bq)
-    # Waiting on a semaphore of a dead device is a confusing failure; this
-    # turns it into a message that says what to do.
     device_lost(ctxof(bq)) && throw(LavaError("command flush", "Vulkan device lost",
         "Call reset_device!() to reinitialize, or restart Julia session."))
-    # One question, one list: `newest` covers every submission path, so there
-    # is no second record to fold a maximum over.
     target = something(newest(bq), UInt64(0))
-    # Nothing in flight is nothing to wait for, but not nothing to do: what the
-    # collector dropped since the last submission is held here until a drain, and
-    # returning before it left those regions on loan until the NEXT launch. A
-    # `waitidle` and a waiting `reclaim!` then gave back none of them.
+    # Nothing in flight still drains: regions dropped since the last submission
+    # are given back only at a drain.
     target == UInt64(0) && (drain!(bq); checkexceptions!(ctxof(bq)); return)
     budget = driver(bq).flush_timeout_ns
     quantum = budget == 0 ? typemax(UInt64) : min(budget, FLUSH_WAIT_QUANTUM_NS)
@@ -1217,47 +920,19 @@ function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
         wait_result = VK.wait_semaphores(vkdevice(bq),
             VK.SemaphoreWaitInfo([timelineof(bq)], [target]), quantum)
         if iserror(wait_result)
-            # Rich rethrow: flush! gets validation context + dispatcher hints the
-            # generic wrapper can't.  The mark_if_dl! call is the single source of
-            # truth for the device_lost flag.
+            # Adds validation messages and the dispatch log to the error.
             mark_if_lost!(bq, wait_result)
             throw_with_validation_context("vkWaitSemaphores", wait_result, bq)
         end
         unwrap(wait_result) == VK.SUCCESS && break
         waited += quantum
-        # A TDR marks the device lost while this call is still waiting on a value
-        # that will now never be signalled, so ask between quanta rather than
-        # sitting in one unbounded wait.
-        #
-        # ASK THE DRIVER, don't just read the flag. `device_lost(ctx)` is only
-        # ever set by `mark_if_lost!` from some OTHER call's `VkResult`, and
-        # during this wait there is no other call — so on a dead device the flag
-        # stays false forever. Worse, the two things we could ask disagree:
-        # `vkWaitSemaphores` returns TIMEOUT (not an error) and
-        # `vkGetSemaphoreCounterValue` returns a perfectly good stale counter,
-        # while `vkQueueWaitIdle` and `vkGetFenceStatus` report DEVICE_LOST.
-        # Lava polled the two that lie, so a GPU fault presented as a 120 s stall
-        # and the error told the user to RAISE the timeout — the one action that
-        # cannot help. Measured on MatAnyone: queue dead, counter happily
-        # answering 355, `vkQueueWaitIdle` -> ERROR_DEVICE_LOST.
-        #
-        # `vkQueueWaitIdle` is the probe, and it has to be: MEASURED on this
-        # driver with the device already dead, only one of five reports it —
-        #
-        #     get_fence_status(the AS fence)  silent
-        #     get_semaphore_counter_value     silent (returns a stale 355!)
-        #     empty queue_submit_2            silent
-        #     wait_semaphores(0 timeout)      silent
-        #     queue_wait_idle                 ERROR_DEVICE_LOST, 2.5 s
-        #
-        # Which calls surface a lost device is a per-driver fact, not a spec
-        # guarantee, so it is measured rather than reasoned about.
-        #
-        # It blocks, but only in a situation that is already abnormal — the first
-        # quantum has passed without the target being reached — and on a HEALTHY
-        # device blocking until the queue drains is exactly what `flush!` wants.
-        # So this costs nothing in the common case, where the wait succeeds on
-        # the first quantum and this line is never reached.
+        # Probe for device loss: the flag is only set from another call's
+        # `VkResult`, and on a lost device `vkWaitSemaphores` keeps returning
+        # TIMEOUT and `vkGetSemaphoreCounterValue` a stale value. Measured on a
+        # lost device, only `vkQueueWaitIdle` reported ERROR_DEVICE_LOST (fence
+        # status, empty submit and zero-timeout wait did not). It runs only after
+        # a quantum without progress, where blocking until idle is what `flush!`
+        # wants anyway.
         let st = VK.queue_wait_idle(vkqueue(bq))
             iserror(st) && mark_if_lost!(bq, st)
         end
@@ -1292,55 +967,30 @@ function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
     end
     drain!(bq)
     checkexceptions!(ctxof(bq))
-    # This channel's context, not the bound one: a second device's flush
-    # read the default device's validation messages and blamed itself for them.
+    # This channel's context, not the bound one, so a second device does not
+    # report the default device's validation messages.
     check_validation_errors!("flush!", ctxof(bq))
     return
 end
 
-# ── What a command names, and what core does with it ─────────────────────────
-#
-# One verb at the emit site — `hold!(owner, obj)`, declared above beside the
-# one-shot it writes into. It says the same thing `pin!` said and decides
-# nothing: core keeps the reference until the submission has passed
-# (`graph/lifetime.jl`), and `syncbuf!` records the buffer so `crosswaits!` and
-# `stamp!` can order this submission against the other channels at `submit!`.
-#
-# Whether a wait is needed, which semaphore to push and what the new stamp is
-# are core's four decisions and not a backend's, so nothing here reads
-# `buf.last_write_bq` to make them. What is left here is `stampof`, which says
-# where the answer is stored, and `crosssemaphore`, which lowers it.
-#
-# A new resource kind needs `stampof(::MyRes)` only if it has device-visible
-# bytes of its own, and `syncbuf!(owner, ::MyRes)` only if a command that names
-# it has to be ordered against another channel. Neither is needed to be held.
-
 """
     stampof(buf) -> Stamp
 
-Where core writes what it knows about this buffer: which channel last submitted
-work naming it, under which token, and how many recordings that can still submit
-hold it. See [`Mantle.Stamp`](@ref).
-
-The three fields it replaces were `last_write_bq`, `last_write_val` and
-`@atomic pins`, and each was read by backend code that decided something with
-it.
+Where core records which channel last submitted work naming `buf`, under which
+token, and how many recordings hold it ([`Mantle.Stamp`](@ref)). A new resource
+kind needs `stampof` only if it has device-visible bytes of its own, and a
+`syncbuf!` method only if commands naming it must be ordered against other
+channels; `hold!` needs neither.
 """
 @inline stampof(buf::VkManagedBuffer) = buf.stamp
-
-# ── Buffer copy ──────────────────────────────────────────────────────────
-#
-# One `cmd_copy_buffer` into whatever the emitter is writing, with both sides
-# pinned. No barrier of its own: inside a plan the barriers around a copy pass
-# are derived, and a one-shot opens with the global barrier that orders it
-# against everything before it.
 
 """
     cmd_copy_buffer!(e, src, dst, nbytes; src_off=0, dst_off=0)
 
-Write a GPU→GPU buffer copy.  `src` and `dst` may be either `VkManagedBuffer`
-(held, and named for ordering) or raw `VK.Buffer` handles, which the caller
-must keep alive itself.
+Write a device-to-device buffer copy, with no barrier of its own (a plan derives
+them, a one-shot opens with the head barrier). `src` and `dst` are
+`VkManagedBuffer`s, held and named for ordering, or raw `VK.Buffer` handles the
+caller keeps alive.
 """
 function cmd_copy_buffer!(e::Emitter, src, dst, nbytes::Integer;
                           src_off::Integer=0, dst_off::Integer=0)
@@ -1348,21 +998,17 @@ function cmd_copy_buffer!(e::Emitter, src, dst, nbytes::Integer;
     dst_vkbuf = dst isa VkManagedBuffer ? dst.buffer : dst
     region = VK.BufferCopy(UInt64(src_off), UInt64(dst_off), UInt64(nbytes))
     VK.cmd_copy_buffer(e.cmd, src_vkbuf, dst_vkbuf, [region])
-    # Hold both sides: the submission must outlive them, and naming them is what
-    # makes the transfer wait for whatever other channel wrote them last.
+    # Holding also orders the copy after another channel's last use of them.
     src isa VkManagedBuffer && hold!(e, src)
     dst isa VkManagedBuffer && hold!(e, dst)
     return nothing
 end
 
-# ── Error Reporting ──
-
-"""Throw a LavaError enriched with recent validation layer messages and dispatch log."""
+"""Throw a `LavaError` with recent validation messages and the dispatch log."""
 function throw_with_validation_context(call_name::String, err_result,
         bq::Union{Nothing,SubmitChannel{<:VulkanQueue}}=nothing)
-    # Re-enable dispatch logging so the next run captures debug info. `bq` when
-    # the caller has one — all three currently do — and the current context
-    # otherwise, since this is also reachable from a raw `VkResult` check.
+    # Re-enable dispatch logging so the next run records names: on `bq`'s
+    # context, or the bound one without `bq`.
     let c = bq === nothing ? VK_CONTEXT_REF[] : ctxof(bq)
         c === nothing || (c.diag.dispatch_logging = true)
     end
@@ -1384,9 +1030,7 @@ function throw_with_validation_context(call_name::String, err_result,
     end
 
     total = bq === nothing ? 0 : (ctxof(bq)).diag.total_dispatches[]
-    # Which kernel, on the queue that failed. Read process-wide these named
-    # whatever dispatched last anywhere, so a two-queue session could attribute
-    # one queue's DEVICE_LOST to another queue's kernel.
+    # Per queue, so the failure names the failing queue's kernel.
     prev_info = bq === nothing ? "" : driver(bq).prev_dispatch_info
     curr_info = bq === nothing ? "" : driver(bq).last_dispatch_info
     throw(LavaError(
@@ -1400,21 +1044,18 @@ $dispatch_detail""",
     ))
 end
 
-# ── Debugging API ──
-
 """
-    set_dispatch_logging!(enabled::Bool)
+    set_dispatch_logging!(enabled::Bool, ctx = vk_context())
 
-Enable or disable dispatch name logging. When enabled, each dispatch records
-its kernel name and parameters for crash debugging. Disabled by default for
-zero-alloc performance. Auto-enabled on DEVICE_LOST.
+Enable or disable logging each dispatch's name for crash reports. Off by default
+because it allocates per dispatch; a failed `flush!` wait turns it on.
 """
 set_dispatch_logging!(enabled::Bool, ctx::VkContext = vk_context()) =
     (ctx.diag.dispatch_logging = enabled)
 
 """
-    get_dispatch_log() -> Vector{String}
+    get_dispatch_log(ctx = vk_context()) -> Vector{String}
 
-Return a copy of the recent dispatch log (up to $MAX_DISPATCH_LOG entries).
+A copy of the recent dispatch log (up to $MAX_DISPATCH_LOG entries).
 """
 get_dispatch_log(ctx::VkContext = vk_context()) = copy(ctx.diag.dispatch_log)

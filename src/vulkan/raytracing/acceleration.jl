@@ -7,13 +7,12 @@ mutable struct LavaBLAS
     # Core tracks AS last use and destruction through its backing storage.
     storage::LavaArray{UInt8, 1}
     address::UInt64  # AS device address (for HWTLAS instances)
-    # Input arrays retained by this legacy owner; refits reuse their addresses.
+    # Input arrays this BLAS owns; refits reuse their addresses.
     preserves::Vector{LavaArray}
 
     # Refit support is opt-in; update-enabled builds may trade traversal quality.
     allow_update::Bool
-    # Scratch for MODE_UPDATE_KHR, queried at build time. Smaller than build
-    # scratch; 0 means this BLAS is not refit-capable.
+    # MODE_UPDATE_KHR scratch size; 0 means not refit-capable.
     update_scratch_size::UInt64
     # Retained triangle geometry for in-place refits; topology stays fixed.
     vertex_arr::Union{Nothing, LavaArray{UInt8, 1}}
@@ -59,8 +58,7 @@ function unsafe_free!(as::Union{LavaBLAS, LavaTLAS})
     return
 end
 
-# Where core writes what it knows about this structure's lifetime: the storage
-# buffer's stamp, because the AS and its storage are the same bytes.
+# An AS and its storage are the same bytes, so it uses the storage's stamp.
 stampof(as::Union{LavaBLAS, LavaTLAS}) = stampof(as.storage)
 
 function destroy_now!(as::Union{LavaBLAS, LavaTLAS})
@@ -97,14 +95,10 @@ function syncbuf!(owner::Closed, t::LavaTLAS)
 end
 syncbuf!(owner::Closed, b::LavaBLAS) = syncbuf!(owner, b.storage)
 
-"""VulkanAccelBuildContext
-
-AccelBuildContext over a Vulkan submit channel. Core holds/stamps named
-resources; preserves keeps scratch and temporary host objects until completion.
-"""
+"""AccelBuildContext over a Vulkan submit channel. Core holds and stamps named
+resources; `preserves` keeps scratch and temporary host objects until completion."""
 const VulkanAccelBuildContext = AccelBuildContext{SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}}
 
-# Derived accessors so call sites stay readable.
 @inline buildcmd(ctx::VulkanAccelBuildContext)   = ctx.into.cmd
 @inline as_device(ctx::VulkanAccelBuildContext)  = vkdevice(ctx.bq)
 
@@ -137,8 +131,6 @@ end
 function build_blas(ctx::VulkanAccelBuildContext, vertices::Vector{NTuple{3,Float32}}, indices::Vector{UInt32};
                     opaque::Bool=true, allow_update::Bool=false)
     bq = ctx.bq
-    # Upload vertex/index data to device-local buffers (LavaArrays), then hand
-    # the shared implementation their addresses — which is all it needs.
     vertex_arr = reinterpret(UInt8,LavaArray(vertices; bq, extra_usage=AS_INPUT_USAGE))
     index_arr  = LavaArray(indices; bq, extra_usage=AS_INPUT_USAGE)
     return build_blas_from_addresses(ctx, vertex_arr, index_arr,
@@ -183,7 +175,6 @@ function build_blas_from_addresses(ctx::VulkanAccelBuildContext, vertex_arr, ind
                                       bq, extra_usage=AS_SCRATCH_USAGE, scratch=true)
     scratch_addr = bda_address(scratch_arr)
 
-    # This owner retains its input arrays alongside storage.
     blas_preserves = LavaArray[vertex_arr, index_arr]
     # Release scratch explicitly after the build submission completes.
     push!(ctx.preserves, scratch_arr)
@@ -452,7 +443,7 @@ function build_tlas(ctx::VulkanAccelBuildContext, instance_buf::LavaArray{Vulkan
                                       bq, extra_usage=AS_SCRATCH_USAGE, scratch=true)
     scratch_addr = bda_address(scratch_arr)
 
-    # instance_buf must outlive the HWTLAS -- pin it on the HWTLAS itself for refit too.
+    # The TLAS owns `instance_buf`, which a refit reuses.
     tlas_preserves = LavaArray[instance_buf]
     push!(ctx.preserves, scratch_arr)
     holdbuild!(ctx,scratch_arr)
@@ -508,8 +499,6 @@ function refit_tlas!(ctx::VulkanAccelBuildContext, tlas::LavaTLAS,
     return tlas
 end
 
-# ── Internal helpers ──
-
 """Allocate a coherent, host-visible AS input pool. Returns (buffer, memory, address)."""
 function create_as_input_pool(ctx::VkContext, nbytes::UInt64)
     dev = ctx.device
@@ -537,7 +526,6 @@ function create_as_input_pool(ctx::VkContext, nbytes::UInt64)
 
     addr = VK.get_buffer_device_address(dev, VK.BufferDeviceAddressInfo(buf))
 
-    # Include host-visible AS input addresses in allocation diagnostics.
     if ctx.diag.alloc_debug
         push!(ctx.diag.alloc_log,
               (kind=:as_input_pool, addr=addr, size=Int(nbytes), pool=false, mtype=-1, unified=false, usage=UInt32(0)))
@@ -560,11 +548,9 @@ const AS_SCRATCH_USAGE = UInt32(
     VK.BUFFER_USAGE_STORAGE_BUFFER_BIT |
     VK.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
 
-# VulkanCore.jl alignment bug: VkDeviceOrHostAddressConstKHR is NTuple{8,UInt8} (alignment 1)
-# but in C it's a union of uint64_t/void* (alignment 8). This causes misaligned fields in:
-#   VkAccelerationStructureGeometryKHR:       Julia sizeof=88 vs C sizeof=96
-#   VkAccelerationStructureGeometryDataKHR:   geometry union at offset 20 vs C offset 24
-# We construct all AS-related C structs manually with correct field offsets.
+# VulkanCore.jl declares VkDeviceOrHostAddressConstKHR as NTuple{8,UInt8}
+# (alignment 1; the C union has 8), which misplaces fields of the AS geometry
+# structs (sizeof 88 vs 96), so all AS structs are packed by hand at C offsets.
 
 const C_SIZEOF_AS_GEOMETRY_KHR = 96
 
@@ -661,11 +647,8 @@ function pack_build_geometry_info!(buf::Vector{UInt8}, offset::Int;
     return nothing
 end
 
-"""Query AS build sizes using correctly-packed C structs.
-
-Calls vkGetAccelerationStructureBuildSizesKHR directly via ccall to work around
-VulkanCore.jl alignment bug in VkAccelerationStructureGeometryKHR.
-"""
+"""Query AS build sizes by calling vkGetAccelerationStructureBuildSizesKHR with
+hand-packed structs (VulkanCore.jl's layout is wrong, see above)."""
 function query_as_build_sizes(dev::VK.Device, geom::GeometryType;
         as_type::UInt32,
         build_flags::UInt32=UInt32(0), max_primitive_count::UInt32=UInt32(0),
@@ -710,7 +693,6 @@ function query_as_build_sizes_impl(dev::VK.Device, geo_buf::Vector{UInt8},
         end
     end
 
-    # Read back sizes
     as_size = unsafe_load(Ptr{UInt64}(pointer(sizes_buf) + 16))
     update_scratch = unsafe_load(Ptr{UInt64}(pointer(sizes_buf) + 24))
     build_scratch = unsafe_load(Ptr{UInt64}(pointer(sizes_buf) + 32))
@@ -719,8 +701,6 @@ function query_as_build_sizes_impl(dev::VK.Device, geo_buf::Vector{UInt8},
             update_scratch_size=update_scratch,
             build_scratch_size=build_scratch)
 end
-
-# ── AS Build ──
 
 """build_accel!(f, bq)
 
@@ -786,10 +766,8 @@ function record_as_build!(ctx::VulkanAccelBuildContext, accel::VK.AccelerationSt
                                src_as::Union{Nothing, VK.AccelerationStructureKHR}=nothing)
     cmd = buildcmd(ctx)
 
-    # Pack build geometry info (80 bytes)
     bgi_buf = zeros(UInt8, 80)
 
-    # Pack range info (16 bytes)
     c_range = VkBRI(primitive_count, UInt32(0), UInt32(0), UInt32(0))
 
     fptr = VK.function_pointer(as_device(ctx), "vkCmdBuildAccelerationStructuresKHR")
@@ -829,14 +807,12 @@ build_hw_accel_from_tlas(tlas::Raycore.TLAS;kw...) =
 
 """build_hw_accel_from_tlas(tlas; ctx, bq = ctx.default_bq)
 
-Legacy host-mediated import into pooled native BLAS/TLAS storage. Compatible
-sources provide owning blas_array[i].primitives arrays and instance descriptors
-with 1-based blas_index, canonical row-major affine transform, ID, mask and flags.
-Raycore.TLAS supplies its separate owning blas_storage arrays.
-
-Returns native TLAS, flat CPU primitives, BLAS offsets and per-instance offsets.
-Look up a hit through per_instance_tri_offsets[instance_id+1] + primitive_id + 1;
-instance_custom_index retains the instance’s custom ID.
+Host-mediated import into pooled native BLAS/TLAS storage. Sources provide owning
+`blas_array[i].primitives` and instances with 1-based `blas_index`, row-major affine
+transform, ID, mask and flags. Returns the native TLAS, flat host primitives, BLAS
+offsets and per-instance offsets: a hit's primitive is
+`per_instance_tri_offsets[instance_id+1] + primitive_id + 1`, and the instance
+custom index is its ID.
 """
 function build_hw_accel_from_tlas(tlas;
                                   ctx::VkContext,
@@ -848,12 +824,11 @@ function build_hw_accel_from_tlas(tlas;
     n_instances = length(instances)
     dev = ctx.device
 
-    # ── Pass 1: Collect all geometry on CPU ──
+    # Pass 1: Collect all geometry on CPU
     blas_offsets = Vector{UInt32}(undef, n_blas)
     all_primitives = []
     prim_offset = UInt32(0)
 
-    # Per-BLAS vertex/index arrays
     all_vertices = Vector{Vector{NTuple{3,Float32}}}(undef, n_blas)
     all_indices = Vector{Vector{UInt32}}(undef, n_blas)
 
@@ -866,14 +841,13 @@ function build_hw_accel_from_tlas(tlas;
         all_indices[i] = collect(UInt32,0:length(all_vertices[i])-1)
     end
 
-    # ── Pass 2: Query build sizes and compute pool layout ──
+    # Pass 2: Query build sizes and compute pool layout
     vfmt = UInt32(VK.FORMAT_R32G32B32_SFLOAT)
     vstride = UInt64(sizeof(NTuple{3,Float32}))
     itype = UInt32(VK.INDEX_TYPE_UINT32)
     build_flags = UInt32(VK.BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
     geo_flags = UInt32(VK.GEOMETRY_OPAQUE_BIT_KHR)
 
-    # Layout tracking
     vertex_offsets = Vector{UInt64}(undef, n_blas)  # byte offset into input pool
     index_offsets = Vector{UInt64}(undef, n_blas)
     as_offsets = Vector{UInt64}(undef, n_blas)       # byte offset into AS storage pool
@@ -887,7 +861,7 @@ function build_hw_accel_from_tlas(tlas;
         n_tris = UInt32(length(all_indices[i]) ÷ 3)
         max_vertex = UInt32(length(all_vertices[i]) - 1)
 
-        # Query sizes -- addresses don't matter for size queries
+        # Size queries ignore addresses.
         geom_i = TrianglesGeometry(; vertex_format=vfmt, vertex_addr=UInt64(0),
                                      vertex_stride=vstride, max_vertex,
                                      index_type=itype, index_addr=UInt64(0))
@@ -915,11 +889,10 @@ function build_hw_accel_from_tlas(tlas;
     total_input_bytes = input_cursor
     total_as_bytes = as_cursor
 
-    # ── Pass 3: Allocate pooled buffers ──
-    # Input pool: HOST_VISIBLE for direct upload
+    # Pass 3: Allocate pooled buffers
     input_buf, input_mem, input_base_addr = create_as_input_pool(ctx, max(total_input_bytes, 16))
 
-    # AS storage pool: DEVICE_LOCAL (LavaArray — shared across all pooled BLASes)
+    # AS storage pool: one device-local LavaArray shared by all pooled BLASes.
     as_pool_arr = LavaArray{UInt8,1}(undef, (max(Int(total_as_bytes), 16),);
                                       bq, extra_usage=AS_STORAGE_USAGE)
     as_pool_buf = as_pool_arr.buf[].buffer
@@ -929,16 +902,14 @@ function build_hw_accel_from_tlas(tlas;
                                       bq, extra_usage=AS_SCRATCH_USAGE, scratch=true)
     scratch_addr = bda_address(scratch_arr)
 
-    # ── Pass 4: Upload vertex/index data into input pool ──
+    # Pass 4: Upload vertex/index data into input pool
     mapped_ptr = throw_if_error(ctx, "vkMapMemory",
         VK.map_memory(dev, input_mem, 0, total_input_bytes))
     for i in 1:n_blas
-        # Copy vertex data
         vdata = all_vertices[i]
         vbytes = length(vdata) * sizeof(NTuple{3,Float32})
         unsafe_copyto!(Ptr{UInt8}(mapped_ptr + vertex_offsets[i]),
                        Ptr{UInt8}(pointer(vdata)), vbytes)
-        # Copy index data
         idata = all_indices[i]
         ibytes = length(idata) * sizeof(UInt32)
         unsafe_copyto!(Ptr{UInt8}(mapped_ptr + index_offsets[i]),
@@ -946,10 +917,9 @@ function build_hw_accel_from_tlas(tlas;
     end
     VK.unmap_memory(dev, input_mem)
 
-    # ── Pass 5: Create AS objects and build all BLASes ──
+    # Pass 5: Create AS objects and build all BLASes
     hw_blas_list = Vector{LavaBLAS}(undef, n_blas)
 
-    # Create AccelerationStructureKHR objects (one per BLAS, all referencing the pool)
     for i in 1:n_blas
         as_ci = VK.AccelerationStructureCreateInfoKHR(
             as_pool_buf, as_offsets[i], as_sizes_list[i],
@@ -969,7 +939,7 @@ function build_hw_accel_from_tlas(tlas;
         hw_blas_list[i] = blas
     end
 
-    # Batch all BLAS + HWTLAS builds into a single GPU submission
+    # Every BLAS and the TLAS in one submission.
     hw_tlas = GC.@preserve input_buf input_mem scratch_arr as_pool_arr begin
         build_accel!(bq) do as_ctx
             holdbuild!(as_ctx,scratch_arr)
@@ -1013,7 +983,6 @@ function build_hw_accel_from_tlas(tlas;
     unsafe_free!(scratch_arr)
     finalize(input_buf); finalize(input_mem)
 
-    # Convert all_primitives to typed vector
     if !isempty(all_primitives)
         T = typeof(all_primitives[1])
         typed_prims = T[p for p in all_primitives]

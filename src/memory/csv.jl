@@ -1,11 +1,10 @@
 """
-Reader for MiniMalloc's benchmark corpus, so our placer is measured against the
-same instances its authors used.
+    parsegap(s, addend) -> Gap
 
-Faithful to `converter.cc:122-237`, including the trap: a column named `end` is an
-*inclusive* last time and adds 1 to every upper bound, lifespans and gap bounds
-alike, while a column named `upper` is exclusive. The same file with the column
-renamed is a different problem. We read `end`; we never write it.
+Parse a MiniMalloc gap, `lower-upper` with an optional `@lower:upper` window.
+As in MiniMalloc's `converter.cc`, a header column named `end` is an inclusive
+last time and adds `addend = 1` to every upper bound, lifespans and gaps alike;
+a column named `upper` is exclusive.
 """
 function parsegap(s::AbstractString, addend::Int)
     at = split(s, '@')

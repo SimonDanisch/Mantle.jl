@@ -1,109 +1,62 @@
-# The Metal device, and the eleven primitives `Mantle.Pool` asks of one.
-#
-# This is the whole of what the allocator needs. Everything above it — which
-# block, what offset, when to grow, when to coalesce, when to release — is
-# `Mantle.Pool`'s and is shared with every other backend; `test/test_pool.jl`
-# drives 8,927 assertions of it against a device that allocates nothing at all.
-# A backend that finds itself making placement decisions here has taken work
-# that is not its own.
+# The Metal device, its submission queues, and the primitives `Mantle.Pool` asks
+# of it. Placement (block, offset, growth, release) is the pool's, not this file's.
 
 """
     MetalDevice([mtldevice])
 
-A Metal device: the `MTLDevice`, one submission queue, one pool.
-
-Parametric in the queue because that is the only thing two Metal generations
-disagree about. Allocation, storage modes, budgets, capabilities and the eleven
-pool primitives below are the same whether work goes out through an
-`MTLCommandQueue` or an `MTL4CommandQueue`, and none of them names either.
-
-The parameter is not there for speed — Julia specialises a method on the
-concrete argument type, so `openrun(d::MetalDevice)` compiles exactly as
-concrete with the parameter as it did without one. It is there so both
-generations can be exercised on ONE machine. Choosing at precompile time from
-`supportsMTL4CommandQueue` would read as tidier and would mean this Mac can
-only ever run one of the two paths, with the other going untested until someone
-else's machine finds the regression. Same reasoning as the no-vendor-conditional
-rule: one build has to be right everywhere, and the way you know is that both
-halves run here.
+A Metal device: the `MTLDevice`, one submission queue, one pool. Parametric in
+the queue (`LegacyQueue` or `MTL4Queue`), the only part the two Metal generations
+disagree on, so both can run on one machine instead of being chosen at
+precompile time.
 """
 mutable struct MetalDevice{Q} <: Device
     dev::MTL.MTLDevice
-    # How work reaches the GPU, and how the pool learns the GPU is done with it.
+    # Submission, and the timeline the pool's fences read.
     queue::Q
     pool::Pool
-    # Built on first ask and kept: reading `threadExecutionWidth` needs a
-    # compiled pipeline, and `gemv` asks per launch.
+    # Built on first `caps` call (`caps.jl`).
     caps::Union{Nothing,DeviceCaps}
-    # The hardware-traversal pipeline (`trace.jl`). Compiled from MSL source at
-    # runtime, which runs the Metal frontend and costs tens of milliseconds, so
-    # it is built on first trace and kept for the life of the device.
+    # The hardware-traversal pipeline, compiled on first trace (`trace.jl`).
     trace_pipeline::Union{Nothing,MTL.MTLComputePipelineState}
-    # What each kernel does to each of its arguments, keyed on the inferred
-    # signature. `Dag` asks per dispatch per build, and the answer is a property
-    # of the code rather than of the graph.
+    # Per-argument access summaries keyed on the inferred signature, asked per
+    # dispatch per build; a property of the code, not the graph.
     accesses::AccessCache
-    # Native raster/mesh publication is shared core policy, owned by this device.
+    # Compiled raster and mesh pipelines.
     pipelines::CompilationCache{Any,Any}
-    # Metal.jl's ownership record of each pool buffer, keyed by its handle: one per
-    # buffer, so that every view of it shares it (`managedbuffer`).
+    # Metal.jl's ownership record per pool buffer, keyed by handle, shared by all
+    # views of the buffer (`managedbuffer`).
     managed::Dict{UInt,Metal.Managed}
-    # What this device was asked to check at construction (`debug.jl`). Metal
-    # decides validation per process, so this is a request the constructor has
-    # already held against what the process loaded.
+    # Validated against what the process loaded at construction (`debug.jl`).
     debug::DebugConfig
-    # `retire!`d: no allocation is made on it and no block of it is freed through
-    # the driver again. See `retire!` in `runtime/lifecycle.jl`.
+    # `retire!`d: no further allocation, and no block is freed through the driver.
     retired::Bool
-    # The channels `allocate_batch_queue!` handed out and nobody released: the
-    # device holds them, so a channel outlives every buffer launched on it.
+    # Unreleased channels from `allocate_batch_queue!`, held so a channel outlives
+    # every buffer launched on it.
     channels::Vector{Metal.ConcreteBatchedQueue}
-    # What released channels had committed, so `submissions` stays monotone.
+    # Commits of released channels, so `submissions` stays monotone.
     releasedsubmits::Int
 end
 
 """
-Submission the pre-MTL4 way: through Metal.jl's own batched command queue.
+    LegacyQueue(mtldevice)
 
-Mantle does not own the submissions on this path. Compute goes out through a
-`Metal.BatchedCommandQueue`, so this backend never sees the command buffer that
-reads a pooled region and has nothing to signal an `MTLSharedEvent` from.
-
-The Vulkan shape, `next` beside a `signaledValue`, cannot be kept: with nothing
-to advance `next`, `fence` returns 0 and `passed(d, 0)` is `0 >= 0`, so **every
-retired region looks finished the instant it was retired** and the pool recycles
-memory in-flight kernels are still reading.
-
-So this timeline counts *retirements*, not submissions, and the only thing that
-advances `completed` is a real `Metal.synchronize()`. That is conservative,
-reuse costs a device sync — but it is the honest answer to "has the GPU finished
-with these bytes" from a queue this backend cannot observe. An `MTL4Queue` can
-answer it properly, because there Mantle does own the submission.
-
-No `MTLSharedEvent` and no `recording` flag: the hardware ray tracing path
-builds its own command buffer off `mtl` and waits on it directly, and this
-timeline is already conservative.
+Pre-MTL4 submission through Metal.jl's `BatchedCommandQueue`, whose command
+buffers Mantle cannot signal from. The timeline counts retirements; `completed`
+advances only on a drain or when `fence` finds the queue quiet.
 """
 mutable struct LegacyQueue
-    # THE queue. One per device, Mantle's, and the only one anything on this
-    # backend submits to: replays and kernel launches through the batch below,
-    # acceleration-structure builds and the traversal pipeline through command
-    # buffers of their own.
+    # The device's only queue: replays and launches go through `bq`; render
+    # passes, acceleration-structure builds and traces commit their own buffers.
     mtl::MTL.MTLCommandQueue
-    # Metal.jl's batching over it, and the reason the queue has to be ours. Its
-    # `global_queue(dev)` is TASK-LOCAL — a task that has not made one gets a
-    # fresh `MTLCommandQueue`, and Metal.jl keeps a residency set per queue. A
-    # graph whose blocks were made resident on one task's set and replayed from
-    # another's reads zeros and drops its writes, with nothing reported. So the
-    # device makes one and `openrun` adopts it for whatever task is running.
+    # Metal.jl's batch over `mtl`. Metal.jl's `global_queue` is task-local and
+    # residency sets are per queue, so a replay from another task's queue reads
+    # zeros and drops writes silently; `enterrun!` adopts this one for the task.
     bq::Metal.ConcreteBatchedQueue
-    # `next` is the fence value the next retirement gets; `completed` is the
-    # highest value a `Metal.synchronize()` has covered. A region is reusable
-    # only when its fence is <= `completed`.
+    # `next`: the latest retirement's fence. `completed`: the highest fence known
+    # done. A region is reusable when its fence is <= `completed`.
     next::UInt64
     completed::UInt64
-    # Whether recorded plans are encoded every frame instead of replayed; see
-    # `encodesrecordings`.
+    # Encode recorded plans every frame instead of replaying (`encodesrecordings`).
     encodes::Bool
 end
 
@@ -119,10 +72,9 @@ end
     encodesrecordings(dev) -> Bool
 
 Whether a legacy queue on `dev` encodes recorded plans instead of replaying their
-indirect command buffer. On M1 (Apple7), replaying with `executeCommandsInBuffer:`
-while WindowServer composites hangs the GPU: the watchdog resets it, WindowServer is
-blamed and the replay is discarded as an innocent victim. Encoding the same
-dispatches does not. `MANTLE_METAL_ENCODE=1` or `0` overrides the default.
+indirect command buffer. On M1 (Apple7), `executeCommandsInBuffer:` while
+WindowServer composites hangs the GPU until the watchdog resets it; encoding the
+same dispatches does not. `MANTLE_METAL_ENCODE=1` or `0` overrides the default.
 """
 function encodesrecordings(dev::MTL.MTLDevice)
     override = get(ENV, "MANTLE_METAL_ENCODE", "")
@@ -131,196 +83,48 @@ function encodesrecordings(dev::MTL.MTLDevice)
 end
 
 """
-How many command buffers this backend keeps in flight.
+    pinpipeline!(bq)
 
-Metal.jl defaults to THREE and blocks in `flush!` beyond it. Measured on an M5,
-median us per frame:
-
-    inflight              3     8    16
-    one-dispatch plan    74    22    21
-
-DO NOT read that as a frame-rate win. RayDemo's crown is unchanged by it — 1.0x
-at every configuration measured, from 800x800 at 16 samples (1826 ms against
-1835) down to 400x400 at one sample and depth four (29.8 ms against 29.9). Those
-frames are 30 to 1800 ms of GPU work, so tens of microseconds of submission
-overhead is 0.02% of them and invisible.
-
-What the depth buys is a lower floor for work that submits many small plans, and
-it costs nothing where it does not help. It is kept on that basis, not as a
-speedup.
-
-Eight is the perf knee, not a safety limit: with the declaration in place the
-crown is correct at 8, 16, 32 and 64 (0.7964 at every one). What bounds the
-choice above the knee is retention — each command buffer in flight holds its
-Julia roots alive — not correctness.
-
-It is only safe at all because `opensubmit!` declares what a submission touches
-with `useResource` — see there. Without that declaration the driver overlaps
-frames and a deeper pipeline loses their accumulations, while the whole suite
-still passes. The two go together; do not raise this without that.
-
-Pinned rather than inherited so a `JULIA_METAL_COMMAND_BATCHING_INFLIGHT` set for
-some other purpose cannot silently change how deep this backend pipelines.
+Keep up to 8 command buffers in flight (Metal.jl defaults to 3), pinned against
+`JULIA_METAL_COMMAND_BATCHING_INFLIGHT`. 8 is the latency knee for many small
+plans. Safe only because `opensubmit!` declares resources with `useResource`;
+without it deeper pipelining overlaps frames and loses accumulations.
 """
 pinpipeline!(bq) = Metal.inflight!(bq, 8)
 
 """
     metalqueue(mtldevice) -> queue
 
-Which submission generation this device gets. The one place that decides, so
-that a test can decide differently by handing `MetalDevice` a queue directly.
+The submission generation for `mtldevice`: `LegacyQueue`. On MTL4 queues
+`executeCommandsInBuffer:` stops completing after about a second of cumulative
+replayed work (M5), so MTL4 encodes recorded dispatches instead of replaying
+them and is opt-in via `MetalDevice(dev, MTL4Queue(dev))`.
 """
-#
-# LEGACY, on a machine that has an MTL4 queue, and the reason is a driver defect
-# that has been isolated rather than a preference.
-#
-# `executeCommandsInBuffer:` on an `MTL4ComputeCommandEncoder` STOPS COMPLETING
-# after roughly a second of cumulative replayed GPU work. The timeline simply
-# stops advancing: no error from `MTL4CommitFeedback`, nothing in the system log,
-# and the next `opensubmit!` blocks forever. Heavier replays hit it sooner — 207
-# ms of work per submission stalls at the fifth, 27 ms at the twenty-first, and
-# an empty submission never does.
-#
-# It is the ONE call. Measured on this M5, same indirect command buffer and same
-# kernel each time:
-#
-#   legacy queue, executeCommandsInBuffer:      60/60 submissions, 207 ms each
-#   MTL4 queue, direct dispatch (arg table)     60/60 submissions, 208 ms each
-#   MTL4 queue, executeCommandsInBuffer:        stalls at 5 to 11
-#   MTL4 queue, empty submissions               100/100
-#
-# And it is none of the things it looked like. It survives, unchanged, a fresh
-# allocator AND command buffer per submission; forty distinct indirect command
-# buffers so none is ever replayed twice; full host serialisation with one
-# submission in flight; no commit-feedback handler; `supportMTLEvent` on the queue
-# descriptor; `ray_tracing` off; a `Private` buffer; a `barrier!` after the
-# execute; the other execute form (`indirectBuffer:`); and the selector sent by
-# hand, which rules out the wrapper. A fresh QUEUE per submission does avoid it —
-# and runs no work at all, three of forty increments landing, so that is a second
-# failure rather than a way out.
-#
-# So a recorded plan cannot go through an MTL4 queue AS AN ICB REPLAY. That is not
-# the same as MTL4 being unusable, and the way out is measured rather than
-# guessed: on the same queue, under the same load,
-#
-#   direct dispatch through an argument table          60/60, 208 ms each
-#   INDIRECT dispatch, grid read from memory           60/60, 208 ms each
-#
-# The second is the one that matters, because it is what a `repeat!` gate needs
-# without an indirect command buffer: a closed gate writes a zero THREADGROUP
-# COUNT where it now writes a zero-length execution range, and the host still
-# never learns whether the iteration ran.
-#
-# That is the route this backend took, and it is what `canreplay`/`encodes` below
-# select between: an MTL4 queue ENCODES a recorded plan's dispatches into its
-# command buffer every frame instead of replaying them. The recorder already knew
-# each dispatch's pipeline, arguments, grid and barrier, so capturing them costs
-# record time and nothing per frame, and `emitwriter!` writes three `UInt32` per
-# gated dispatch where the replay writes two. Three sends per dispatch against one
-# per segment: about 27 us of host time for a forty-dispatch plan.
-#
-# What a Metal frame costs, and why the ICB is not the thing to blame. Measured by
-# ALTERNATING the variants inside one process — comparing across runs on this
-# machine is worthless, identical code has measured 36.8 and 56.3 us.
-#
-# The device also has two performance states, and the numbers only mean something
-# once you say which. Same recording, same one-element dispatch, medians per
-# command buffer over 300, three alternating rounds:
-#
-#                      driver prep   kernelEnd->GPUStart   GPU EXECUTE
-#   idled down           12.9 us          113 us            12.6 us
-#   kept busy            12.0 us          116 us             4.8 us
-#
-# The GPU runs THE SAME COMMAND BUFFER 2.6x faster when it has had recent work, in
-# all three rounds. Identical bytes, so that is the device's rate, not our
-# overhead — and a benchmark doing nothing but tiny frames never gives it a reason
-# to run fast. Warm numbers below; cold ones are roughly double.
-#
-# WARM, one command buffer per frame, 8 rounds of 200, medians:
-#
-#   empty command buffer, no work         9.2 us
-#   one dispatch, hand-encoded           36.1 us
-#   one dispatch, executeCommandsInBuffer 35.0 us
-#   FULL MANTLE FRAME                    37.1 us
-#
-# So the ICB replay is NOT the cost: encoding the dispatch by hand costs the same
-# (36.1 vs 35.0, and 74.2 vs 71.2 cold). What costs is a command buffer that
-# executes ANYTHING rather than nothing. Split three ways, warm:
-#
-#   encoder + commit                        8.2 us
-#   + pipeline and buffer bound, no dispatch  8.4 us   (+0.2 — binding is free)
-#   + one dispatch                         30.0 us   (+21.6)
-#
-# Encoding is free; the 22 us is the command buffer having work to run. And it is
-# paid ONCE: dispatches two through sixteen cost ~1.3 us each. So it is not a
-# per-launch cost but a scheduling round-trip that a command buffer only makes if
-# it contains work at all — which the timestamps agree with, since GPU execute is
-# 4.8 us of it and the rest sits in `kernelEnd -> GPUStart`.
-#
-# Mantle adds about 2 us on top of that floor.
-#
-# And it is per COMMAND BUFFER, not per dispatch, so it amortises away entirely.
-# Dispatches packed into one buffer, warm:
-#
-#   0: 9.0 us    1: 37.5 us    2: 32.8    4: 31.6    8: 39.9    16: 49.8 us
-#                    (37.5/ea)     (16.4)     (7.9)      (5.0)       (3.1/ea)
-#
-# Which settles two things. A one-dispatch plan at ~37 us is the WORST case and a
-# microbenchmark artefact; a real frame pays the ~30 us once and under 2 us per
-# dispatch after that. And a legacy encode path — encoding a recorded plan's
-# dispatches instead of replaying them, which the note above weighs up — was
-# measured and buys NOTHING, because the ICB was never what the frame was paying
-# for. Do not build it.
-#
-# It is not a reduced path. RayDemo's crown, 800x800, sixteen samples per frame,
-# depth 8, hardware traversal, runs thirty consecutive frames on an MTL4 queue at
-# a median of 1817 ms, against 1842 ms for the same scene replaying on the legacy
-# queue, and the two images agree.
-#
-# So the default is legacy for the ONE remaining reason: every other Metal path in
-# this backend — render passes, blits, acceleration-structure builds, Metal.jl's
-# own launches — still goes through the `MTLCommandQueue` either way, so MTL4 buys
-# a timeline that answers `passed` with a load instead of a device drain, and that
-# is not yet worth making a machine's default depend on a driver whose replay
-# stalls. A caller asks for it by name — `MetalDevice(mtldev, MTL4Queue(mtldev))` —
-# which is what the parameter is for and how the suite exercises both here.
-#
-# A replayed segment is otherwise IDENTICAL on the two: one
-# `executeCommandsInBuffer:`, and the barrier bit a command carries is honoured on
-# both. That was measured rather than assumed: 40 chained dispatches, each adding
-# one, come out at exactly 40 on an MTL4 encoder from a single execute. A count
-# short of that is a replay reaching memory no residency set of this queue was
-# given, which is what `adoptqueue!` is for, and not a barrier being ignored.
 metalqueue(dev::MTL.MTLDevice) = LegacyQueue(dev)
 
 function MetalDevice(mtldev::MTL.MTLDevice, q, debug::DebugConfig = DebugConfig())
     checkdebug(mtldev, debug)
     d = MetalDevice(mtldev, q, Pool(), nothing, nothing, AccessCache(), CompilationCache{Any,Any}(),
                     Dict{UInt,Metal.Managed}(), debug, false, Metal.ConcreteBatchedQueue[], 0)
-    # Registered before anything can allocate on it, so the exit hook reaches it.
+    # Registered before anything allocates on it, so the exit hook reaches it.
     push!(METAL.live, WeakRef(d))
     return d
 end
 MetalDevice(mtldev::MTL.MTLDevice = Metal.device()) = MetalDevice(mtldev, metalqueue(mtldev))
 
 """
-What this backend keeps for the whole process, in one place.
-
-`default` is the device `Device(MetalAPI())` answers: one per process, cached,
-because a second `MetalDevice` would mean a second `Pool` over the same
-`MTLDevice`, which is two allocators over one memory. `live` is every device
-built, weakly, so the exit hook can retire each of them (`initbackend!`); being
-in it never keeps a device alive. The rest is the validation layer's: Metal
-reports a failure to one process-wide block, so its messages are the process's
-(`debug.jl`).
+Process-wide Metal state. `default` is the one device `Device(MetalAPI())`
+returns (a second would put a second `Pool` over the same memory). `live` holds
+every device weakly so the exit hook can retire it. `reports`, `reportlock` and
+`reporter` belong to the process-wide validation report block (`debug.jl`).
 """
 mutable struct MetalProcess
     default::Union{Nothing,MetalDevice}
     live::Vector{WeakRef}
     reports::Vector{String}
     reportlock::ReentrantLock
-    # The block `MTLSetReportFailureBlock` was handed. Kept here because Metal
-    # holds it by pointer, which the collector cannot see.
+    # The block given to `MTLSetReportFailureBlock`, rooted here because Metal
+    # holds it only by pointer.
     reporter::Any
 end
 const METAL = MetalProcess(nothing, WeakRef[], String[], ReentrantLock(), nothing)
@@ -332,67 +136,48 @@ function Device(::MetalAPI; select = nothing, debug::Union{Nothing,DebugConfig} 
         # Metal.jl's own choice; `defaultdevice!(select)` is how a caller picks another.
         return defaultdevice!(MetalDevice(Metal.device()))
     end
-    # A device asked for BY NAME, or with a debugging configuration, is not the
-    # process device and does not adopt the queue — see `defaultdevice!`.
+    # A device selected by name or with a debug configuration is not the process
+    # device and does not adopt the queue (see `defaultdevice!`).
     mtldev = select === nothing ? Metal.device() :
              Metal.devices()[selectdevice(select, devices(MetalAPI()))]
     return MetalDevice(mtldev, metalqueue(mtldev), something(debug, DebugConfig()))
 end
-# One entry per `MTLDevice`. Apple silicon reports unified memory, which is what
-# `:integrated` means here; a discrete part (an Intel Mac with a Radeon, an
-# eGPU) does not.
+# One entry per `MTLDevice`; `:integrated` means unified memory (Apple silicon).
 devices(::MetalAPI) = [DeviceInfo(i, String(d.name), d.hasUnifiedMemory ? :integrated : :discrete, "Metal")
                        for (i, d) in enumerate(Metal.devices())]
 """
-Make `d` the device this process hands out — and the one Metal.jl launches on.
+    defaultdevice!(d) -> d
 
-`adoptqueue!` HERE, and not in the constructor and not only in `openrun`. Not in
-the constructor, because a second `MetalDevice` built for a test or a capability
-query would take the queue away from the process device. Not only in `openrun`,
-because an upload is a blit: `Buffer(dev, data)` before the first run would go
-to whatever queue Metal.jl handed the running task, which is ordered against the
-replay by nothing at all, and reads as a first frame that produces nothing while
-every frame after it is right.
+Make `d` the device this process hands out and the one Metal.jl launches on.
+Adopts the queue here, not in the constructor (a second `MetalDevice` would take
+it from the process device) and not only in `enterrun!` (an upload before the
+first run would go to the task's own queue, unordered against the replay).
 """
 defaultdevice!(d::MetalDevice) = (METAL.default = d; adoptqueue!(d); d)
 
-# `Device(backend)` — how a caller holding a KernelAbstractions backend gets the
-# Mantle device for it, without naming an API marker. A backend bound to a channel
+# The Mantle device of a KernelAbstractions backend; a backend bound to a channel
 # belongs to the device that handed the channel out.
 Device(b::Metal.MetalBackend) = b.queue === nothing ? Device(MetalAPI()) : deviceof(b.queue)
 pool(d::MetalDevice) = d.pool
 backend(::MetalDevice) = Metal.MetalBackend()
 
-# ── What memory a request needs ───────────────────────────────────────────────
-#
-# On Vulkan the constraint is a bitmask: buffer usage flags, unioned across an
-# arena's tenants, because a `VkBuffer` must be created with every use it will
-# be put to. **Metal has no such thing.** A `MTLBuffer` is bytes; what a shader
-# does with it is decided at bind time, not at creation.
-#
-# So the one property that does constrain sharing is the STORAGE MODE, and that
-# is what a Metal constraint is. `Shared` is visible to CPU and GPU, `Private`
-# is GPU-only and faster on discrete parts. On Apple silicon memory is unified
-# and `Shared` costs nothing, which is why it is the default here — and why
-# `deviceview` can hand back a real array over the same bytes.
-
-# A storage mode is a TYPE in Metal.jl (`Metal.SharedStorage`), not an enum
-# value — that is what `MTLBuffer`'s `storage` keyword takes, and it is what a
-# constraint is here. `MTL.MTLStorageModeShared` is the *runtime* enum a buffer
-# reports back; the two are not interchangeable.
-"""The storage mode a set of transients needs."""
+# A Metal constraint is a storage mode: an `MTLBuffer` has no usage flags, so
+# nothing else limits sharing. It is a Metal.jl type (`Metal.SharedStorage`, what
+# `MTLBuffer`'s `storage` keyword takes), not the `MTL.MTLStorageModeShared` enum
+# a buffer reports.
+"""
+The storage mode a set of transients needs: `Private` for images, otherwise
+`Shared`, which costs nothing on unified memory and lets `deviceview` return an
+array over the bytes.
+"""
 constraintof(::MetalDevice, ::Buffers, ts) = Metal.SharedStorage
 constraintof(::MetalDevice, ::Images, ts) = Metal.PrivateStorage
 constraintof(::MetalDevice, ::Persistent, ts) = Metal.SharedStorage
 
 """
-How accessible a storage mode is, as an order.
-
-`Shared` can serve anything: CPU and GPU both reach it. `Private` can serve only
-requests that never touch the CPU. This ordering is what makes
-[`compatible`](@ref) and [`mergeconstraints`](@ref) answerable — the Vulkan
-backend gets the same two answers out of a bitmask, `&` and `|`, and the shape
-of the question is identical even though the encoding is not.
+How accessible a storage mode is, as an order for [`compatible`](@ref) and
+[`mergeconstraints`](@ref): `Shared` serves CPU and GPU requests, `Private` only
+requests that never touch the CPU.
 """
 permissiveness(::Type{Metal.SharedStorage})  = 3
 permissiveness(::Type{Metal.ManagedStorage}) = 2
@@ -402,23 +187,17 @@ permissiveness(::Nothing) = 0
 # A block may host a request when its memory is at least as accessible.
 compatible(::MetalDevice, blk, req) = permissiveness(blk) >= permissiveness(req)
 
-# An arena must serve every tenant, so it takes the most accessible mode any of
-# them asked for. Unlike Vulkan's image case this can never fail: `Shared`
-# satisfies everything, so there is always a mode that works.
+# An arena takes the most accessible mode its tenants ask for; never fails,
+# since `Shared` satisfies everything.
 mergeconstraints(::MetalDevice, kind, a, b) =
     permissiveness(a) >= permissiveness(b) ? a : b
-
-# ── Allocation ────────────────────────────────────────────────────────────────
 
 """
     rawalloc(dev, kind, bytes, storage) -> MTLBuffer
 
-One device allocation. The pool suballocates within it and never asks for
-another until this one cannot serve a request.
-
-`max(bytes, 1)` because Metal rejects a zero-length buffer and the pool is
-entitled to ask for an empty block — the same guard the host and Vulkan
-backends have.
+One device allocation for the pool to suballocate. `max(bytes, 1)` because
+Metal rejects a zero-length buffer and the pool may ask for an empty block.
+Throws `OutOfMemoryError` when Metal returns no buffer.
 """
 function rawalloc(d::MetalDevice, ::Union{Buffers,Persistent}, bytes::Int, storage)
     mode = storage === nothing ? Metal.SharedStorage : storage
@@ -430,17 +209,10 @@ end
 """
     rawalloc(dev, ::Images, bytes, storage) -> MTLHeap
 
-The image arena, which is a heap rather than a buffer.
-
-A texture over buffer memory is a LINEAR texture and an Apple GPU cannot render
-into one, so the image arena cannot be the `MTLBuffer` every other arena is. A
-`MTLHeapTypePlacement` heap is the same bargain in Metal's vocabulary: one
-device allocation, the caller picks the offsets, and two resources placed at
-overlapping offsets share the bytes — which is what the graph's aliasing pass
-decided when it gave two targets the same offset.
-
-`Automatic` is the easier heap type and the wrong one: it chooses its own
-offsets, so the placement Mantle computed would be advisory.
+The image arena: a heap, since a texture over buffer memory is linear and Apple
+GPUs cannot render into one. `MTLHeapTypePlacement` so the caller's offsets hold
+and resources placed at overlapping offsets alias, as the graph's aliasing pass
+decided; an `Automatic` heap picks its own offsets.
 """
 function rawalloc(d::MetalDevice, ::Images, bytes::Int, storage)
     desc = MTL.MTLHeapDescriptor()
@@ -456,17 +228,12 @@ function rawalloc(d::MetalDevice, ::Images, bytes::Int, storage)
 end
 
 """
-Release a block's device memory.
-
-Immediate, not left to the GC. `trim!` exists so a caller can say "I have
-finished and want the memory back now", and an answer that depends on when
-Julia next collects is not an answer to that — the same reasoning the Vulkan
-backend's `rawfree` records.
+Release a block's device memory immediately rather than at the next GC, so
+`trim!` returns memory when asked.
 """
 function rawfree(d::MetalDevice, buf::MTL.MTLBuffer)
-    # A retired device's blocks are not handed back through the driver: at exit
-    # Metal may already be gone. What still holds the buffer releases it when it
-    # is collected.
+    # Not through the driver on a retired device: at exit Metal may be gone. The
+    # buffer is released when whatever still holds it is collected.
     d.retired && return nothing
     delete!(d.managed, Base.bitcast(UInt, pointer(buf)))
     Metal.free(buf)
@@ -476,10 +243,9 @@ end
 """
     managedbuffer(dev, buf) -> Metal.Managed
 
-The record Metal.jl keeps of which of its queues last used `buf`, and that a host
-read through an `MtlArray` waits for. ONE per pool buffer: Metal.jl claims a buffer
-when it launches on a view of it, and a read through another view of the same buffer
-has to see that claim.
+Metal.jl's record of which queue last used `buf`, which a host read through an
+`MtlArray` waits for. One per pool buffer, so a read through one view sees a
+launch's claim made through another.
 """
 managedbuffer(d::MetalDevice, buf::MTL.MTLBuffer) =
     get!(() -> Metal.Managed(buf), d.managed, Base.bitcast(UInt, pointer(buf)))
@@ -487,9 +253,9 @@ managedbuffer(d::MetalDevice, buf::MTL.MTLBuffer) =
 """
     claimbuffers!(bq, managed)
 
-Record that `bq`'s next submission uses the buffers of `managed`, as Metal.jl's own
-launches do for theirs, so that a host read through a view of one waits for it. A
-buffer another queue may still be using is waited for first, without the lock.
+Record that `bq`'s next submission uses `managed`'s buffers, as Metal.jl's
+launches do, so a host read through a view waits for it. A buffer another queue
+may still be using is waited for first, outside `submission_lock`.
 """
 function claimbuffers!(bq::Metal.BatchedCommandQueue, managed::Vector{Metal.Managed})
     while true
@@ -502,29 +268,20 @@ function claimbuffers!(bq::Metal.BatchedCommandQueue, managed::Vector{Metal.Mana
         Metal.synchronize(conflict)
     end
 end
-# A heap is freed by releasing it: `Metal.free` is the buffer path (it goes
-# through `MTLBuffer`'s own deallocation), and a heap's textures die with it.
+# A heap is released, not `Metal.free`d (the buffer path); its textures die with it.
 rawfree(d::MetalDevice, heap::MTL.MTLHeap) =
     (d.retired || Metal.ObjectiveC.release(heap); nothing)
 
-# ── The timeline ──────────────────────────────────────────────────────────────
-#
-# The queue's, not the device's: what a fence MEANS is precisely what the two
-# generations disagree about. A `LegacyQueue` counts retirements and can only
-# answer `passed` by draining the device; an `MTL4Queue` signals a shared event
-# per submission and answers it by reading `signaledValue`. The pool asks the
-# same three questions either way.
+# The timeline is the queue's: a `LegacyQueue` counts retirements and answers
+# `passed` by draining, an `MTL4Queue` reads a shared event's `signaledValue`.
 
 fence(d::MetalDevice) = fence(d.queue)
 passed(d::MetalDevice, f) = passed(d.queue, f)
 waitfor(d::MetalDevice, f) = waitfor(d.queue, f)
 
-# Asking a `LegacyQueue` for a fence ADVANCES it: this counts retirements, so
-# `q.next += 1` is what a new fence is here — unless nothing can still be reading
-# the bytes. On a quiet queue every retirement so far is done with, so they all
-# pass and the new one gets a fence that has passed already. Without that a region
-# dropped on an idle device waited for a drain nobody would ask for, where an MTL4
-# queue hands it back at once (see `passed(::MTL4Queue, f)`).
+# Asking a `LegacyQueue` for a fence advances it, except on a quiet queue: there
+# every retirement is done, so the fence returned has already passed and a region
+# dropped on an idle device needs no drain.
 function fence(q::LegacyQueue)
     if quiet(q)
         q.completed = q.next
@@ -535,13 +292,9 @@ function fence(q::LegacyQueue)
 end
 
 """
-Nothing encoded and not committed, and the last command buffer committed to this
-queue's `MTLCommandQueue` has finished: the queue runs in order, so every one before
-it has too. For an `MTL4Queue` this is its legacy side, where launches and blits go.
-
-`MTL.all_completed` and not the status of `MTL.last_committed`: that hands back an
-abstractly typed command buffer, and reading `.status` off it was a dynamic call that
-boxed the enum, 16 bytes on every `closesubmit!`.
+No open batch, and every command buffer committed to the queue's `MTLCommandQueue`
+has finished (for an `MTL4Queue`, its legacy side). `MTL.all_completed` because
+reading `.status` off `MTL.last_committed` is a dynamic call that allocates.
 """
 function quiet(q)
     Metal.has_open_batch(batchqueue(q)) && return false
@@ -551,12 +304,9 @@ end
 passed(q::LegacyQueue, f) = UInt64(f) <= q.completed
 
 """
-Wait for the timeline to reach `f`, unless nothing has been submitted that will.
-
-`f > next` names a value belonging to a command buffer still being recorded.
-Blocking on it would wait for a submission that has not happened, and the one
-caller is an allocation — so it declines, and the pool grows instead. That costs
-a block and never a deadlock.
+Wait for the timeline to reach `f` and return `true`, or return `false` when
+`f > next`: that value belongs to work not yet submitted, and the caller (an
+allocation) grows the pool instead of deadlocking.
 """
 function waitfor(q::LegacyQueue, f)
     passed(q, f) && return true
@@ -566,21 +316,11 @@ function waitfor(q::LegacyQueue, f)
 end
 
 """
-Wait for everything submitted, and record it: every fence handed out before the wait
-has passed.
-
-Drain THIS queue: `Metal.synchronize(q.bq)` commits the open batch, waits for the
-last command buffer committed to `q.mtl` — the batch's and the ones the render and
-acceleration-structure paths commit there themselves — and releases what the
-finished work held. That is everything a fence counts, because every submission of
-this backend goes to `q.mtl`, so a region retired before this call is reached by
-nothing still to run. It also reports a failed command buffer or a device-side
-exception, which a bare wait on one command buffer would not.
-
-The queue by name, not `Metal.synchronize()`. That one waits on the CURRENT TASK's
-queue, which is this one only when the device has adopted it (`defaultdevice!`); a
-device asked for by name has not, and there the task's queue is a different queue:
-waiting on it is not waiting for this backend's work.
+Drain the queue and mark every fence handed out before the wait as passed.
+`Metal.synchronize(q.bq)` commits the open batch, waits for the last command
+buffer on `q.mtl` (where every submission of this backend goes) and reports a
+failed command buffer or device-side exception. Not `Metal.synchronize()`, which
+waits on the current task's queue, a different one for a device selected by name.
 """
 function waitidle(q::LegacyQueue)
     issued = q.next
@@ -589,24 +329,14 @@ function waitidle(q::LegacyQueue)
     return nothing
 end
 
-# ── Submission ────────────────────────────────────────────────────────────────
-#
-# Two verbs, and with the timeline above they are the whole of what a Metal
-# generation changes. `replay!` in `record.jl` is written against them and names
-# no generation at all.
-#
-#     s   = opensubmit!(d, buffers)   # what it touches, and an encoder for it
-#     ...encode...
-#     tok = closesubmit!(d, s)        # end, commit, and the fence it will signal
-#
-# What a submission touches is an ARGUMENT to opening it rather than a verb of
-# its own, because the two generations need it at different moments and only one
-# of those moments is expressible after the fact: legacy declares on the encoder
-# (`useResource`, which is hazard tracking as much as residency), MTL4 has to
-# have the residency set complete before the command buffer declares it.
+# Submission: `s = opensubmit!(d, buffers)`, encode into `encoder(s)`, then
+# `tok = closesubmit!(d, s)` commits and returns the fence it will signal.
+# `replay!` uses only these. The touched buffers are an argument to opening
+# because legacy declares them on the encoder, while MTL4 needs its residency set
+# complete before the command buffer declares it.
 
-"""What one legacy submission is: the batched queue, and its compute encoder —
-the batch's own, borrowed, which the batch ends and releases."""
+"""A legacy submission: the batched queue and its compute encoder, borrowed from
+the batch, which ends and releases it."""
 struct LegacySubmission
     bq::Metal.ConcreteBatchedQueue
     enc::MTL.MTLComputeCommandEncoderRef
@@ -617,37 +347,15 @@ encoder(s::LegacySubmission) = s.enc
 
 opensubmit!(d::MetalDevice, bufs) = opensubmit!(d.queue, d.dev, bufs)
 
-# The task-local BATCHED queue rather than `q.mtl`: it is the one every ordinary
-# kernel launch goes through, and a replay has to stay ordered against the
-# launches around it. Asking for it also hands back an encoder that may already
-# be open, which is what lets a walked pass and a replay share one command
-# buffer.
-#
-# `useResource` is not only about residency: it is how the driver's hazard
-# tracking learns that this work read and wrote those bytes, so it has to name
-# the encoder and therefore happens here rather than before.
+# Through the batch every kernel launch uses, so a replay stays ordered against
+# the launches around it and can share an already open encoder with a walked pass.
 function opensubmit!(q::LegacyQueue, ::MTL.MTLDevice, bufs)
     enc = Metal.compute_encoder(q.bq)
-    # DECLARE what this submission touches. Not a policy this backend decides —
-    # the list is `ensureresident!`'s, derived from the recording — but the driver
-    # needs it stated, and on Metal stating it is also what orders one frame's
-    # command buffer against the next on the bytes they share.
-    #
-    # Residency alone is covered permanently by `ensureresident!`, which made this
-    # look redundant. It is not: undeclared, the driver sees no dependency between
-    # consecutive frames and is free to OVERLAP them. With Metal.jl capping the
-    # queue at three in flight the window was too small to notice, so removing
-    # this passed the 9781-assertion suite and rendered the crown correctly. Raise
-    # the cap and the crown loses accumulations — a 4-sample frame comes out as
-    # the 1-sample image.
-    #
-    # Worth saying where the seam actually is: "successive runs of a plan do not
-    # overlap" is a CORE fact, and core does not state it anywhere. It derives
-    # intra-frame dependencies (`passbarriers` -> `emitbarriers!`) and stops at the
-    # command buffer boundary. Metal gets the cross-frame half from this
-    # declaration plus an in-order queue; Vulkan's `submit!` passes no `waits` and
-    # leans on submission order. Two different accidents, neither written down as
-    # a requirement — which is why deleting this line looked safe.
+    # `useResource` on `ensureresident!`'s list is hazard tracking, not only
+    # residency: undeclared, the driver may overlap consecutive frames on shared
+    # bytes, and with 8 in flight a 4-sample frame comes out as the 1-sample image.
+    # Core derives no cross-frame ordering; Metal gets it from this plus the
+    # in-order queue.
     MTL.use!(enc, bufs, MTL.ReadWriteUsage)
     return LegacySubmission(q.bq, enc)
 end
@@ -666,14 +374,9 @@ end
 """
     nextpiece!(dev, sub, ids)
 
-The boundary between two pieces of one recording replayed into the same encoder
-(`replay!` over a submission's pieces).
-
-Legacy: the next piece's resources declared on the encoder, which is hazard tracking
-as much as residency (see `opensubmit!`); its `execute` calls are ordered behind the
-previous piece's because two `execute` calls on one encoder are. MTL4: residency is
-the set `ensureresident!` already granted, and the encoder does no hazard tracking,
-so the boundary is a barrier — the one a command buffer of its own used to be.
+The boundary between two pieces of one recording replayed into the same encoder.
+Legacy declares the next piece's resources on the encoder (hazard tracking, see
+`opensubmit!`); MTL4 has no hazard tracking, so the boundary is a dispatch barrier.
 """
 nextpiece!(d::MetalDevice, s, ids) = nextpiece!(d.queue, s, ids)
 
@@ -683,71 +386,45 @@ nextpiece!(::LegacyQueue, s::LegacySubmission, ids) =
 """
     suspendsubmit!(dev, sub)
 
-End the open encoder so a host CALL may encode into the same command buffer, without
-ending the submission.
-
-The third verb, and only for a recording with holes (`replaywithcalls!`). A command
-buffer may have one encoder open at a time and a vendor library makes its own, so
-ours has to close first; `opensubmit!` afterwards opens a fresh one in the same
-buffer. Ending an encoder is not committing the buffer — the whole frame is still one
-submission, which is what `fence` depends on.
+End the open encoder so a host call (`replaywithcalls!`) can encode its own into
+the same command buffer; `opensubmit!` then opens a fresh one. Nothing is
+committed, so the frame stays one submission, which `fence` depends on.
 """
 suspendsubmit!(d::MetalDevice, s) = suspendsubmit!(d.queue, s)
 
-# `end_encoder!` also drops Metal.jl's cached pipeline binding, which is the same
-# thing `closesubmit!` does for the same reason: an indirect execution leaves the
-# encoder's pipeline undefined and a cached `set_pipeline!` would skip restoring it.
+# `end_encoder!` also drops Metal.jl's cached pipeline binding, which an indirect
+# execution leaves undefined (as in `closesubmit!`).
 suspendsubmit!(q::LegacyQueue, ::LegacySubmission) = (Metal.end_encoder!(q.bq); nothing)
 
 closesubmit!(d::MetalDevice, s) = closesubmit!(d.queue, s)
 
 function closesubmit!(q::LegacyQueue, s::LegacySubmission)
-    # An indirect execution leaves the encoder's own pipeline binding undefined,
-    # and `set_pipeline!` skips a set it believes is already in place. Forgetting
-    # this sends the next ordinary launch through whatever the recording left.
+    # An indirect execution leaves the pipeline binding undefined, and
+    # `set_pipeline!` skips a set it believes current: the next launch would run
+    # whatever pipeline the recording left.
     s.bq.backend.last_pipeline = nothing
     Metal.note_recorded!(s.bq, 0, nothing)
-    # Committed only: `replay!` holds `submission_lock` around this and waits for a
-    # free in-flight slot after releasing it, which is the other half of `flush!`.
+    # Commit only: `replay!` holds `submission_lock` here and waits for a free
+    # in-flight slot after releasing it.
     Metal.commit_batch!(s.bq)
-    # Nothing here signals anything, so the token is the retirement counter and
-    # waiting on it is a device drain. See `LegacyQueue`.
+    # Nothing signals, so the token is the retirement counter (see `LegacyQueue`).
     return fence(q)
 end
 
-# ── Metal 4 ───────────────────────────────────────────────────────────────────
-#
-# The same three verbs, on a queue Mantle owns outright.
-#
-# What it buys is not host time — measured 2026-09-10, an MTL4 submission is if
-# anything slightly slower per call than a legacy one. It is the TIMELINE. A
-# `LegacyQueue` cannot answer "has the GPU finished with these bytes" without
-# `Metal.synchronize()`, because Metal.jl owns the command buffer that read them
-# and there is nothing for this backend to signal from; every pooled region
-# therefore costs a device drain to reuse, which is why the retiring list on this
-# backend grows and stays. An MTL4 queue signals an `MTLSharedEvent` per submit,
-# so `passed` is a load of `signaledValue` and reuse costs nothing.
+# Metal 4: the same verbs on a queue Mantle owns. It buys no host time, only the
+# timeline: an `MTLSharedEvent` signalled per submit makes `passed` a load where a
+# `LegacyQueue` needs a device drain.
 
 """How many frames may be recording or in flight at once."""
 const MTL4_FRAMES_IN_FLIGHT = 3
 
 """
-Submission the Metal 4 way: Mantle owns the queue, the command buffers and the
-timeline.
+    MTL4Queue(mtldevice)
 
-**The allocator is a command pool.** `reset` hands back the storage a command
-buffer recorded into, so resetting one the GPU has not finished with is a
-use-after-free — and unlike the legacy path there is no driver bookkeeping to
-save you. Hence the RING: one allocator and one command buffer per frame in
-flight, each stamped with the token its last submission will signal, and
-`opensubmit!` waits only when it comes back round to a slot still running. At a
-steady frame rate three deep it never waits.
-
-**Both queues, not one.** `mtl` is the ordinary `MTLCommandQueue` and it is not a
-fallback: render passes, blits and acceleration-structure builds submit command
-buffers of their own, Metal.jl's kernel launches go through its batch, and a
-residency set belongs to an `MTLCommandQueue`. What changes on this path is where
-a RECORDED plan's replay goes, and what a fence means.
+Metal 4 submission of recorded plans; everything else still uses `mtl`.
+Resetting an allocator the GPU still reads is a use-after-free, so allocators and
+command buffers form a ring of `MTL4_FRAMES_IN_FLIGHT` slots, each stamped with
+the token its last submission signals.
 """
 mutable struct MTL4Queue
     q::MTL.MTL4CommandQueue
@@ -756,51 +433,42 @@ mutable struct MTL4Queue
     # The token each slot's last submission will signal; 0 for never used.
     at::Vector{UInt64}
     slot::Int
-    # The one-element array `commit:count:` takes, kept so that a replayed frame
-    # allocates nothing — the invariant `test_record_metal.jl` pins. Pointers, not
-    # wrappers: an array of wrappers is converted into a fresh pointer array on every
-    # commit, which allocated the very thing this field exists to keep.
+    # The one-element array `commit:count:` takes, kept so a replayed frame
+    # allocates nothing (`test_record_metal.jl`). Pointers, since an array of
+    # wrappers is converted to a fresh pointer array on every commit.
     batch::Vector{id{MTL.MTL4CommandBuffer}}
-    # The timeline. `signaledValue` is what the GPU has finished; `next` is the
-    # value the last submission was given.
+    # The timeline: `signaledValue` is what the GPU finished, `next` the value
+    # the last submission was given.
     event::MTL.MTLSharedEvent
     next::UInt64
     mtl::MTL.MTLCommandQueue
     bq::Metal.ConcreteBatchedQueue
-    # How a failed submission is heard about. MTL4 has no error on a command
-    # buffer and no `waitUntilCompleted`, so without this a fault is a value that
-    # never arrives and a `waitfor` that never returns, with nothing in the system
-    # log. See `MTL.MTL4Feedback`.
+    # How a failed submission is reported: MTL4 command buffers carry no error,
+    # so without it a fault is a `waitfor` that never returns.
     feedback::MTL.MTL4Feedback
-    # The residency set of `mtl`, and the one this queue was given. There is
-    # exactly one because there is exactly one `MTLCommandQueue`: `adoptqueue!`
-    # makes Metal.jl use it too, so a buffer Metal.jl makes resident and a buffer
-    # the replay reaches are in the same set. Getting that wrong is silent —
-    # unmapped reads return zero and writes are dropped, the frame takes just as
-    # long, and `MTL_SHADER_VALIDATION=1` hides it by making everything resident.
+    # `mtl`'s residency set, also given to this queue; `adoptqueue!` makes Metal.jl
+    # use it too. A replay reaching memory outside it reads zeros and drops writes
+    # silently, and `MTL_SHADER_VALIDATION=1` hides that by making all resident.
     resset::Union{Nothing,MTL.MTLResidencySet}
-    # `submissions`: MTL4 command buffers committed, and the empty command
-    # buffers committed to `mtl` only to carry a signal or a wait between the two
-    # queues, which `mtl`'s own count includes and which carry no work.
+    # For `submissions`: MTL4 command buffers committed, and the empty bridge
+    # buffers on `mtl` that only carry a signal or wait between the queues.
     commits::Int
     bridges::Int
 end
 
 function MTL4Queue(dev::MTL.MTLDevice)
     n = MTL4_FRAMES_IN_FLIGHT
-    # With a descriptor for the `error:`: without one a device that refuses a queue
-    # returns nil and says nothing.
+    # With a descriptor, so a refused queue reports through `error:` instead of nil.
     q = MTL.MTL4CommandQueue(dev, MTL.MTL4CommandQueueDescriptor())
     mtl = MTL.MTLCommandQueue(dev)
     mtl.label = "Mantle"
-    # `BatchedCommandQueue` installs the residency set for its queue, so asking
-    # for it afterwards returns that one rather than making a second.
+    # `BatchedCommandQueue` installs `mtl`'s residency set; asking afterwards
+    # returns that one.
     bq = Metal.BatchedCommandQueue(mtl)
     pinpipeline!(bq)
     resset = Metal.can_use_residency_sets(dev) ?
         Metal.install_queue_residency!(mtl, dev) : nothing
-    # Both: on the queue so every submission has it, and on each command buffer
-    # in `opensubmit!` because that is what the API asks for.
+    # On the queue here, and on each command buffer in `opensubmit!`, as the API asks.
     resset === nothing || MTL.add_residency_set!(q, resset)
     return MTL4Queue(q,
                      [MTL.MTL4CommandAllocator(dev) for _ in 1:n],
@@ -815,13 +483,12 @@ batchqueue(q::MTL4Queue) = q.bq
 
 cmdqueue(q::MTL4Queue) = q.mtl
 
-# Metal.jl's batch is still where launches and blits go, so the flush heuristic
-# still has to be taken out of the frame. Same reasoning as the legacy path.
+# Launches and blits still go through Metal.jl's batch (see `ownflush!`).
 ownflush!(q::MTL4Queue, ::MTL.MTLDevice, own::Bool) =
     (Metal.own_flushes!(q.bq, own); nothing)
 
-"""What one MTL4 submission is: a ring slot, its command buffer and its encoder —
-unmanaged, with the one reference `opensubmit!` took, which `closesubmit!` gives back."""
+"""An MTL4 submission: a ring slot, its command buffer and its unmanaged encoder,
+whose one reference `opensubmit!` takes and `closesubmit!` gives back."""
 struct MTL4Submission
     cb::MTL.MTL4CommandBuffer
     enc::MTL.MTL4ComputeCommandEncoderRef
@@ -831,35 +498,25 @@ end
 encoder(s::MTL4Submission) = s.enc
 
 """
-Whether this queue can replay a recording at all.
-
-`true` everywhere except an MTL4 queue, where `executeCommandsInBuffer:` stops
-completing after about a second of replayed GPU work — see the note above
-`metalqueue`, and `Metal/research/mtl4_icb_stall.jl` for the ninety-line
-reproducer. A caller that has opted into MTL4 and then records a plan gets told
-so, rather than a frame that never returns.
+Whether this queue can replay an indirect command buffer: `false` on an MTL4
+queue, where `executeCommandsInBuffer:` stops completing (see `metalqueue`).
 """
 canreplay(q) = true
 canreplay(::MTL4Queue) = false
 
 """
-Whether a recording for this queue needs its dispatches captured for ENCODING.
-
-The other half of `canreplay`: a queue that cannot replay an indirect command
-buffer can still run a recorded plan by encoding its dispatches into the command
-buffer every frame, so the recorder captures what an encoder would need. Costs
-record time and nothing per frame.
+Whether a recording for this queue captures its dispatches so they are encoded
+into the command buffer every frame instead of replayed: an MTL4 queue, or a
+legacy one with `encodes` set.
 """
 encodes(q) = false
 encodes(::MTL4Queue) = true
 encodes(q::LegacyQueue) = q.encodes
 
 """
-An argument table holding one dispatch's addresses, built once at record time.
-
-The MTL4 replacement for the buffer bindings a recorded command carries. A
-recorded plan's addresses do not move — that is what makes a recording a
-recording — so the table is filled here and only bound at run time.
+One recorded dispatch's buffer bindings, built once at record time since a
+recording's addresses do not move: an `MTL4ArgumentTable` on MTL4, a
+`LegacyBindings` list on a legacy queue.
 """
 argtable(d::MetalDevice, args, store::MTL.MTLBuffer) = argtable(d.queue, d, args, store)
 
@@ -877,13 +534,9 @@ end
 """
     encodeplan!(sub, rec)
 
-Run a recorded plan by ENCODING its dispatches, for a queue that cannot replay
-them. Three sends each — the table, the pipeline, the grid — and a barrier where
-the recorder marked a pass boundary.
-
-The barrier is not optional here the way the bit on a recorded command is: MTL4
-does no hazard tracking, and this is where the graph's derived ordering has to be
-said out loud.
+Run a recorded plan by encoding its dispatches: argument table, pipeline, grid,
+and a dispatch barrier where the recorder marked a pass boundary. MTL4 does no
+hazard tracking, so these barriers are the graph's only ordering.
 """
 function encodeplan!(s::MTL4Submission, rec)
     enc = s.enc
@@ -892,15 +545,14 @@ function encodeplan!(s::MTL4Submission, rec)
         MTL.set_argument_table!(enc, c.table)
         MTL.set_function!(enc, c.pipeline)
         if c.slotoff >= 0
-            # A device-sized dispatch: its grid is the three words core's prepare
-            # wrote into its slot, before the barrier this command carries.
+            # Device-sized: the grid is the three words core's prepare wrote into
+            # the slot, before this command's barrier.
             MTL.dispatch_threadgroups_indirect!(enc, rec.argstore, c.slotoff, c.threads)
         elseif c.gridoff < 0
             MTL.dispatchThreadgroups!(enc, c.groups, c.threads)
         else
-            # A gated dispatch. The count is four bytes per word into the grid
-            # buffer, and a closed gate has left three zeros there — which runs no
-            # threadgroups and costs one command rather than the iteration.
+            # Gated: `gridoff` counts 4-byte words; a closed gate leaves three
+            # zeros, which runs no threadgroups.
             MTL.dispatch_threadgroups_indirect!(enc, rec.gridbuf,
                                                 rec.gridoff + 4 * c.gridoff,
                                                 c.threads)
@@ -936,23 +588,14 @@ function encodecommands!(enc::MTL.MTLComputeCommandEncoderRef, rec, commands::Un
 end
 
 """
-Whether this recording was made for the route this queue takes.
-
-A recording is shaped for ONE of the two, and the shape is visible: a plan recorded
-for an encoding queue carries its dispatches and its gates write threadgroup counts,
-one recorded for a replaying queue carries none and its gates write execution
-ranges. Neither survives the other route, and only one of the two failures is loud —
-a replay-shaped recording has nothing to encode, but an ENCODE-shaped one replays
-perfectly well and silently runs no gated iteration at all, because its execution
-ranges were never written and stayed at the zeros `openrecording` left.
-
-So both directions are refused, symmetrically, rather than the first one only. A
-plan's device is fixed when it is recorded, so neither is reachable through the
-public API, and the quiet one would be a black frame with nothing to read.
+Whether `rec` was recorded for this queue's route. An encode-shaped recording
+carries dispatches and its gates write threadgroup counts; a replay-shaped one
+carries none and its gates write execution ranges. Replaying an encode-shaped
+recording would silently run no gated iteration, so both mismatches are refused.
 """
 canrun(q, rec) = encodes(q) ? !isempty(rec.encoded) : isempty(rec.encoded)
 
-"""Why this queue cannot run this recording, said where the generations are named."""
+"""Throw the `ArgumentError` for a recording this queue cannot run."""
 refusereplay(::MTL4Queue) = throw(ArgumentError(
     "Mantle: this recording holds nothing an MTL4 queue can run. It is recorded " *
     "for a queue that replays an indirect command buffer, and an MTL4 queue cannot: " *
@@ -968,22 +611,16 @@ refusereplay(::LegacyQueue) = throw(ArgumentError(
     "so replaying it would run every ungated pass and silently discard every " *
     "iteration of every `repeat!`. Record the plan on the device that runs it."))
 
-# NOT reached, and deliberately: `replay!` asks `canreplay` first and gets `false`
-# here, so nothing in the suite runs this and a regression in it would not be
-# caught. Kept anyway, because it is correct — 40 chained dispatches from one
-# execute come out at 40, gates included, measured before the stall was found — and
-# because the ONE thing wrong with it is a driver defect a release may fix. Deleting
-# `canreplay(::MTL4Queue)` makes this the faster of the two routes again, at one
-# send per segment against three per dispatch; re-record first, since a recording
-# made for the encode path writes threadgroup counts and leaves every execution
-# range at the head reset's zeros, which replays as a gate that never opens.
+# Unreached and untested while `canreplay(::MTL4Queue)` is `false`; kept for a
+# driver that fixes the stall, where it is one send per segment against three per
+# dispatch. Encode-shaped recordings leave execution ranges zero, so re-record.
 function executesegment!(::MTL4Queue, s::MTL4Submission, rec, seg)
     if seg.slot < 0
         MTL.execute_commands!(s.enc, rec.icb, seg.first:seg.last)
         return nothing
     end
-    # Before, so the dispatch that wrote this range has landed; after, so the
-    # next segment does not start on top of whatever the iteration wrote.
+    # Before: the dispatch that wrote this range has landed. After: the next
+    # segment sees what the iteration wrote.
     MTL.barrierAfterEncoderStages!(s.enc, MTL.MTLStageDispatch, MTL.MTLStageDispatch)
     MTL.execute_commands_indirect!(s.enc, rec.icb, rec.rangebuf,
                                    rec.rangeoff + 8 * seg.slot)
@@ -992,25 +629,15 @@ function executesegment!(::MTL4Queue, s::MTL4Submission, rec, seg)
 end
 
 function opensubmit!(q::MTL4Queue, dev::MTL.MTLDevice, bufs)
-    # Everything this frame reaches is resident ALREADY, and it matters that it
-    # happened before this call rather than inside it. There is no `useResource` on an MTL4 encoder, so
-    # residency is membership of a set, and a set the command buffer has already
-    # declared does not pick up an allocation added afterwards: the replay reads
-    # unmapped memory and writes nothing, with no error anywhere. It cost a day.
-    # Under `MTL_SHADER_VALIDATION=1` it does not reproduce, because GPU
-    # validation makes everything resident — so the first frame was correct under
-    # the debug layer and silently empty without it.
-    #
-    # `ensureresident!` grants it, and `replay!` calls it immediately above
-    # this. It grants only when the list is rebuilt, so a steady frame does
-    # nothing at all here: re-granting per block per frame is a lock and a hash
-    # for an answer that cannot change, since a residency set never gives an
-    # allocation back.
+    # Residency must be complete before this call: MTL4 has no `useResource`, and
+    # a set a command buffer already declared does not pick up later allocations
+    # (the replay reads unmapped memory and writes nothing, silently).
+    # `replay!` calls `ensureresident!` just before, which grants only when the
+    # list is rebuilt.
     q.slot = q.slot == length(q.allocs) ? 1 : q.slot + 1
     f = q.at[q.slot]
-    # Zero means the slot has never been used. Otherwise this is the one place
-    # the host can block, and only when the ring has come all the way round to a
-    # frame the GPU is still running.
+    # Zero: slot never used. Otherwise the host blocks only when the ring has
+    # come round to a frame the GPU is still running.
     iszero(f) || passed(q, f) || waitfor(q, f)
     alloc = q.allocs[q.slot]
     MTL.reset!(alloc)
@@ -1024,25 +651,12 @@ end
 nextpiece!(::MTL4Queue, s::MTL4Submission, ids) = (MTL.barrierAfterEncoderStages!(s.enc, MTL.MTLStageDispatch, MTL.MTLStageDispatch); nothing)
 
 """
-Close whatever this frame put on the LEGACY queue, and give back the timeline
-value it will signal (`0` if it put nothing there).
+    flushlegacy!(q::MTL4Queue) -> UInt64
 
-Both queues are live on this path and Metal orders command buffers only WITHIN a
-queue. A plan's host updates are blits, every Metal.jl kernel launch is a
-dispatch, and both go to `bq` — while the replay goes to the MTL4 queue with
-nothing between them. Unordered, that is not subtle: a `Buffer(dev, data)`
-uploaded on the first run landed AFTER the dispatch that read it, so every frame
-showed the previous frame's answer, and at 4 M elements the 32 MB of blits
-overlapped a 9 ms replay and 40 chained adds came out at 10.
-
-So the legacy side signals the same timeline the MTL4 side does, and the caller
-makes its submission wait for the value. One counter, both queues.
-
-Work Metal.jl has ALREADY committed counts too. Outside a run Metal.jl flushes its
-batch on its own (`maybe_autoflush!`, at 32 operations), so the batch can be empty
-while command buffers on `mtl` are still running, and a submission that waited only
-for the previous MTL4 value would signal past them. An empty command buffer behind
-them carries the signal instead; the queue runs in order, so it fires once they have.
+Close what is pending on the legacy queue and return the timeline value it will
+signal (`0` if nothing is pending), for the next MTL4 submission to wait on: Metal
+orders command buffers only within a queue. Work Metal.jl already committed
+(`maybe_autoflush!`) gets an empty command buffer behind it carrying the signal.
 """
 function flushlegacy!(q::MTL4Queue)
     bq = q.bq
@@ -1052,7 +666,7 @@ function flushlegacy!(q::MTL4Queue)
     if cb === nothing
         quiet(q) && return UInt64(0)
         f = (q.next += UInt64(1))
-        # Unmanaged and committed directly, like the bridge in `closesubmit!`.
+        # Unmanaged and committed directly, as the bridge in `closesubmit!`.
         behind = MTL.MTLCommandBufferRef(q.mtl)
         MTL.encode_signal!(behind, q.event, f)
         MTL.commit_with_queue_key!(behind, pointer(q.mtl))
@@ -1069,26 +683,11 @@ end
 function closesubmit!(q::MTL4Queue, s::MTL4Submission)
     close(s.enc)
     MTL.endCommandBuffer!(s.cb)
-    # Wait for EVERYTHING earlier: the legacy work this frame put on the other
-    # queue, and the previous submission on this one.
-    #
-    # The previous submission matters because a recording is not read-only. A
-    # `repeat!` gate's execution range is `(location, length)` in the recording's
-    # own buffer, written by a one-thread dispatch inside the replay and read by
-    # the command processor later in the same replay — so two replays of one
-    # recording in flight at once are two writers of those bytes. The legacy path
-    # never has to say this: everything it submits is on ONE queue, and Metal runs
-    # a queue's command buffers in commit order. MTL4 has no hazard tracking
-    # between command buffers at all, so overlapping replays corrupt each other's
-    # ranges and the command processor stops on one that no longer names a valid
-    # range — no error, no fault in the log, just a submission that never signals.
-    #
-    # It needs all three at once to show: a gated plan, several submissions in
-    # flight (a 16-sample frame issues them back to back), and frames long enough
-    # to actually overlap.
-    #
-    # The cost is no cross-frame overlap on the GPU — which is exactly what the
-    # legacy queue already does, so it is not a regression against it.
+    # Wait for the legacy work this frame put on `mtl` and for the previous MTL4
+    # submission. A recording is not read-only (gates write their execution
+    # ranges into it during the replay), and MTL4 does no hazard tracking between
+    # command buffers, so overlapping replays corrupt each other's ranges and a
+    # submission never signals. This gives up cross-frame overlap, as legacy does.
     prev = q.next
     fl = flushlegacy!(q)
     w = iszero(fl) ? prev : fl
@@ -1099,24 +698,11 @@ function closesubmit!(q::MTL4Queue, s::MTL4Submission)
     f = (q.next += UInt64(1))
     MTL.signal_event!(q.q, q.event, f)
     q.at[s.slot] = f
-    # And the bridge back. `flushlegacy!` above orders the legacy queue BEFORE
-    # this submission; this orders everything that reaches the legacy queue after
-    # it — the readback blit an `Array(x)` issues, the next frame's uploads —
-    # AFTER it. An empty command buffer whose only content is a wait, which is
-    # `vkQueueSubmit` with a wait semaphore and nothing else.
-    #
-    # Without it a device-written count read straight after `run!` came back
-    # zero: `Metal.synchronize()` waits on the plain queue, and the work was on
-    # the other one. Safe to commit directly because `flushlegacy!` just closed
-    # the batch, so no command buffer of Metal.jl's is open to be reordered
-    # against.
-    #
-    # Directly in the plainest sense: `commit_with_queue_key!` and not `commit!`,
-    # whose submission hook asks the command buffer for its queue (a managed wrapper
-    # made per call) only to flush a batch that is already closed and to claim arrays
-    # this buffer does not touch. Unmanaged, so the bridge is no Julia object at all:
-    # its one reference is given back once the queue's submission record has taken
-    # its own.
+    # The bridge back: an empty command buffer on `mtl` that waits for `f`, so
+    # later legacy work (an `Array(x)` readback, the next uploads) runs after this
+    # submission. Safe to commit directly since `flushlegacy!` just closed the
+    # batch. `commit_with_queue_key!` skips `commit!`'s submission hook, which
+    # would allocate a queue wrapper to flush a closed batch.
     bridge = MTL.MTLCommandBufferRef(q.mtl)
     MTL.encode_wait!(bridge, q.event, f)
     MTL.commit_with_queue_key!(bridge, pointer(q.mtl))
@@ -1126,59 +712,31 @@ function closesubmit!(q::MTL4Queue, s::MTL4Submission)
 end
 
 """
-End a walked frame on the MTL4 path.
-
-The passes went through Metal.jl's batch and its own command buffers, which are
-on `mtl` and not on the MTL4 queue. Signalling the timeline from that command
-buffer is what keeps ONE counter across both: the next MTL4 submission waits for
-this value before it runs.
-
-A frame that encoded nothing has no command buffer to signal from and no work to
-cover, so it keeps the token it already had.
+End a walked frame on the MTL4 path: its passes went to `mtl`, so signal the
+shared timeline from there for the next MTL4 submission to wait on. A frame with
+nothing pending keeps the current token.
 """
 function closeframe!(q::MTL4Queue, ::MTL.MTLDevice)
     f = flushlegacy!(q)
-    # Nothing was encoded, so there is no submission to cover and the token the
-    # run already has still stands.
     return iszero(f) ? q.next : f
 end
 
-# ── The Metal 4 timeline ─────────────────────────────────────────────────────
-#
-# This is the contract `pool.jl` writes down and the Vulkan backend already
-# meets: `fence` READS "everything submitted up to now", `passed` compares
-# against what the GPU has signalled, and `waitfor` declines rather than block on
-# a value nothing has submitted.
+# The pool's timeline contract: `fence` covers everything submitted so far,
+# `passed` compares against what the GPU signalled, and `waitfor` declines a
+# value nothing has submitted.
 
 """
-The value the NEXT submission will signal, which is what a region retired now has
-to wait for.
-
-Not `next`, deliberately. A submission that does not signal — a render pass or an
-acceleration-structure build, which commit command buffers of their own — sits
-between two that do, and a token equal to the last signalled value would not
-cover it. `next + 1` does, because both queues are ordered: everything already
-committed runs before the submission that signals it.
+The value the next submission will signal: `next + 1`, so a non-signalling
+command buffer committed since (a render pass, an acceleration-structure build)
+is covered, because it runs before that submission.
 """
 fence(q::MTL4Queue) = q.next + UInt64(1)
 
 """
-Has the GPU finished everything `f` stands for?
-
-`min(f, next)` and not `f`, which is the counterpart of `fence` handing out
-`next + 1`. That token means "wait for the submission after the last one", and
-when no such submission has been made there is no signalled value left to wait
-FOR: every one that exists is at or below `next`. Comparing against `f` itself
-instead would leave a region retired on an idle device unreleasable until
-something unrelated was submitted — which is exactly the backlog
-`test_pool_metal.jl` measures.
-
-But the event says nothing about legacy work no signal follows yet: a kernel
-launch outside a run goes into Metal.jl's batch on `mtl`, and only the next
-`flushlegacy!` puts a value behind it. So a token no signal has reached passes only
-once the legacy queue is quiet, the legacy timeline's own rule. Without that, a
-buffer freed while an eager launch still read it came back at the next reclaim
-(`test_free_during_recording.jl`).
+Whether the GPU finished everything `f` covers. Compares `min(f, next)`, since a
+`next + 1` token from `fence` has no submission behind it on an idle device. A
+token past `next` also needs the legacy queue quiet: eager launches on `mtl` have
+no signal until the next `flushlegacy!`.
 """
 function passed(q::MTL4Queue, f)
     min(UInt64(f), q.next) <= q.event.signaledValue || return false
@@ -1186,24 +744,17 @@ function passed(q::MTL4Queue, f)
 end
 
 """
-Wait for the timeline, and say whether it got there.
-
-Never drains the device: it waits on the shared event, for the last value actually
-submitted, which is what `passed` compares against. A token beyond that names a
-submission nobody has made, and `min` is what stops this from being a wait nothing
-can satisfy — unless legacy work is still running that no value covers yet, and
-then `flushlegacy!` gives it one to wait for.
+Wait on the shared event for `min(f, next)`, or for a `flushlegacy!` value when
+`f` is past `next` and legacy work is pending; return `false` for a token past
+`next + 1`. Throws when the MTL4 feedback reports a failed submission.
 """
 function waitfor(q::MTL4Queue, f)
     passed(q, f) && return true
-    # `fence` hands out `next + 1`, the submission after the last; nothing hands
-    # out more, so a token past it covers work no one submitted.
+    # Nothing hands out more than `next + 1`.
     UInt64(f) > q.next + UInt64(1) && return false
     target = UInt64(f) > q.next && !quiet(q) ? flushlegacy!(q) : min(UInt64(f), q.next)
-    # Bounded waits in a loop rather than one unbounded one, so that a submission
-    # the driver has FAILED is reported instead of waited on forever. This is not
-    # a timeout: healthy work is waited for as long as it takes, and the loop only
-    # ends when the value arrives or the queue says a submission failed.
+    # Bounded waits in a loop so a failed submission is reported, not waited on
+    # forever. Not a timeout: healthy work is waited for as long as it takes.
     while !MTL.waitUntilSignaledValue(q.event, target, UInt64(1000))
         why = MTL.failure(q.feedback)
         why === nothing && continue
@@ -1217,25 +768,10 @@ end
 """
     ownflush!(dev, own::Bool)
 
-Take the decision of WHEN to submit away from Metal.jl for the duration of a run,
-or give it back.
-
-Metal.jl batches: kernel launches and blits accumulate in one open command buffer
-and `maybe_autoflush!` commits it once the batch crosses 32 operations or 64 MB.
-That is the right default for code that submits work without thinking about
-command buffers, and it is the wrong one here, because a graph knows exactly
-where its submission boundaries are — they are the frame. A plan with 140
-dispatches was four command buffers rather than one, each an extra commit, and
-each a submission Mantle did not make and therefore cannot count.
-
-Cannot count is the part that matters beyond the commits. `fence` has to stand
-for "everything submitted up to now"; a submission that happens between two of
-Mantle's own is one no token covers, so a region retired afterwards would be
-handed back while that command buffer was still reading it. One submission per
-run is what makes the counter mean something.
-
-Turning it off is a promise to flush, which `closeframe!` and `closesubmit!` keep
-— every path out of `submitrun!` goes through one of them.
+Disable Metal.jl's `maybe_autoflush!` for a run (`own = true`), or restore it.
+An autoflush mid-run is a submission no fence covers, so a retired region could
+be reused while it still reads. Owning the flush is a promise to flush, which
+`closeframe!` and `closesubmit!` keep on every path out of `submitrun!`.
 """
 ownflush!(d::MetalDevice, own::Bool) = ownflush!(d.queue, d.dev, own)
 
@@ -1245,13 +781,8 @@ ownflush!(q::LegacyQueue, ::MTL.MTLDevice, own::Bool) =
 """
     closeframe!(dev) -> UInt64
 
-End a run that submitted through the batch rather than through a recording, and
-give back the token that covers it.
-
-A walked plan's passes each encode into the open batch (compute) or commit a
-command buffer of their own (render, copy). Nothing in that path decides the
-frame is over, which is what this is: with `ownflush!` holding the batch open for
-the whole run, the flush here is the ONE submission that run made.
+End a walked run (passes encoded into the open batch, or render and copy command
+buffers of their own) by flushing the batch, and return the token covering it.
 """
 closeframe!(d::MetalDevice) = closeframe!(d.queue, d.dev)
 
@@ -1261,46 +792,24 @@ function closeframe!(q::LegacyQueue, ::MTL.MTLDevice)
 end
 
 """
-Wait until this device has finished everything it has been given.
-
-Core's `flush!(d::Device)` forwards to `flush!(batchqueue(d))` and needs no
-backend method on Vulkan, where "a queue holds no open batch, so this is
-`waitfor!` on the newest submission and nothing else". Here a queue holds
-exactly that: work sits in an open command buffer until something commits it.
-Waiting without committing first waits for the SUBMISSIONS BEFORE it and
-returns, which does not look like a hang -- it looks like a correct frame that
-reads back as whatever the target held previously.
-
-So: commit the open batch, then wait for it. `closeframe!` is already the verb
-for the first half and hands back a fence covering it, and it dispatches on the
-queue, so both queue generations are served without naming either here.
+Commit the open batch (`closeframe!`) and wait for it. Waiting without committing
+would return before the open work ran, and a readback would show stale data.
 """
 flush!(d::MetalDevice) = (waitfor(d, closeframe!(d)); nothing)
 
 """
-`true` on a queue that batches, which is the pre-MTL4 one.
-
-A call is host work that submits or encodes work of its own, and the question
-`runscalls` asks is whether this device's RUN path can hold it in order. It can here,
-for a reason that is Metal.jl's batch rather than this backend's: a frame is ONE open
-command buffer, so a library given that buffer encodes into the same submission and
-Metal orders its encoders against the replay's by encoder order. `replaywithcalls!`
-ends and reopens the encoder around each call; `suspendsubmit!` is the verb.
-
-An `MTL4Queue` is not asked and answers core's `false`: Mantle builds and commits
-those command buffers itself, there is no open batch to join, and MPSGraph has no
-MTL4 encode entry point to join it with. A plan declaring a call there is refused at
-`bake` with core's message rather than silently losing the call on every replay.
+`true` on a `LegacyQueue`: a frame is one open command buffer, so a host call
+encodes into the same submission, ordered by encoder order (`replaywithcalls!`,
+`suspendsubmit!`). An `MTL4Queue` keeps core's `false`: there is no open batch to
+join and MPSGraph has no MTL4 entry point, so `bake` refuses such a plan.
 """
 Mantle.runscalls(::MetalDevice{LegacyQueue}) = true
 
 """
     cmdqueue(dev) -> MTLCommandQueue
 
-The plain queue, for the two paths that submit a command buffer of their own
-rather than going through the batch: building an acceleration structure
-(`raytracing.jl`) and compiling the traversal pipeline (`trace.jl`). Both are
-setup, not frame work.
+The plain queue, for command buffers committed outside the batch, such as
+acceleration-structure builds (`raytracing.jl`) and traces (`trace.jl`).
 """
 cmdqueue(d::MetalDevice) = cmdqueue(d.queue)
 cmdqueue(q::LegacyQueue) = q.mtl
@@ -1308,102 +817,53 @@ cmdqueue(q::LegacyQueue) = q.mtl
 """
     executesegment!(dev, sub, rec, seg)
 
-Run one segment of a recording — the only place a replay differs between the two
-generations, and only for a GATED segment.
-
-An ungated segment is one `executeCommandsInBuffer:` on both. The barrier bit a
-command carries is honoured on both too, so the pass boundaries inside a segment
-are the recorder's business either way; 40 chained dispatches replayed from one
-execute come out at 40 on an MTL4 encoder at every size tried.
-
-A gated segment is different because of WHERE the dependency is. Its range is
-`(location, length)` in memory, written by a one-thread dispatch in the segment
-before and read by the COMMAND PROCESSOR when it reaches the execute — and the
-execute is a call on the encoder, not a command inside the buffer, so no bit can
-order it. The legacy driver infers that hazard from `useResource`. MTL4 does no
-hazard tracking at all, so it has to be said: a `barrier!` on either side, two
-sends per gated segment.
+Run one segment of a recording (encoded instead when the queue `encodes`). A
+gated segment's range is written by a dispatch and read by the command processor
+at the execute, which no barrier bit orders: legacy infers the hazard from
+`useResource`, MTL4 needs a barrier on either side.
 """
 executesegment!(d::MetalDevice, sub, rec, seg) = executesegment!(d.queue, sub, rec, seg)
 
 """
     batchqueue(dev) -> Metal.BatchedCommandQueue
 
-The device's batch: where a kernel launch, a blit and a walked pass go.
-
-The backend never asks `Metal.global_queue` for one. That function answers with
-the CURRENT TASK's queue, which is a different `MTLCommandQueue` — and therefore a
-different residency set — for every task that ever runs a plan.
+The device's batch, where launches, blits and walked passes go. Never
+`Metal.global_queue`, which returns a per-task queue with its own residency set.
 """
 batchqueue(d::MetalDevice) = batchqueue(d.queue)
 batchqueue(q::LegacyQueue) = q.bq
 
 """
-Make this device's queue the one Metal.jl launches on, for the running task.
-
-Called at the head of every run. One dictionary store in task-local storage, and
-it is what makes "Mantle owns the queue" true on whatever task the caller drives
-the graph from.
+Make this device's batch the one Metal.jl launches on for the running task (a
+task-local store). Called at the head of every run.
 """
 adoptqueue!(d::MetalDevice) = (Metal.adopt_queue!(d.dev, batchqueue(d)); nothing)
 
-# ── Budgets ───────────────────────────────────────────────────────────────────
-
-"""The largest single `MTLBuffer` this device will create."""
 devicename(d::MetalDevice) = String(d.dev.name)
+"""The largest single `MTLBuffer` this device will create."""
 maxalloc(d::MetalDevice) = Int(d.dev.maxBufferLength)
 
 """
-How much device memory a transient arena may use.
-
-`recommendedMaxWorkingSetSize` is Apple's "stay under this and you will not be
-paged", which is the same kind of number Vulkan's memory-budget extension
-reports and is used the same way: an upper bound the placer checks against, not
-a reservation.
+Device memory a transient arena may use: `recommendedMaxWorkingSetSize`, an upper
+bound the placer checks against, not a reservation.
 """
 capacity(d::MetalDevice) = Int(d.dev.recommendedMaxWorkingSetSize)
 
-"""
-Block size for the suballocator.
-
-64 MiB, matching the Vulkan backend. Unified memory makes a large block cheaper
-here than on a discrete part — nothing is copied to reach it — but the reason
-for the size is the same: one device allocation amortised over many transients.
-"""
+"""Suballocator block size: 64 MiB, as on Vulkan."""
 blocksize(::MetalDevice) = 64 << 20
 
-# ── Device-wide synchronisation and the graphics answer ──────────────────────
-
-"""
-Wait for everything submitted to this device.
-
-`Metal.synchronize()` waits on the current task's command queue, which is the
-whole of what Metal exposes here — there is no `vkDeviceWaitIdle` taking a
-device handle, because a `MTLDevice` does not own the submission order; its
-queues do.
-"""
+"""Wait for everything submitted to the device: its queue and every channel."""
 waitidle(b::Metal.MetalBackend) = waitidle(Device(b))
-# The device's queue and every channel it has handed out: idle is all of them.
 waitidle(d::MetalDevice) = (waitidle(d.queue); foreach(Metal.synchronize, d.channels); nothing)
 
-# Recorded on the timeline, so the pool can reuse what was retired before the wait:
-# a drain the queue did not hear about left those regions waiting for another one.
-# An MTL4 device has two queues and waits for both.
+# Both queues, the MTL4 one through the timeline so the pool sees what passed.
 waitidle(q::MTL4Queue) = (waitfor(q, q.next); Metal.synchronize(q.bq); nothing)
 
-# `supports_graphics` is answered in `graphics.jl`, where the rasterisation half
-# lives. Metal.jl compiles vertex and fragment stages as well as compute.
+# `supports_graphics` is in `graphics.jl`.
 
-# ── Channels ──────────────────────────────────────────────────────────────────
-#
-# A channel is a `Metal.BatchedCommandQueue`: the device's own is `batchqueue(d)`,
-# and a second one is another `MTLCommandQueue` with Metal.jl's batch over it — its
-# own command buffers in its own order, on the same device and the same memory.
-# `backend(channel)` launches on it. Two queues have no order between them, so a
-# buffer used on both is ordered by Metal.jl's ownership check, which every launch
-# and copy makes: one that names a buffer another queue still uses waits for that
-# queue first. Vulkan derives the same order from the stamps core writes and
-# turns it into a semaphore wait; here it is a wait on the host.
+# A channel is another `MTLCommandQueue` with Metal.jl's batch over it. Queues are
+# unordered against each other; a buffer used on two is ordered by Metal.jl's
+# ownership check, a host wait for the other queue before each launch and copy.
 
 supports_batch_queue(::Union{Metal.MetalBackend,MetalDevice}) = true
 
@@ -1419,8 +879,7 @@ end
 allocate_batch_queue!(b::Metal.MetalBackend) = allocate_batch_queue!(Device(b))
 
 """
-The device that handed `bq` out, or whose own queue it is. Found among the live
-devices, since a Metal.jl queue does not know Mantle's device.
+The live device that handed `bq` out or owns it as its queue. Throws when none does.
 """
 function deviceof(bq::Metal.BatchedCommandQueue)
     for r in METAL.live
@@ -1438,8 +897,8 @@ backend(bq::Metal.BatchedCommandQueue) = Metal.MetalBackend(bq)
 """Wait for everything submitted on `bq`, committing what is open first."""
 flush!(bq::Metal.BatchedCommandQueue) = (Metal.synchronize(bq); nothing)
 
-"""Nothing is ever retired onto a Metal channel — a collected array goes back
-through Metal.jl, a pool region through the pool — so there is nothing to destroy."""
+"""Nothing is retired onto a Metal channel (arrays go back through Metal.jl,
+regions through the pool), so there is nothing to destroy."""
 reclaim!(::Metal.BatchedCommandQueue) = 0
 
 """
@@ -1463,16 +922,11 @@ function release_batch_queue!(bq::Metal.BatchedCommandQueue)
     return nothing
 end
 
-# ── A device's life ───────────────────────────────────────────────────────────
-#
-# The portable verbs of `runtime/lifecycle.jl`. Validation is `debug.jl`'s.
+# The lifecycle verbs of `runtime/lifecycle.jl`.
 
 """
-Every command buffer committed to this device's queues that carries work: what
-Metal.jl counts per `MTLCommandQueue` (every `commit!` goes through it), on the
-device's queue and on every channel it handed out, and on an MTL4 device the MTL4
-commits beside them, less the empty command buffers that only carry a signal or a
-wait from one queue to the other.
+Command buffers with work committed to the device's queue and channels (released
+ones included); on MTL4, plus MTL4 commits, minus the empty bridge buffers.
 """
 submissions(d::MetalDevice) = submissions(d.queue) + d.releasedsubmits +
     sum(c -> MTL.committed(c.queue), d.channels; init = 0)
@@ -1498,10 +952,9 @@ function reset_device!(d::MetalDevice; debug::DebugConfig = d.debug)
 end
 
 """
-The array, or `nothing` when Metal had no memory for it. `MTLBuffer` directly and
-not `MtlArray(undef, …)`: Metal.jl's allocation answers an out-of-memory with a
-full collection and a device drain before it gives up, and a caller asking to be
-told does not want to be rescued.
+The array, or `nothing` when Metal has no memory for it. Allocates the `MTLBuffer`
+directly because `MtlArray(undef, ...)` retries an out-of-memory with a full GC
+and a device drain.
 """
 function tryallocate(d::MetalDevice, ::Type{T}, dims::Dims{N}) where {T,N}
     buf = try

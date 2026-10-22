@@ -1,13 +1,12 @@
-# Metal argument adaptation, access signatures and native library dispatch.
 # Immediate passes submit in graph order on one queue with tracked resources.
-# Recorded ICB commands can execute concurrently: derive read/write hazards and
-# emit their barriers. Retain tracked heaps when changing submission boundaries.
+# Recorded ICB commands can execute concurrently, so their read/write hazards are
+# derived and their barriers emitted. Retain tracked heaps when changing
+# submission boundaries.
 
 syncbackend(::MetalDevice) = MetalAPI()
 
-# Metal's simdgroup matrix load/store are opaque AIR intrinsics after inlining:
-# the IR contains no ordinary LLVM load or store for the access walker to read.
-# Their globally unique symbol names are therefore the authoritative direction.
+# Access directions of opaque AIR intrinsics, which have no LLVM load or store
+# for the access walker to read; their symbol names are unique.
 function intrinsic_usage(::MetalAPI, name::Symbol)
     s = String(name)
     startswith(s, "air.simdgroup_matrix_8x8_load.") && return READ
@@ -49,8 +48,8 @@ alignment(::MetalDevice, ::TransientBuffer) = 16
 # Infer through the same converted argument ABI the shader receives.
 Mantle.argtype(::MetalDevice, @nospecialize(y)) = Core.Typeof(Metal.mtlconvert(y))
 
-# What `Adapt.adapt_storage(::Metal.Adaptor, ::MtlArray)` produces, which is what
-# a kernel handed a materialised transient receives.
+# What `Adapt.adapt_storage(::Metal.Adaptor, ::MtlArray)` produces: the type a
+# kernel receives for a materialised transient.
 Mantle.devicebuffertype(::MetalDevice, ::Type{T}, N::Int) where {T} =
     Metal.MtlDeviceArray{T,N,Metal.AS.Device}
 
@@ -130,7 +129,6 @@ Mantle.argument_usage(::Type{<:MPSGraphAttention}, ::Type{<:Tuple{Any,Any,Any,An
 """Return a supported MPSGraph GEMM call or nothing. The library fuses activation
 before the final output rounding; the epilogue is named through activationkind."""
 function Mantle.librarygemm(d::MetalDevice, out, A, B, bias, epilogue)
-    # The question is about this device's RUN path, and it is core's to answer.
     Mantle.runscalls(d) || return nothing
     denseoperands(out, A, B, bias) || return nothing
     act = Mantle.activationkind(epilogue)
@@ -141,10 +139,9 @@ end
 """
     denseoperands(xs...) -> Bool
 
-Whether operands have native dense storage or graph resources that become it.
-Logical shape/type alone is insufficient: packed weight wrappers can expose a
-matrix shape while storing encoded UInt32 words. Decline them before replay.
-
+Whether operands have native dense storage or are graph resources that become it.
+Shape and type do not suffice: packed weight wrappers expose a matrix shape over
+encoded `UInt32` words.
 """
 denseoperands(xs...) = all(xs) do x
     x === nothing && return true
@@ -152,9 +149,8 @@ denseoperands(xs...) = all(xs) do x
         x isa Mantle.ResourceView || x isa Metal.MtlArray
 end
 
-"""Apple's MPSGraph 2-D convolution, `out = act.(conv(x, w) .+ bias)`, as a pass
-member. The geometry rides on the callable, like the activation: it is fixed when the
-op is declared and none of it is a resource."""
+"""MPSGraph 2-D convolution, `out = act.(conv(x, w) .+ bias)`, as a pass member.
+Geometry and activation are fixed at declaration and live on the callable."""
 struct MPSGraphConv2D
     stride::NTuple{2,Int}
     pad::NTuple{2,Int}
@@ -233,16 +229,11 @@ end
 Mantle.kernelinterpreter(::MetalDevice, kernel, tt) = metalinterpreter(kernel, tt)
 
 """
-What a vertex stage does to each of its arguments.
+    vertextouches(dev, shader, args)
 
-The BODY, not the stage wrapper: `MetalVertexStage` exists to write the output
-struct, and what it stores through is the pointer the driver hands it, not
-anything the caller declared.
-
-A body that declares the leading `VertexIndex` is walked with one, because that
-is the signature it is compiled at — asked of the method table exactly as
-`stage_signatures` asks it, so the two cannot disagree. Its entry is dropped
-with the function's own.
+Access of the vertex body (not `MetalVertexStage`, whose output pointer is the
+driver's) to each argument. A body taking a leading `VertexIndex` is walked with
+one, decided as `stage_signatures` decides it; that entry is dropped.
 """
 function Mantle.vertextouches(dev::MetalDevice, shader, args::Tuple)
     f = Mantle.stagefunction(shader.vertex)
@@ -257,13 +248,11 @@ Mantle.vertextouches(dev::MetalDevice, shader::Mantle.MeshPipeline, args::Tuple)
                  lead = mesh_stage_lead(shader))
 
 """
-What a fragment stage does to each of its arguments.
+    fragmenttouches(dev, shader, args)
 
-A fragment body's FIRST parameter is the varyings — `MetalFragmentStage` builds
-that NamedTuple from the interpolated values and the body reads it — so the
-signature walked here leads with `varying_type`, exactly as `stage_signatures`
-compiles it. Its entry is dropped with the function's own; a varying is a value
-the rasteriser produced, not a resource anyone declared.
+Access of the fragment body to each argument. The body's first parameter is the
+varyings NamedTuple, so the walk leads with `varying_type` as `stage_signatures`
+compiles it; that entry is dropped.
 """
 function Mantle.fragmenttouches(dev::MetalDevice, shader, args::Tuple)
     f = Mantle.stagefunction(shader.fragment)
@@ -275,7 +264,6 @@ function stagetouches(dev::MetalDevice, f, args::Tuple; lead::Tuple = ())
     tt = (lead..., argT...)
     interp = metalinterpreter(f, Base.to_tuple_type(tt))
     touches = Mantle.accessof(interp, f, tt; cache = Mantle.accesscache(dev))
-    # Index 1 is `f` itself, and everything in `lead` is the STAGE's rather than
-    # the caller's, so all of it goes together.
+    # Drop `f` itself and the stage-owned `lead` arguments.
     return touches[(2 + length(lead)):end]
 end

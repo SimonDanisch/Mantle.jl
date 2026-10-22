@@ -29,8 +29,7 @@ function narrow_phase_kernel(
         shape,
         results)
     k = KI.get_global_id().x
-    # The launch covers whole workgroups; `@kernel` guarded the tail, a plain
-    # kernel guards its own.
+    # The launch covers whole workgroups; guard the tail.
     k <= length(pairs) || return nothing
     @inbounds pair = pairs[k]
     i = pair[1]
@@ -58,14 +57,12 @@ end
 
 """narrow_phase_contacts_kernel(transforms, pairs, shape, counters, contacts, max_contacts)
 
-Run GJK/EPA and append each positive-depth contact to both grains' lists.
-Counters are zero-initialized UInt32 attempted counts; live counts clamp to
-max_contacts. Overflow drops records. Contacts occupy grain-major fixed slots,
-with length(contacts)>=length(counters)*max_contacts and valid pair indices.
-
-Slot increments only reserve space. Read counters/records after dispatch
-completion with the normal producer-to-consumer synchronization; the counter
-does not publish payloads to concurrent invocations."""
+Run GJK/EPA and append each positive-depth contact to both grains' lists, in
+grain-major fixed slots; requires length(contacts) >= length(counters) *
+max_contacts and valid pair indices. Counters are zero-initialized UInt32 attempt
+counts; live counts clamp to max_contacts and overflow drops records. The atomic
+increment only reserves a slot: read counters and records after the dispatch
+completes, not from concurrent invocations."""
 function narrow_phase_contacts_kernel(
         transforms,
         pairs,
@@ -75,7 +72,7 @@ function narrow_phase_contacts_kernel(
         max_contacts::Int32)
     k = KI.get_global_id().x
     # A lane past the last pair would read a garbage pair and bump two garbage
-    # counters. See `narrow_phase_kernel`.
+    # counters.
     k <= length(pairs) || return nothing
     @inbounds pair = pairs[k]
     i = pair[1]

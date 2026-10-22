@@ -1,23 +1,12 @@
-# A window on Metal: a `CAMetalLayer` and one drawable at a time.
-#
-# Not a swapchain of images the caller indexes. Vulkan hands out N images and
-# says which one is next; a `CAMetalLayer` hands out ONE drawable, and
-# `nextDrawable` blocks when the outstanding ones are all in flight — which is
-# where the frame rate comes from. So `current_image_idx` has no counterpart
-# here, and the accessors answer from the drawable rather than from an array.
-#
-# The layer works with no window at all. That is not a curiosity: it is what
-# makes this path testable without a window server, and it is the same code
-# either way — attaching the layer to a view is one call that changes nothing
-# about how frames are drawn.
+# A window on Metal: a `CAMetalLayer` that hands out one drawable at a time
+# (`nextDrawable` blocks while all are in flight), so there is no image index.
+# The layer works without a platform window, which keeps this path testable
+# without a window server.
 
 """
-A Metal presentation surface.
-
-`handle` is the platform window, or `nothing` for a layer that is not on screen.
-`drawable` is the texture the frame in flight is rendering into and is `nothing`
-between frames — asking for a view outside a frame is a mistake with an answer
-rather than a stale texture.
+A Metal presentation surface. `handle` is the platform window, or `nothing` for
+an offscreen layer. `drawable` is the frame in flight's target and `nothing`
+between frames, so a view requested outside a frame is an error.
 """
 mutable struct MetalWindow{T} <: Mantle.Window
     handle::Any
@@ -26,18 +15,15 @@ mutable struct MetalWindow{T} <: Mantle.Window
     height::Int
     drawable::Union{Nothing,MTLm.CAMetalDrawable}
     open::Bool
-    # The task that took `drawable`, until it presents: core's one-image rule
-    # (`checkacquirable`) asks it.
+    # The task that took `drawable`, until it presents (`checkacquirable`).
     acquirer::Union{Nothing,Task}
 end
 
 """
-    MetalWindow(T, width, height; vsync = true, handle = nothing)
+    MetalWindow(T, width, height; vsync = true, srgb = false, handle = nothing)
 
-A presentation surface of pixel type `T`, sized in PIXELS.
-
-`T` is the element type, as everywhere a caller names a format in Mantle —
-`BGRA{N0f8}` is what a display wants and what `mtlformat` lowers it to.
+A presentation surface of element type `T` (lowered by `mtlformat`, e.g.
+`BGRA{N0f8}`), sized in pixels.
 """
 function MetalWindow(::Type{T}, width::Integer, height::Integer;
                      vsync::Bool = true, srgb::Bool = false, handle = nothing) where {T}
@@ -49,24 +35,11 @@ end
 """
     attach!(w::MetalWindow, glfw_window)
 
-Put the layer on a GLFW window's view, so the frames reach a screen.
-
-Three calls and all three are needed. `glfwGetCocoaWindow` is in the GLFW
-library but not in GLFW.jl's wrapper, so it is reached by `ccall`. A view is
-not layer-backed by default — `setWantsLayer:` is what makes it so — and
-`setLayer:` before that is silently undone when the view creates its own.
-
-The size has to be re-asserted afterwards, and that is not a detail. A layer
-with no EXPLICIT `drawableSize` derives one from its bounds times
-`contentsScale`, and putting it on a view is what first gives it bounds — so
-whatever size the layer was built with is silently replaced by the view's, in
-points times the Retina factor. A 1600x900 window then hands out 2940x1602
-drawables while `target_extent` still says 1600x900, and every pass that
-indexes a buffer by hand with a stride reads far outside it.
-
-What the layer ends up at is adopted rather than assumed: a window that cannot
-have the size it asked for reports the size it got, because a `Mantle.Window`
-that lies about its extent is worse than one that is the wrong size.
+Put the layer on a GLFW window's view. `setWantsLayer:` must precede `setLayer:`,
+or the view replaces the layer with its own. `drawableSize` is set again after
+attaching, because a view gives the layer bounds that replace its size with
+points times the backing scale. The window then adopts the size the layer
+actually has, so its extent never disagrees with its drawables.
 """
 function attach!(w::MetalWindow, glfw_window)
     nswindow = ccall((:glfwGetCocoaWindow, GLFW.libglfw), Ptr{Cvoid},
@@ -88,51 +61,31 @@ function attach!(w::MetalWindow, glfw_window)
 end
 
 """
-    Window(backend, width, height; title = "", vsync = false)
+    Window(backend, width, height; title = "", vsync = false,
+           color_format = BGRA{N0f8}, srgb = false)
 
-The portable spelling, answered on this backend. `width` and `height` are
-PIXELS.
-
-`BGRA{N0f8}` is the element type, because that is what a display wants and
-what `runtime/format.jl` documents as the portable name for it. Naming it here
-was said to be impossible for three separate reasons, all of which read
-"ColorTypes is not a dependency of Mantle"; it is, and this method is what was
-missing because of that.
-
-`color_format` is the portable keyword — `src/vulkan/graphics/window.jl` documents
-`Mantle.Window(backend, w, h; color_format = BGRA{N0f8})` as the spelling, and
-Vulkan forwards it. Metal took the default and did not accept the keyword at all,
-so a portable caller passing it got a MethodError here and nowhere else. That is
-the third keyword this session found missing from one backend's copy of a shared
-verb: the vocabulary pins the NAME and nothing pins the keyword list.
-
-The GLFW window is asked for in POINTS while the drawable is in PIXELS, so the
-request is divided by the display's content scale. Ask for 1600x900 on a Retina
-panel without it and the drawable is 3200x1800 — which is right for a renderer
-that follows its surface and wrong for one built at a fixed resolution, and in
-neither case what the caller asked for. It cost a smeared, distorted frame once,
-because the composite pass indexed `hdr[py * 1600 + px]` over a 2940-wide target.
+A GLFW window with a Metal layer, `width` x `height` in pixels. The GLFW size is
+in points, so the request is divided by the content scale. Throws if the layer's
+drawable size differs from the request. `color_format` is the portable keyword
+the Vulkan backend also takes.
 """
 function Mantle.Window(::Metal.MetalBackend, width::Integer, height::Integer;
                        title::AbstractString = "", vsync::Bool = false,
                        color_format::Type = BGRA{N0f8}, srgb::Bool = false)
     GLFW.WindowHint(GLFW.CLIENT_API, GLFW.NO_API)
     gw = GLFW.CreateWindow(Int(width), Int(height), String(title))
-    # Window hints are process-global. Left at `NO_API`, the next OpenGL window
-    # anything in this process opens — GLMakie's — has no context to make current.
+    # Hints are process-global; left at `NO_API`, the next OpenGL window (e.g.
+    # GLMakie's) gets no context.
     GLFW.DefaultWindowHints()
     sx, sy = GLFW.GetWindowContentScale(gw)
     GLFW.SetWindowSize(gw, round(Int, width / sx), round(Int, height / sy))
     w = attach!(MetalWindow(color_format, width, height; vsync, srgb), gw)
-    # `attach!` ADOPTS whatever the layer could be given, so this is a real
-    # check and not a restatement: a window that reports an extent its drawables
-    # do not have breaks every pass that strides a buffer by hand.
+    # `attach!` adopts the layer's actual size; passes that stride a buffer by
+    # hand rely on the requested extent.
     size(w) == (Int(width), Int(height)) || error(
         "asked for a $((Int(width), Int(height))) drawable, the layer gave $(size(w))")
     return w
 end
-
-# ── What a render pass asks a window ─────────────────────────────────────────
 
 """The texture this frame draws into. Only valid between `acquire_next_image!` and `present_frame!`."""
 function Mantle.target_view(w::MetalWindow)
@@ -142,8 +95,7 @@ function Mantle.target_view(w::MetalWindow)
     return d.texture
 end
 
-# The same object. Vulkan distinguishes the image (what a barrier names) from the
-# view (what a draw binds); a `MTLTexture` is both.
+# A `MTLTexture` is both the image and the view.
 Mantle.target_image(w::MetalWindow) = Mantle.target_view(w)
 
 Mantle.target_extent(w::MetalWindow) = (w.width, w.height)
@@ -154,8 +106,7 @@ Base.eltype(::MetalWindow{T}) where {T} = T
 
 Base.size(w::MetalWindow) = (w.width, w.height)
 
-# Closed by us, or by the user through the platform window's close button, as
-# the Vulkan window answers it.
+# Closed by `close` or by the platform window's close button.
 Base.isopen(w::MetalWindow) =
     w.open && (w.handle === nothing || !GLFW.WindowShouldClose(w.handle))
 
@@ -163,9 +114,8 @@ function Base.close(w::MetalWindow)
     w.open = false
     w.drawable = nothing
     w.acquirer = nothing
-    # The platform window too. Only marking this one closed left the OS window up,
-    # frozen on its last frame, after the render loop drawing into it had ended:
-    # four plots gave four windows that the close button could not get rid of.
+    # Destroy the platform window too, or it stays on screen frozen on its last
+    # frame and its close button does nothing.
     h = w.handle
     if h !== nothing
         w.handle = nothing
@@ -176,23 +126,12 @@ function Base.close(w::MetalWindow)
     return nothing
 end
 
-# ── The frame ────────────────────────────────────────────────────────────────
-
 """
     resize!(w, width, height)
 
-Give the layer a new size in PIXELS, and say whether it changed.
-
-A `CAMetalLayer`'s `drawableSize` does not follow its view: the layer's bounds
-are in POINTS and its drawables are in PIXELS, so a layer that is never told
-keeps handing out the size it was made with and the display scales it up.
-
-Only the surface moves here. Every attachment that FOLLOWS the surface moves
-when `refit!` asks it to, and the plan is recompiled because its placement was
-made for the previous size, which is why `run!` refits right after
-`beforeframe!` has polled, resized and acquired, and before anything is
-recorded: a half-recorded frame holding the old offsets is what that order
-rules out.
+Set the layer's `drawableSize` in pixels (it does not follow its view); return
+whether it changed. Attachments that follow the surface are refit by `run!`
+after `beforeframe!` and before recording.
 """
 function Base.resize!(w::MetalWindow, width::Integer, height::Integer)
     (width, height) == (w.width, w.height) && return false
@@ -202,33 +141,26 @@ function Base.resize!(w::MetalWindow, width::Integer, height::Integer)
 end
 
 """
-Pump the event queue and pick up a resize.
-
-Without a platform window there is neither: a layer-only surface is whatever
-size it was made, and `resize!` is how a caller changes it.
+Poll events and adopt the framebuffer size. A layer without a platform window
+keeps its size until `resize!`.
 """
 function Mantle.beginframe!(w::MetalWindow)
     w.open || error("this window is closed")
     h = w.handle
     if h !== nothing
         GLFW.PollEvents()
-        # A window the user closed is still fine to draw to — the loop
-        # condition decides to stop, not this. In PIXELS, which is what
-        # `GetFramebufferSize` gives and `GetWindowSize` does not.
+        # A user-closed window still draws; the loop condition stops it.
+        # `GetFramebufferSize` is in pixels, `GetWindowSize` is not.
         fw, fh = GLFW.GetFramebufferSize(h)
-        # A minimised window reports zero, and a zero-sized drawable is not a
-        # thing Metal will make. Keep the last good size until it comes back.
+        # Minimised windows report zero, which Metal cannot allocate.
         (fw > 0 && fh > 0) && resize!(w, fw, fh)
     end
     return nothing
 end
 
 """
-Take the next drawable.
-
-`nothing` back from the layer is a normal answer — every drawable is still in
-flight — but a frame has nothing to draw into then, so it is an error here
-rather than a silently skipped frame that looks like a stall.
+Take the next drawable. Throws if every drawable is still in flight rather than
+skipping the frame silently.
 """
 function Mantle.acquire_next_image!(w::MetalWindow)
     Mantle.checkacquirable(w.acquirer)
@@ -246,18 +178,13 @@ function nextdrawable(w::MetalWindow)
 end
 
 """
-Show the frame, ordered behind the work that drew it.
-
-On a command buffer rather than on the drawable: `[drawable present]` shows
-whatever is in the texture the moment it is called, which for a frame the GPU
-is still writing is a torn one.
+Present the frame through a command buffer committed behind the frame's passes
+on the same queue. `[drawable present]` would show the texture immediately,
+torn if the GPU is still writing it.
 """
 function Mantle.present_frame!(d::MetalDevice, w::MetalWindow)
     dr = w.drawable
     dr === nothing && return nothing
-    # On a command buffer of its own, committed behind the frame's passes — on
-    # one queue that is the ordering — and committed here, because a frame that
-    # has been presented is over.
     cb = framebuffer!(d.dev)
     MTLm.present_drawable!(cb, dr)
     commit!(cb)
@@ -269,25 +196,16 @@ end
 """
     readback_window(w) -> Matrix
 
-A drawable's pixels, read back between frames: a drawable of its own, copied and
-presented again. The layer recycles its drawables, so the one handed out holds an
-earlier frame, as an acquired swapchain image does on Vulkan.
-
-Presented rather than dropped, which is how it goes back: a drawable that is never
-presented returns to the layer when its object is freed, which from Julia is
-whenever the GC runs, and a layer has three, so readbacks in a loop could run
-the layer out of them.
-
-A layer made with `readable = false` (`framebufferOnly`) cannot be read at all,
-which is why this backend does not set that.
+Read back the next drawable between frames; it holds an earlier frame, as on
+Vulkan. The drawable is presented afterwards: an unpresented one returns to the
+layer only when the GC frees it, and the layer has three. Requires
+`framebufferOnly` unset, which this backend never sets.
 """
 function Mantle.readback_window(w::MetalWindow{T}) where {T}
     Mantle.checkreadable(w.acquirer)
     d = nextdrawable(w)
     tex = d.texture
-    # The TEXTURE's extent, not the one the window reports: a caller comparing
-    # the two is checking that they agree, which every pass striding a buffer
-    # by hand depends on.
+    # The texture's extent, not the window's, so callers can check they agree.
     width, height = Int(tex.width), Int(tex.height)
     dev = Mantle.Device(MetalAPI())
     row = width * sizeof(T)
@@ -304,12 +222,9 @@ function Mantle.readback_window(w::MetalWindow{T}) where {T}
     return out
 end
 
-# `screenshot` is the portable name for the same thing.
 Mantle.screenshot(w::MetalWindow) = Mantle.readback_window(w)
 
-# A frame that failed after its drawable was taken: dropping the reference is
-# all Metal needs — a `CAMetalDrawable` that is never presented is simply
-# released, and the next `nextDrawable` hands out another.
+# A failed frame drops its drawable; an unpresented drawable is released.
 function Mantle.abandonframe!(::MetalDevice, pl)
     for s in pl.graph.surfaces
         s.win.drawable = nothing

@@ -16,21 +16,17 @@ end
 """
     LowestFit()
 
-Place items largest first, each at the lowest offset no conflicting item already
-occupies.
-
-Measured at 1.3365x the lower bound across MiniMalloc's eleven benchmarks, against
-1.3549x for RPS's best fit, so the simpler rule is also the better one here. That
-result is why `2026-08-03-rps-design-lessons.md` change 9 is marked measured-wrong.
+Place items largest first, each at the lowest offset no conflicting item
+occupies. 1.34x the lower bound on MiniMalloc's benchmarks, better than
+[`BestFit`](@ref).
 """
 struct LowestFit end
 
 """
     BestFit()
 
-RPS's rule (`rps_memory_schedule.hpp:359-460`): among the gaps a candidate fits
-in, take the tightest. Kept so the comparison stays reproducible, not because it
-is recommended.
+RPS's rule: among the gaps a candidate fits in, take the tightest. Kept for
+comparison with [`LowestFit`](@ref), not recommended.
 """
 struct BestFit end
 
@@ -39,9 +35,9 @@ priority(i::Item) = (-i.size, -length(i.live), i.id)
 """
     place(problem, strategy = LowestFit()) -> Placement
 
-Assign every item an offset such that no two conflicting items overlap in bytes.
-Pinned items keep their offset and are placed first, which is also RPS's order
-(`rps_memory_schedule.hpp:227`).
+Give every item an offset so no two conflicting items overlap in bytes. Pinned
+items keep their offset and are placed first. Capacity is not checked; see
+[`checkcapacity`](@ref).
 """
 function place(p::Problem, strategy = LowestFit())
     order = vcat(sort(findall(pinned, p.items); by = i -> priority(p.items[i])),

@@ -1,9 +1,8 @@
 """
-Incremental TLAS with core-owned geometry registration and batch mutations.
-Implementations provide `blas_list`, `instances`, `root_aabb`,
-`dirty` and `transforms_dirty`; low-level, already-built HWTLAS types do not
-participate in this interface. Native construction, array upload and transform
-submission are backend methods.
+Incremental TLAS whose batch registration and mutation live in core
+(`raytracing/mutation.jl`). Subtypes have the fields `blas_list`, `instances`,
+`root_aabb`, `dirty` and `transforms_dirty`, and implement `buildgeometry!`,
+`instancearray` and `updatebatch!`.
 """
 abstract type BatchedTLAS{Tri} <: HWTLAS{Tri} end
 
@@ -22,18 +21,13 @@ Base.length(b::InstanceBatch) = b.n
 """
     InstanceBatches{B}()
 
-The batches of instances a top-level structure holds, and the handle each was
-registered under.
-
-`B` selects a batch representation. This container owns order and handles;
-`InstanceBatch` owns portable batch state and its native references.
+The batches of type `B` a top-level structure holds, in registration order, and
+the handle each was registered under.
 """
 mutable struct InstanceBatches{B}
     batches::Vector{B}
     index::Dict{Raycore.TLASHandle,Int}
-    # Monotone, and never reused: a handle whose batch was deleted must not come
-    # back naming a different one, or a caller holding it silently updates
-    # someone else's transforms.
+    # Monotone, never reused: a deleted batch's handle must not name another batch.
     next::UInt32
 end
 
@@ -43,10 +37,8 @@ InstanceBatches{B}() where {B} =
 """
     register!(batches, mk) -> handle
 
-Take the next handle, build the batch with it, and record where it landed.
-
-`mk(handle)` builds the batch, because a batch usually wants to carry its own
-handle and handing it one is cheaper than appending and then patching.
+Take the next handle, build the batch with `mk(handle)` so it can carry its
+handle, and record where it landed.
 """
 function register!(bs::InstanceBatches{B}, mk) where {B}
     h = Raycore.TLASHandle(bs.next)
@@ -59,8 +51,7 @@ end
 """
     batchof(batches, handle) -> batch or nothing
 
-The batch `handle` names. `nothing` when it names none, which a caller holding
-a stale handle should be able to ask without an exception.
+The batch `handle` names, or `nothing`, so a stale handle is not an exception.
 """
 function batchof(bs::InstanceBatches, h::Raycore.TLASHandle)
     i = get(bs.index, h, nothing)
@@ -70,11 +61,8 @@ end
 """
     delete!(batches, handle) -> Bool
 
-Drop the batch `handle` names, and move every index after it down by one.
-
-The reindex is the half that was written twice and is easy to get wrong: the
-map holds positions, not identities, so removing from the middle invalidates
-every entry behind it. Returns `false` for a handle that names nothing.
+Drop the batch `handle` names and shift every later position down by one, since
+`index` maps handles to positions. `false` for a handle that names nothing.
 """
 function Base.delete!(bs::InstanceBatches, h::Raycore.TLASHandle)
     i = get(bs.index, h, nothing)
@@ -99,9 +87,8 @@ ninstances(bs::InstanceBatches) = sum(length, bs.batches; init = 0)
 """
     recordsof(batches, handle) -> device array of `Raycore.InstanceRecord`
 
-The record array of the batch `handle` names: what `Raycore.instance_buffer`
-answers on every backend. An `ArgumentError` for a handle that names none,
-because a kernel about to write records into nothing is a caller's mistake.
+The record array of the batch `handle` names, which `Raycore.instance_buffer`
+answers. Throws `ArgumentError` for a handle that names none.
 """
 function recordsof(bs::InstanceBatches, h::Raycore.TLASHandle)
     b = batchof(bs, h)
@@ -112,10 +99,9 @@ end
 """
     sethidden!(batches, handle, hidden) -> Bool or nothing
 
-Mark the batch `handle` names hidden or shown. `nothing` when it names none,
-else whether that changed anything, which is when the structure needs a build.
-A hidden batch is built with mask 0, which no ray's mask matches
-(`Raycore.set_visible!`); its records keep their own masks for when it is shown.
+Mark the batch `handle` names hidden or shown. `nothing` when it names none, else
+whether anything changed (the structure then needs a build). A hidden batch is
+built with mask 0, which no ray matches; its records keep their own masks.
 """
 function sethidden!(bs::InstanceBatches, h::Raycore.TLASHandle, hidden::Bool)
     b = batchof(bs, h)
@@ -128,13 +114,11 @@ end
 """
     trianglemetadata(Tri, batches, [Val(false)])
 
-Concatenate each batch's shading triangles once, in registration order, and
-give each instance its batch's zero-based triangle offset. Triangle-free
-batches receive `NOTRIANGLES` in the hit table, including those followed by a
-nonempty batch. Hidden batches keep their positions.
-
-`Val(true)` also requests the raw batch/instance offsets used by HardwareAccel;
-these bookkeeping arrays are omitted when only the hit table is needed.
+Concatenate each batch's shading triangles in registration order and give each
+instance its batch's zero-based triangle offset (`hits`), or `NOTRIANGLES` for a
+triangle-free batch. Hidden batches keep their positions. `Val(true)` also
+returns the raw per-batch (`starts`) and per-instance (`raw`) offsets
+`HardwareAccel` uses.
 """
 function trianglemetadata(::Type{Tri}, batches::InstanceBatches,
                           ::Val{Bookkeeping} = Val(false)) where {Tri,Bookkeeping}

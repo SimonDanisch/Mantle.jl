@@ -1,29 +1,12 @@
-# Lava Profiling — kernel stats + per-dispatch GPU timing + driver pipeline introspection.
-#
-# Three orthogonal capabilities, all opt-in / off by default:
-#
-#   1. `kernel_stats(compiled)` — pure SPIR-V analysis (size, instruction count,
-#      Op histogram). Zero runtime cost; works without a render in flight.
-#   2. `with_dispatch_timing(f)` — wrap a render with Vulkan timestamp queries
-#      around every dispatch. Returns a per-kernel-name aggregated report.
-#      Adds two `vkCmdWriteTimestamp` calls per dispatch when enabled; the
-#      hot path is untouched when disabled.
-#   3. `pipeline_exec_stats(linked)` — driver-side stats via
-#      `VK_KHR_pipeline_executable_properties` (register count, scratch,
-#      vendor-specific ISA). Only available when the extension is enabled
-#      via `enable_pipeline_executable_properties!()` BEFORE device
-#      creation. Returns `nothing` otherwise.
-#
-# Designed to stay in the codebase. No `# TODO: remove` markers anywhere.
+# Kernel profiling, all opt-in:
+#   1. `kernel_stats` / `spirv_op_stats`: SPIR-V size and opcode histogram.
+#   2. `with_dispatch_timing(f)`: timestamp queries around every dispatch,
+#      aggregated per kernel name; two `vkCmdWriteTimestamp` per dispatch when on.
+#   3. `pipeline_exec_stats` / `pipeline_exec_ir`: driver statistics and IR via
+#      `VK_KHR_pipeline_executable_properties`, which must be requested with
+#      `enable_pipeline_executable_properties!()` before device creation.
 
-# `import ... as`, not `const VK = Vulkan`: inside Mantle the bare name `Vulkan`
-# is the backend MARKER, a singleton, so assigning it aliases VK to a DataType
-# and every `VK.CommandBuffer` becomes a field access on it.
 import Vulkan as VK
-
-# ============================================================================
-# 1. SPIR-V instruction-level analysis
-# ============================================================================
 
 """
     SPIRVOpStats
@@ -40,14 +23,9 @@ end
 """
     spirv_op_stats(bytes::AbstractVector{UInt8}) -> SPIRVOpStats
 
-Parse a SPIR-V binary and return total instruction count, the count of
-`OpFunction` definitions, and the per-opcode histogram. Does NOT execute
-spirv-dis — it parses the binary directly, ~µs per kernel.
-
-The SPIR-V binary format is a header of five 32-bit words followed by an
-instruction stream. Each instruction's first word is
-`(WordCount << 16) | Opcode`; the next `WordCount - 1` words are operands.
-See SPIR-V spec §2.3.
+Instruction count, `OpFunction` count and per-opcode histogram of a SPIR-V
+binary, parsed directly (5-word header, then instructions whose first word is
+`(WordCount << 16) | Opcode`; SPIR-V spec §2.3).
 """
 function spirv_op_stats(bytes::AbstractVector{UInt8})
     n_bytes = length(bytes)
@@ -77,23 +55,17 @@ end
 """
     KernelStats
 
-Per-kernel statistics: SPIR-V size + instruction profile, plus optional
-driver-reported register/scratch numbers when pipeline-executable-properties
-are available.
+Per-kernel SPIR-V statistics, plus driver-reported registers and scratch bytes
+when `VK_KHR_pipeline_executable_properties` is enabled.
 """
 struct KernelStats
-    name::String                     # SPIR-V entry point — always "main"; see `source`
+    name::String                     # SPIR-V entry point, always "main"; see `source`
     source::String                   # the Julia kernel this came from, or "" if unknown
     workgroup_size::NTuple{3,Int}
     spirv::SPIRVOpStats
     registers::Union{Int,Nothing}    # filled from VK_KHR_pipeline_executable_properties when available
     scratch_bytes::Union{Int,Nothing}
 end
-
-# `kernel_source_name` is in Lava, at the end of `compiler/compilation.jl`. It
-# parses a mangled entry symbol out of a compiled kernel's `source_name` or its
-# IR — string work on something the compiler produced, with no device in it, and
-# `Lava/test/test_compile_overhead.jl` needs it without one.
 
 function Base.show(io::IO, ::MIME"text/plain", s::KernelStats)
     print(io, "KernelStats(")
@@ -108,8 +80,7 @@ end
 """
     kernel_stats(ctx, linked::LavaLinkedKernel) -> KernelStats
 
-Stats for a single compiled+linked kernel. Use this from a debugger or
-test when you already have a `LavaLinkedKernel` in hand.
+Stats for one compiled and linked kernel on `ctx`.
 """
 function kernel_stats(ctx::VkContext, linked::LavaLinkedKernel)
     c = linked.compiled
@@ -121,60 +92,42 @@ function kernel_stats(ctx::VkContext, linked::LavaLinkedKernel)
 end
 
 """
-    list_compiled_kernels() -> Vector{KernelStats}
+    list_compiled_kernels(ctx = vk_context()) -> Vector{KernelStats}
 
-Stats for every kernel this device has a pipeline for. Useful right after a
-render — you see every kernel involved.
+Stats for every kernel `ctx` has a pipeline for.
 
 ```julia
 render!(vp, scene, film, camera)
 sort(list_compiled_kernels(); by=k -> -k.spirv.bytes)  # biggest first
 ```
-
-Takes a context, because there is no global registry of them to walk.
 """
 function list_compiled_kernels(ctx::VkContext = vk_context())
     return KernelStats[kernel_stats(ctx, linked) for linked in values(ctx.caches.linked)]
 end
 
-# ============================================================================
-# 2. Per-dispatch GPU timing via Vulkan timestamp queries
-# ============================================================================
-#
-# Strategy: when `with_dispatch_timing(f)` is active, every `emit_dispatch!` writes
-# a TOP_OF_PIPE timestamp before the dispatch and a BOTTOM_OF_PIPE timestamp
-# after.  Pairs of timestamps are read back after `f` returns (after the
-# implicit `KA.synchronize`), converted to ns via the device's
-# `timestampPeriod`, and aggregated by dispatch name.
-#
-# The query pool is allocated lazily on first use, sized to MAX_DISPATCH_LOG*2.
-# If a render exceeds that budget we ring back to slot 0 and the late records
-# overwrite the early ones — caller is warned.
+# Per-dispatch GPU timing: with timing on, each dispatch is bracketed by two
+# timestamps in the device's query pool (created on first use,
+# `TIMESTAMP_POOL_SIZE[]` slots); `dispatch_timing_report` converts them with
+# `timestampPeriod` and aggregates by name. Dispatches past the pool's capacity
+# are not timed.
 
-"""Per-dispatch timing record. One entry per `emit_dispatch!` call while timing is on."""
+"""Per-dispatch timing record, one per timed dispatch."""
 struct DispatchTiming
-    kernel_name::String        # from `driver(bq).last_dispatch_info` at dispatch time
+    kernel_name::String        # the dispatch's log name
     slot::Int                  # query pool slot of the START timestamp
     gpu_ns::Float64            # filled in on read-back; 0.0 during recording
 end
 
 
-# Two query slots per dispatch (start + end).  Default size is conservative;
-# auto-grows on first activation if `MAX_DISPATCH_LOG` was bumped.
+# Two slots per dispatch. A device's pool is sized from it once, so change it
+# only before that pool exists.
 const TIMESTAMP_POOL_SIZE = Ref(MAX_DISPATCH_LOG * 2)
-# `timestamp_pool`, `timestamp_next_slot` and `timestamp_period_ns` are
-# `VkContext` fields — a query pool is a device-owned handle, and holding one
-# in a module `Ref` is the defect that corrupted the memory pool next door.
 
 """
-    enable_dispatch_timing!(enable::Bool=true)
+    enable_dispatch_timing!(enable::Bool=true, ctx = vk_context())
 
-Toggle the recording of Vulkan timestamp queries around every dispatch. When
-on, each `emit_dispatch!` writes two timestamps; when off, the dispatch hot
-path is unchanged. Equivalent to (and used by) `with_dispatch_timing(f)`.
-
-If timing is being turned ON for the first time in this session, the
-timestamp query pool is created lazily inside `emit_dispatch!`.
+Turn timestamp queries around every dispatch on or off; off leaves the dispatch
+path unchanged. The query pool is created on the first timed dispatch.
 """
 function enable_dispatch_timing!(enable::Bool=true, ctx::VkContext = vk_context())
     ctx.diag.dispatch_timing = enable
@@ -182,10 +135,9 @@ function enable_dispatch_timing!(enable::Bool=true, ctx::VkContext = vk_context(
 end
 
 """
-    reset_dispatch_timing!()
+    reset_dispatch_timing!(ctx = vk_context())
 
-Clear recorded timings and reset the slot counter. Called automatically by
-`with_dispatch_timing(f)`.
+Clear recorded timings and reset the slot counter; `with_dispatch_timing` calls it.
 """
 function reset_dispatch_timing!(ctx::VkContext = vk_context())
     empty!(ctx.caches.recorded_dispatches)
@@ -214,15 +166,11 @@ function Base.show(io::IO, r::KernelTimingReport)
 end
 
 """
-    dispatch_timing_report(; flush_first=true) -> Vector{KernelTimingReport}
+    dispatch_timing_report(ctx = vk_context(); flush_first=true) -> Vector{KernelTimingReport}
 
-Read back the recorded timestamps from the query pool, convert to ns, and
-aggregate by kernel name. Returns a vector sorted by total time descending.
-
-If `flush_first=true` (default), forces a `flush!` first so all submitted
-dispatches' timestamps are written to the pool before read-back. Pass
-`false` only if you've already synchronized and want to inspect a partial
-record.
+Read the recorded timestamps back, convert to ns and aggregate by kernel name,
+sorted by total time, largest first. `flush_first` waits for submitted work
+first; pass `false` only after synchronizing yourself.
 """
 function dispatch_timing_report(ctx::VkContext = vk_context(); flush_first::Bool=true)
     pool = ctx.caches.timestamp_pool
@@ -241,7 +189,6 @@ function dispatch_timing_report(ctx::VkContext = vk_context(); flush_first::Bool
                                   UInt64(sizeof(UInt64)); flags=flags)
     end
     period = ctx.caches.timestamp_period_ns
-    # Apply the actual ns values back into the records.
     sized = DispatchTiming[]
     for d in ctx.caches.recorded_dispatches::Vector{Any}
         s_start = d.slot
@@ -250,7 +197,6 @@ function dispatch_timing_report(ctx::VkContext = vk_context(); flush_first::Bool
         ticks = raw[s_end + 1] - raw[s_start + 1]   # 1-based julia index
         push!(sized, DispatchTiming(d.kernel_name, d.slot, Float64(ticks) * period))
     end
-    # Aggregate by name.
     grouped = Dict{String,Vector{Float64}}()
     for d in sized
         push!(get!(grouped, d.kernel_name, Float64[]), d.gpu_ns)
@@ -269,10 +215,10 @@ function dispatch_timing_report(ctx::VkContext = vk_context(); flush_first::Bool
 end
 
 """
-    with_dispatch_timing(f) -> Vector{KernelTimingReport}
+    with_dispatch_timing(f, ctx = vk_context()) -> Vector{KernelTimingReport}
 
-Run `f()` with per-dispatch GPU timing enabled. Returns the aggregated
-per-kernel report after `f` completes (waiting for all submitted work).
+Run `f()` with per-dispatch timing on and return the per-kernel report, after
+waiting for submitted work. Restores the previous settings.
 
 ```julia
 report = with_dispatch_timing() do
@@ -286,9 +232,7 @@ end
 function with_dispatch_timing(f, ctx::VkContext = vk_context())
     d = ctx.diag
     prev_timing = d.dispatch_timing
-    # `ka_launch!` only writes `driver(bq).last_dispatch_info` when dispatch logging is on
-    # (it's behind a flag for the production hot path).  We need that name to
-    # tag timing records, so flip dispatch logging on for the duration too.
+    # `ka_launch!` names a dispatch only with logging on, and records need the name.
     prev_logging = d.dispatch_logging
     reset_dispatch_timing!(ctx)
     d.dispatch_timing = true
@@ -302,15 +246,11 @@ function with_dispatch_timing(f, ctx::VkContext = vk_context())
     end
 end
 
-# Internal: ensure the timestamp pool exists. Called from `emit_dispatch!`.
-#
-# Takes the context rather than asking `vk_context()` for it. A query pool is a
-# device-owned handle, and this runs per dispatch: reaching for the global here
-# would put the wrong device's pool on the recording command buffer as surely as
-# the caches did before they became fields.
+# `ctx`'s timestamp query pool, created on first use. Takes the context, never
+# `vk_context()`: another device's pool on this command buffer is invalid.
 function ensure_timestamp_pool!(ctx::VkContext)
     ctx.caches.timestamp_pool === nothing || return ctx.caches.timestamp_pool
-    # Capture the device's timestamp period (ns per tick) once.
+    # ns per tick
     props = VK.get_physical_device_properties(ctx.physical_device)
     ctx.caches.timestamp_period_ns = Float64(props.limits.timestamp_period)
     info = VK.QueryPoolCreateInfo(VK.QUERY_TYPE_TIMESTAMP, UInt32(TIMESTAMP_POOL_SIZE[]))
@@ -319,8 +259,7 @@ function ensure_timestamp_pool!(ctx::VkContext)
     return pool
 end
 
-# Internal: reset the pool between captures (must happen on a command buffer).
-# Called from `emit_dispatch!` when slot index hits 0.
+# Reset the whole pool on `cb`; done before the first timed dispatch (slot 0).
 function reset_timestamp_pool_on_cb!(ctx::VkContext, cb::VK.CommandBuffer)
     pool = ctx.caches.timestamp_pool
     pool === nothing && return
@@ -328,8 +267,8 @@ function reset_timestamp_pool_on_cb!(ctx::VkContext, cb::VK.CommandBuffer)
     return nothing
 end
 
-# Internal: write the START timestamp before a dispatch.  Returns the start
-# slot, or -1 if timing is off or the pool is full.
+# Write the START timestamp before a dispatch. Returns the start slot, or -1
+# if timing is off or the pool is full.
 function maybe_write_dispatch_start_timestamp!(ctx::VkContext, cb::VK.CommandBuffer,
                                                kernel_name::AbstractString;
                                                stage = VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT)
@@ -342,50 +281,20 @@ function maybe_write_dispatch_start_timestamp!(ctx::VkContext, cb::VK.CommandBuf
     if slot + 2 > TIMESTAMP_POOL_SIZE[]
         return -1  # pool full; the END writer also checks this
     end
-    # COMPUTE_SHADER_BIT for both endpoints.  Spec says the timestamp fires
-    # when all prior commands have completed at this stage; for a pure-
-    # compute queue that's the natural boundary.
-    #
-    # Note: indirect dispatches in our Hikari volpath path-tracing kernels
-    # (vp_trace_and_shade, vp_shade_surface_hits, vp_handle_escaped_rays)
-    # report 2–12 µs / dispatch which looks too low for 1.4 Mpx of work.
-    # Initially suspected NVIDIA driver bug, but: 1.4 Mpx / 6000-warp
-    # occupancy × 32 threads/warp = ~7 rays/thread × ~50 ns/ray (RT-core
-    # accelerated BVH + simple BSDF + light + atomic queue push) =
-    # ~350 ns wave-time = ~12 µs wall-time for the dispatch.  That matches.
-    # The timing is right; the RT-core path is just THAT cheap.
-    #
-    # An earlier version of this note concluded from that "all the GPU time in
-    # surface-only scenes lives in vp_generate_camera_rays (Sobol-bound)".  That
-    # was an artefact of a blind spot: only `cmd_dispatch` and
-    # `cmd_dispatch_indirect` were timestamped, so `cmd_trace_rays_khr` — the
-    # entire hw_accel=true ray-tracing workload — was missing from the report,
-    # which accounted for ~155 ms of a ~3.3 s frame.  With the RT paths
-    # instrumented (see raytracing/pipeline.jl), killeroo_gold on hw_accel=true
-    # measures 97.5 % of GPU time in rt_indirect (~19 ms/dispatch) and 1.7 % in
-    # vp_generate_camera_rays.  Read totals against the frame's wall time before
-    # trusting a breakdown; if they do not roughly add up, something is not
-    # being timestamped.
+    # Check totals against the frame's wall time: a missing share means some
+    # command type is not timestamped.
     VK.cmd_write_timestamp(cb, stage, pool, UInt32(slot))
     ctx.caches.timestamp_next_slot = slot + 2
     push!(ctx.caches.recorded_dispatches, DispatchTiming(String(kernel_name), slot, 0.0))
     return slot
 end
 
-# Internal: write the END timestamp after a dispatch.
-#
-# Inserts an execution barrier (compute → BOTTOM_OF_PIPE, no memory barrier)
-# before the timestamp so it really fires after this dispatch's workgroups
-# complete.  Without the barrier, NVIDIA's driver was firing the
-# BOTTOM_OF_PIPE timestamp when the cmd_dispatch_indirect *command* was
-# processed — not when its workgroups completed — which made every indirect
-# dispatch appear to take 2–12 µs no matter how much work it did.  Direct
-# dispatches were unaffected; the symptom only showed on indirect because
-# indirect-dispatch parameters are read at dispatch time and workgroup
-# launches are visibly deferred.
-# `barrier_fptr` is passed in rather than read from a global: `vkCmdPipelineBarrier`
-# is resolved per device, and a global one records the wrong driver's barrier
-# into the other device's command buffer. See `VkContext.cmd_pipeline_barrier_fptr`.
+# Write the END timestamp after a dispatch, behind an execution-only barrier
+# (`stage_mask` to `stage_mask`) so it fires after the dispatch's workgroups
+# retire. Without it consecutive dispatches overlap and summed intervals exceed
+# wall time, and on NVIDIA an indirect dispatch reads 2-12 µs whatever its work.
+# This serialises dispatches while timing is on, so timed runs are slower.
+# `barrier_fptr` is the device's own (`VkContext.cmd_pipeline_barrier_fptr`).
 function maybe_write_dispatch_end_timestamp!(ctx::VkContext, cb::VK.CommandBuffer,
                                              start_slot::Int,
                                              barrier_fptr::Ptr{Nothing} = C_NULL;
@@ -394,19 +303,6 @@ function maybe_write_dispatch_end_timestamp!(ctx::VkContext, cb::VK.CommandBuffe
     start_slot < 0 && return
     pool = ctx.caches.timestamp_pool
     pool === nothing && return
-    # The barrier this comment has always described was missing from the code.
-    # Without it, consecutive dispatches overlap and each measured interval spans
-    # this dispatch *plus* whatever is still in flight ahead of it, so summing the
-    # records double-counts: the totals came out larger than the wall-clock time of
-    # the very block being measured (73.7 ms of "GPU time" for a 45 ms block), and
-    # varied 26 -> 74 ms between runs as barrier patterns shifted.
-    #
-    # An execution-only barrier (no memory barrier) makes the end timestamp fire
-    # after this dispatch's workgroups retire. That serialises dispatches while
-    # timing is on, which is the point: per-kernel attribution needs them
-    # serialised, and the overlap you give up is not attributable to any one
-    # kernel anyway. Timing runs are therefore slower than production runs — use
-    # them for the breakdown, not for the step rate.
     if barrier_fptr != C_NULL
         ccall(barrier_fptr, Cvoid,
               (Ptr{Nothing}, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags,
@@ -421,34 +317,17 @@ function maybe_write_dispatch_end_timestamp!(ctx::VkContext, cb::VK.CommandBuffe
     return nothing
 end
 
-# The pool, the slot counter and the enable flag are all `VkContext` fields now,
-# so a reset makes fresh ones and there is nothing to clear. Only the record list
-# is genuinely module-level — it is a host-side diagnostic buffer, not device
-# state — and dropping it is the whole callback.
-
-# ============================================================================
-# 3. VK_KHR_pipeline_executable_properties — driver-side stats
-# ============================================================================
-#
-# The extension reports per-pipeline statistics like "Number of registers"
-# and "Scratch bytes" and (driver permitting) the actual ISA.  It must be
-# enabled at device creation; once a device is up the only thing we can do
-# is query.  We expose `enable_pipeline_executable_properties!()` to set the
-# flag for the NEXT device creation, plus `pipeline_exec_stats(linked)` to
-# read on-demand.
+# VK_KHR_pipeline_executable_properties: per-pipeline driver statistics and IR.
+# The extension can only be enabled at device creation.
 
 const PIPELINE_EXEC_PROPERTIES_REQUESTED = Ref(false)
 
 """
     enable_pipeline_executable_properties!(enable::Bool=true)
 
-Request that the next `VkContext` enable `VK_KHR_pipeline_executable_properties`.
-Has no effect on a device that's already up — must be called before the
-session creates its Vulkan device (typically before `using RayMakie`).
-
-When enabled, `pipeline_exec_stats(linked)` returns driver-reported
-statistics (register count, scratch space, etc.); otherwise that function
-returns `nothing`.
+Request `VK_KHR_pipeline_executable_properties` for the next `VkContext`
+created; no effect on existing devices. Without it `pipeline_exec_stats` and
+`pipeline_exec_ir` return `nothing`.
 """
 function enable_pipeline_executable_properties!(enable::Bool=true)
     PIPELINE_EXEC_PROPERTIES_REQUESTED[] = enable
@@ -458,48 +337,25 @@ end
 """
     pipeline_exec_stats(ctx, linked::LavaLinkedKernel) -> NamedTuple or Nothing
 
-Query `VK_KHR_pipeline_executable_properties` for a linked compute pipeline.
-Returns a NamedTuple `(registers, scratch_bytes, raw_stats)` where:
-
-- `registers::Union{Int,Nothing}` — driver's "registers per thread" or
-  similar; nothing if no matching statistic was returned.
-- `scratch_bytes::Union{Int,Nothing}` — driver's scratch/spill bytes if
-  reported.
-- `raw_stats::Vector{NamedTuple}` — every statistic the driver returned,
-  with `name`, `description`, `value_kind`, `value` fields.
-
-Returns `nothing` if the extension wasn't enabled at device creation, or
-if the driver doesn't expose anything for this pipeline.
+Driver statistics for a compute pipeline, as `(registers, scratch_bytes,
+raw_stats)`: `registers` and `scratch_bytes` are `Int` or `nothing` when no
+matching statistic exists; `raw_stats` holds every statistic as
+`(name, description, value)`. `nothing` without the extension or when the
+driver reports no executable.
 """
 pipeline_exec_stats(ctx::VkContext, linked::LavaLinkedKernel) = pipeline_exec_stats(ctx, linked.pipeline)
 
-# Takes the pipeline, not the linked kernel: the KA launch path keeps
-# `LaunchPlan.pipeline` and drops the `LavaLinkedKernel`, so the linked-kernel
-# method was unreachable from the only place that launches anything.
+# The KA launch path keeps only `LaunchPlan.pipeline`, hence this method.
 function pipeline_exec_stats(ctx::VkContext, pipeline::LavaComputePipeline)
     ctx.pipeline_exec_props_available || return nothing
     pipe = pipeline.pipeline
-    # Discover the pipeline's executables.
-    # NO try/catch around either query, and that is the point.
-    #
-    # Both were wrapped in `catch ex; @debug; return nothing`, and it cost this
-    # project a day. `get_pipeline_executable_statistics_khr` was throwing an
-    # outright `ConstructionBase` error — VK.jl could not even build the
-    # result struct, for every driver — and the swallow turned that into
-    # `registers = nothing`, which reads as "this driver declines to report
-    # statistics", which reads as an AMD driver limitation. RADV in fact
-    # returns twenty statistics per pipeline, more than NVIDIA does.
-    #
-    # A profiler that hides its own failure is worse than one that has none: the
-    # absent numbers look like a fact about the hardware. The
-    # `pipeline_exec_props_available` check above already covers "this device was
-    # not created with the extension", whether because nobody asked for it or
-    # because the device lacks it, so anything reaching here and failing is a bug
-    # that must be seen.
+    # No try/catch: a device without the extension returned above, so a failure
+    # here is a bug. Swallowing one made a VK.jl construction error read as
+    # "this driver reports no statistics".
     exec_info = VK.PipelineInfoKHR(pipe)
     execs = VK.unwrap(VK.get_pipeline_executable_properties_khr(ctx.device, exec_info))
     isempty(execs) && return nothing
-    # For compute pipelines there is exactly one executable; query its stats.
+    # A compute pipeline has exactly one executable.
     stats_info = VK.PipelineExecutableInfoKHR(pipe, UInt32(0))
     stats = VK.unwrap(VK.get_pipeline_executable_statistics_khr(ctx.device, stats_info))
     raw = NamedTuple[]
@@ -507,28 +363,13 @@ function pipeline_exec_stats(ctx::VkContext, pipeline::LavaComputePipeline)
     scratch = nothing
     for s in stats
         name = String(s.name)
-        # VK.jl wraps the C union VkPipelineExecutableStatisticValueKHR as
-        # a `vks` field with one `data::NTuple{8,UInt8}` member — accessing
-        # that member calls back into a wrapper whose lifetime is transient,
-        # so we copy the 8 bytes up-front into a local before doing any
-        # interpretation.  NVIDIA driver 595.80 lays the actual value in bytes
-        # 4–7 of the union for our UINT64 stats (verified empirically:
-        # Register Count and Binary Size are sensible there; lower 4 bytes are
-        # garbage or a header tag).  Pick the bytes that decode to a
-        # non-ASCII-looking number under 2^28.
-        # VulkanCore.LibVulkan exposes the C union via overloaded getproperty
-        # on `:b32`/`:i64`/`:u64`/`:f64`.  On NVIDIA driver 595.80 the actual
-        # data lives in the upper 32 bits of the u64 union value with
-        # `0xFFFFFFFF` sentinel in the lower half — likely a VK.jl
-        # padding mismatch around the format field, but the pattern is
-        # consistent (72 registers, 32 KB binary, 6.4 KB shared all decode
-        # correctly when shifted).  Take the high half for INT64/UINT64.
+        # NVIDIA 595.80 returns 64-bit values in the upper 32 bits with
+        # 0xFFFFFFFF in the lower half, likely a VK.jl union layout mismatch.
+        # Take the high half unless it is 0 and the low half is not 0xFFFFFFFF.
         v = if s.format == VK.PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR
             s.value.vks.b32 != 0
         elseif s.format == VK.PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR
             i64 = s.value.vks.i64
-            # Take whichever half is non-sentinel.  If high is 0xFFFFFFFF the
-            # value is in low half (e.g. genuine 0); otherwise high.
             hi = Int(UInt64(reinterpret(UInt64, i64)) >> 32)
             lo = Int(reinterpret(UInt64, i64) & 0xFFFFFFFF)
             lo == 0xFFFFFFFF ? hi : (hi == 0 ? lo : hi)
@@ -544,16 +385,9 @@ function pipeline_exec_stats(ctx::VkContext, pipeline::LavaComputePipeline)
         end
         push!(raw, (; name, description=String(s.description), value=v))
         lname = lowercase(name)
-        # The statistic names are driver-defined and NOT portable. Matching only
-        # `"register"` found NVIDIA's "Register Count" and nothing on RADV, which
-        # names the same quantity `VGPRs` — so `registers` came back `nothing` for
-        # every kernel and the occupancy denominator looked unavailable on AMD
-        # when the driver was in fact reporting it.
-        #
-        # This is a NAME table, not a vendor branch: every spelling is tried on
-        # every driver, and a driver that uses two of them gets the first. VGPRs
-        # are the ones that bound occupancy on AMD (SGPRs are scalar and rarely
-        # the limit), so they are preferred where both appear.
+        # Statistic names are driver-defined: NVIDIA "Register Count", RADV
+        # "VGPRs". Every spelling is tried on every driver; VGPRs win where both
+        # appear, since they bound occupancy on AMD.
         if occursin("vgpr", lname) && !occursin("spill", lname) && !occursin("pre-sched", lname) && v isa Int
             registers = v                                  # authoritative, overwrite
         elseif registers === nothing && occursin("register", lname) && v isa Int
@@ -569,21 +403,15 @@ end
 """
     pipeline_exec_ir(ctx, pipeline::LavaComputePipeline) -> Vector{NamedTuple} or Nothing
 
-The driver's internal representations of a compute pipeline, as
-`(name, description, text)`: on RADV the NIR, the ACO IR and the final GPU
-assembly. The assembly is what to set against another compiler's output for the
-same kernel (`AMDGPU.code_gcn` on ROCm).
-
-Needs `enable_pipeline_executable_properties!()` before the device is created,
-like `pipeline_exec_stats`; `nothing` otherwise. Only text representations are
-returned, and a pipeline created before that flag carries none.
+The driver's text representations of a compute pipeline as
+`(name, description, text)`, on RADV the NIR, ACO IR and GPU assembly.
+`nothing` unless `enable_pipeline_executable_properties!()` preceded device
+creation.
 """
 pipeline_exec_ir(ctx::VkContext, linked::LavaLinkedKernel) = pipeline_exec_ir(ctx, linked.pipeline)
 
-# Raw, because Vulkan.jl's wrapper does only half of the two-call idiom: it asks
-# for the count and returns the structs with `pData = NULL`, so every
-# representation comes back with its size and none of its text. The second call,
-# with a buffer per representation, is the one that fills them.
+# Raw `ccall`: Vulkan.jl's wrapper stops after the count call, returning sizes
+# with `pData = NULL`; the second call with a buffer per entry fills the text.
 function pipeline_exec_ir(ctx::VkContext, pipeline::LavaComputePipeline)
     ctx.pipeline_exec_props_available || return nothing
     C = VK.VkCore
