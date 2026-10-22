@@ -1186,47 +1186,19 @@ function closerun!(dev::LavaDevice, pl::Plan, e::Union{Nothing,Emitter})
     return submitplan!(bq, pl, e, Recording)
 end
 
-"""
-No recording: submit the one-shot the walk filled. This is a headless plan
-holding a rebindable cell, which cannot be recorded (see `recordable`).
-"""
-function submitrecording!(bq, ::Nothing, e::Emitter)
-    front = e.owner::OneShot
-    seal!(front)
-    tok = submit!(bq, front)
-    handover!(bq, tok, front; tag = :run)
-    return tok
-end
-
-function submitrecording!(bq, rec::Recording, e)
-    if e === nothing
-        # The recording alone; the plan owns it, so nothing is handed over.
-        tok = submit!(bq, rec)
-        rec.token = tok
-        handover!(bq, tok, nothing; tag = :run)
-        return tok
-    end
-    front = e.owner::OneShot
-    seal!(front)
-    # The submission holds the recording; the recording holds what its
-    # commands name.
-    hold!(bq, rec)
-    tok = submit!(bq, front, rec)
-    rec.token = tok
-    handover!(bq, tok, front; tag = :run)
-    return tok
-end
+# No recording: a headless plan holding a rebindable cell (see `recordable`)
+# submits only the one-shot the walk filled.
+submitrecording!(bq, ::Nothing, e::Emitter) = submitrecording!(bq, (), e)
+submitrecording!(bq, rec::Recording, e) = submitrecording!(bq, (rec,), e)
 
 """
-Submit several pieces of one recording at once, as core groups them
-(`submissionbatches`). `recs` is kept from `record!`, so a run allocates nothing.
+Submit the run's front one-shot, if any, then the recording pieces as core groups
+them (`submissionbatches`). With a front the submission holds the pieces; without
+one the plan owns them. `recs` is kept from `record!`, so a run allocates nothing.
 """
-function submitrecording!(bq, recs::Vector{Recording}, e)
+function submitrecording!(bq, recs::Union{Tuple,Vector{Recording}}, e)
     front = e === nothing ? nothing : e.owner::OneShot
-    # With a front one-shot the submission holds the pieces; without one the
-    # plan owns them and nothing is handed over.
     if front !== nothing
-        seal!(front)
         for r in recs
             hold!(bq, r)
         end
