@@ -1,27 +1,6 @@
-# High-level kernel launch API for Lava.jl
-#
-# Handles: compile → pipeline cache → arg packing → dispatch → sync.
-
-# ── GPU kernel cache ──
-#
-# Two levels, as CUDA.jl has them. The SPIR-V is the compiler's: Lava keeps it
-# with the kernel's `CodeInstance` (`compile_or_lookup`), so an edit to the
-# kernel or anything it inlines compiles it again, an unrelated method
-# definition does not, and a package's precompile workload leaves it compiled
-# in the package image. The `VkPipeline` built from it is this device's, in
-# `ctx.caches.linked`, keyed on the compiled kernel by identity: a kernel
-# compiled again is a new object and gets its own pipeline.
-
-# No reset callback: arg slabs are per-BQ and die with their ctx, and the kernel
-# cache is a field on it, so a reset produces a fresh one.
-
-# ── Type signature helper ──
-#
-# When a kernel arg is itself a Type (e.g. WaterLily's `measure_sdf!` kernels
-# capture `T::Type{Float32}` as a value), `typeof(a) === DataType`, and
-# `Tuple{..., DataType, ...}` fails `Base.isdispatchtuple` — so GPUCompiler's
-# `methodinstance` assert trips. Julia's actual specialization binds that arg
-# to `Type{Float32}`, which IS a dispatchtuple leaf. Matching that here.
+# Native compute preparation, argument packing and submission-owned scratch.
+# SPIR-V belongs to CodeInstance; linked pipelines belong to the device cache.
+# Type-valued arguments specialize as Type{T}, not DataType.
 @inline arg_sigtype(@nospecialize(a)) = a isa Type ? Type{a} : typeof(a)
 
 # ── Launch argument validation ──
@@ -35,10 +14,7 @@ Runs by default; disable with `ctx.diag.launch_arg_validation = false`.
 
 @generated function validate_launch_args(ctx::VkContext, args::T) where T <: Tuple
     exprs = Expr[]
-    # The toggle is read at RUNTIME inside the generated body, so it can come off
-    # the context the caller already has — it does not need to be a global to be
-    # cheap. `@generated` constrains what is known at *compile* time, and this is
-    # not one of those things.
+    # Keep the diagnostics toggle runtime-configurable in generated code.
     push!(exprs, :((ctx.diag.launch_arg_validation || return)))
     for i in 1:fieldcount(T)
         Ti = fieldtype(T, i)
@@ -53,11 +29,7 @@ Runs by default; disable with `ctx.diag.launch_arg_validation = false`.
                             "Argument $($i): LavaArray has been freed (DataRef released)",
                             "Don't pass freed arrays to GPU kernels. Check array lifetime."))
                     end
-                    # Single source of truth: the atomic state machine.  A
-                    # buffer is dead iff its state is BUF_STATE_DEAD.  The
-                    # BDA_POISON marker is kept as a GPU-side use-after-free
-                    # trap (shader reads see 0xDEADDEAD...) but is not the
-                    # CPU-side gate any more.
+                    # Lifecycle state gates host access; poison is a GPU diagnostic only.
                     if (@atomic :acquire buf.state) == BUF_STATE_DEAD
                         throw(LavaError("kernel launch",
                             "Argument $($i): LavaArray backing buffer is dead (state=BUF_STATE_DEAD)",
@@ -88,16 +60,9 @@ end
 """
     emitkernel!(emitter, f, args...; ndrange, workgroup_size, tlas = nothing)
 
-The same launch, written where the emitter is writing.
+Prepare and emit into an existing owner. Plans supply derived dependencies;
+unmodelled one-shots use their head barrier. Both share preparekernel.
 
-`lava_launch!` is the unmodelled path: nothing has declared what the kernel
-touches, so it goes into a one-shot of its own, which opens with the global
-barrier and is submitted on the way out. This one writes into whatever the
-emitter holds — a plan's recording, whose barriers were derived from declared
-usage and already emitted, or a one-shot a caller is composing.
-
-Everything up to the dispatch is shared: [`preparekernel`](@ref) compiles,
-holds, adapts and packs identically for both.
 """
 function emitkernel!(e::Emitter, @nospecialize(f), args...;
                      ndrange::Union{Integer, NTuple{3,<:Integer}},
@@ -117,10 +82,9 @@ Compile `f` for `args`, pin and pack them where `owner` holds memory, and answer
 what a dispatch needs: the pipeline, the argument address, the workgroup counts
 and a name for the log.
 
-The whole of a launch except the launch. `lava_launch!` and [`emitkernel!`](@ref)
-differ in one line each — which command they then write — so this is where the
-kernel cache lookup, the `Adapt` walk, the HWTLAS check and the argument packing
-live once.
+Compile/link, retain original function/argument leaves, adapt and pack into
+owner-held memory, then return pipeline, argument address, group counts and name.
+
 """
 function preparekernel(owner::O, @nospecialize(f), args::Tuple,
                        ndrange::Union{Integer, NTuple{3,<:Integer}},
@@ -180,20 +144,9 @@ function preparekernel(owner::O, @nospecialize(f), args::Tuple,
     return pipeline, arg_buf.address, groups, name
 end
 
-# ── Zero-allocation argument packing ──
-#
-# Kernel args are laid out in a host-mapped arg buffer (one sub-allocation per
-# dispatch).  The push constant is the BDA of that sub-allocation; the entry
-# wrapper generated by the SPIR-V compiler loads each arg from
-# `arg_buf[layout[i]]` at kernel entry.
-#
-# For reference/BDA-pointer args (VkManagedBuffer, LavaDeviceArray, Ptr{T}):
-# the slot holds a 64-bit BDA address.  For isbits struct args: the bytes are
-# inlined right after the fixed layout and the slot holds a self-referencing
-# BDA that points back at the inlined bytes.
-#
-# Callers hold original leaves before pure adaptation. Descriptors carry addresses,
-# not ownership; the explicit VkManagedBuffer packer below also holds its allocation.
+# Arguments use a fixed slot layout followed by inlined by-value aggregates.
+# Aggregate slots contain self-referencing BDAs; allocation handles contain BDAs.
+# Original leaves are held before pure adaptation; descriptors own no storage.
 
 """
     compute_inline_extra_from_byval(byval_sizes::Vector{Int})
@@ -214,7 +167,6 @@ end
 
 # Per-type arg packer.  Dispatched (no big if/elseif ladder):
 #   * default: isbits struct → inline + self-ref BDA; primitive → direct store
-#   * UInt64: direct 64-bit store
 #   * Ptr: direct 64-bit store (the pointer value *is* the BDA)
 #   * VkManagedBuffer: pin for batch lifetime + write its BDA
 
@@ -232,12 +184,7 @@ end
         recpatchfields!(batch, T, mapped_ptr + inline_offset)
         return inline_offset + byval_size
     else
-        # The only thing this branch can honour is "the value's own bytes, at
-        # the slot", which is what core calls `InlineBytes`. A device
-        # allocation reaching here would store the HOST address of a boxed
-        # handle into a slot the kernel dereferences; `VkManagedBuffer` has its
-        # own method below and a new handle type needs one too. Constant-folded
-        # away for every type that is not one.
+        # Native allocation handles need a packer that retains them and writes a BDA.
         if passedas(T) isa DeviceAllocation
             throw(LavaError("pack_arg!",
                 "no method for $T, which `passedas` declares a DeviceAllocation",
@@ -247,14 +194,6 @@ end
         unsafe_store!(Ptr{T}(mapped_ptr + offset), x)
         return inline_offset
     end
-end
-
-@inline function pack_arg!(x::UInt64,
-                           mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
-                           offset::Int, byval_size::Int, inline_offset::Int,
-                           batch::O) where {O<:Closed}
-    unsafe_store!(Ptr{UInt64}(mapped_ptr + offset), x)
-    return inline_offset
 end
 
 @inline function pack_arg!(p::Ptr,
@@ -290,48 +229,15 @@ passedas(::Type{<:VkManagedBuffer}) = DeviceAllocation()
     return inline_offset
 end
 
-# A device array is the one by-value aggregate whose bytes a move must be able
-# to rewrite: the struct is inlined past `base_size`, and its first field IS
-# the resource's device address. Same stores as the generic branch, plus noting
-# where the pointer landed — see `recpatch!`. (An aggregate that CONTAINS a
-# device array several fields deep is not here on purpose: those are scene
-# structures, whose moves invalidate the plan rather than patch it.)
-@inline function pack_arg!(x::LavaDeviceArray{T,N},
-                           mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
-                           offset::Int, byval_size::Int, inline_offset::Int,
-                           batch::O) where {T,N,O<:Closed}
-    inline_offset = (inline_offset + 7) & ~7
-    ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t),
-          mapped_ptr + inline_offset, 0, byval_size)
-    unsafe_store!(Ptr{LavaDeviceArray{T,N}}(mapped_ptr + inline_offset), x)
-    unsafe_store!(Ptr{UInt64}(mapped_ptr + offset),
-                  arg_buf_bda + UInt64(inline_offset))
-    recpatchfields!(batch, LavaDeviceArray{T,N}, mapped_ptr + inline_offset)
-    return inline_offset + byval_size
-end
-
-# `slotpositions` was here: which positions in an argument tuple occupy a
-# push-constant slot. It is core's `passedslots` now, because Metal's
-# `recorded_args` asked the same question with a different and non-equivalent
-# rule; see `graph/packing.jl`.
-#
-# `standalone_slot` was here too, and was dead: nothing asked whether a type is
-# written at its own offset and nowhere else. The fact it stated is still true
-# of `pack_arg!` above (an aggregate goes into the inline area past `base_size`,
-# everything else is one store at `offsets[layout_i]`) and is read off that
-# method.
-
 """
     pack_args_direct!(owner, mapped_ptr, arg_buf_bda, offsets, base_size, byval_sizes, all_args)
 
 Write kernel arguments directly into mapped GPU memory via per-type
 `pack_arg!` dispatch.  Zero heap allocations for the arg packing itself.
 
-`owner` is what the buffer-typed leaves are pinned into — the [`OneShot`](@ref)
-for work submitted once, the [`Recording`](@ref) for work a plan submits every
-run. It was `bq`, and the body read the queue's open batch: a recording's
-arguments were therefore pinned into whatever batch happened to be open while it
-was being written, and that batch's completion released them.
+owner retains allocation arguments: a one-shot until completion, a recording
+until release. Slot selection uses core passedslots; byval sizes come from LLVM.
+
 """
 @generated function pack_args_direct!(batch::Closed,
                                         mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
@@ -352,8 +258,6 @@ was being written, and that batch's completion released them.
         return nothing
     end
 end
-
-
 
 """
     clear_kernel_cache!()
@@ -397,26 +301,12 @@ end
 The SPIR-V for `(f, tt, workgroup_size)` (`compile_or_lookup`) and this device's
 pipeline for it.
 """
-#
-# `@noinline` is load-bearing, not a code-size preference. `@nospecialize` on `f`
-# and `tt` widens this method's OWN signature, but inference will still infer a
-# specialised copy in order to inline it into a caller that is itself specialised
-# per kernel — which is every launch site. Measured on SAM 2's encoder: 1 002
-# specialisations of this function, one per kernel, for a body that does not
-# vary with the kernel. The barrier in `build_launch_plan!` supplies the
-# type-erased caller; this keeps the compiler from undoing it.
+# Keep compiler inference out of specialized launch callers.
 @noinline function get_compiled_kernel_and_pipeline(ctx::VkContext, @nospecialize(f), @nospecialize(tt),
                                           workgroup_size;
                                           enable_ray_query::Bool=false)
     job = lava_kernel_job(f, tt; workgroup_size, enable_ray_query, features = ctx.features)
-    # `invokelatest`, for the same reason `vk_context` uses one (see `device.jl`):
-    # a direct call puts GPUCompiler, the SPIR-V emitter and the file-path
-    # handling in `run_spirv_opt`/`validate_spirv`/`dump_spirv_to_disk` into the
-    # inference chain of the LAUNCH path. That is a lot of foreign surface to
-    # depend on — `FilePathsBase` pirates `Base.arg_gen` and `Base.*`, `Unitful`
-    # pirates `Base.Colon` — so loading anything that pulls them in invalidates
-    # `get_or_build_iter_plan` and every launch above it. This runs once per
-    # kernel and world; the dispatch is free next to compiling one.
+    # Isolate compiler/filesystem method invalidations from the warm launch path.
     compiled = Base.invokelatest(compile_or_lookup, job)::LavaGPUKernel
     linked = get!(() -> link_kernel(ctx, compiled), ctx.caches.linked, compiled)
 
@@ -432,19 +322,8 @@ pipeline for it.
     return linked.compiled, linked.pipeline, linked.offsets, linked.byval_sizes
 end
 
-# ── What a recording reads while it runs ──
-#
-# A dispatch reaches its arguments through a device address baked into the
-# command buffer as a push constant, so those bytes have to be host-writable,
-# device-addressable, and untouchable by anyone else for as long as the command
-# that names them can still run. That is a `Region` of the [`Unified`](@ref)
-# arena and an OWNER, and both already exist.
-#
-# What was here instead: two bump allocators on the queue and a third inside
-# every capture, with a high-water mark, a handout counter and a rewind test
-# between them, all working out when bytes were safe to reuse. The fence already
-# knew. A modelled plan does not come through here at all — it lays its arguments
-# and its indirect commands out at compile and owns the region they live in.
+# Scratch belongs to the closed command owner, never a queue-wide rewindable slab.
+# Plans allocate their own argument/indirect slots at compile time.
 
 const ARG_ALIGN = 256                     # BDA alignment for sub-allocations
 """A block of the [`Unified`](@ref) arena. Small, because BAR memory is scarce on
@@ -465,31 +344,18 @@ end
 """
     scratch!(owner, nbytes) -> Region
 
-`nbytes` of the unified arena for the commands `owner` holds, owned BY it —
-which is what decides when the bytes go back. A [`OneShot`](@ref) gives them up
-when the submission that carried it has passed; a [`Recording`](@ref) when it
-is released, because until then it may be submitted again and read them again.
+Borrow Unified memory for this owner's arguments. One-shots release it after
+completion; recordings retain it until release because they can be replayed.
 
-`own!(bq, r)` stood in front of this and asked `bq.capturing` which of the two
-was the owner. The owner is now the argument, so there is nothing to ask.
-
-One `acquire!` per launch, against a bump-pointer add, and the cheap half of
-the trade: the only caller is the unmodelled launch path, which looks up a
-compiled kernel, adapts an argument tree and packs it on every call, while a
-bump pointer costs five fields of state that can rewind under a recording still
-holding the address. A modelled plan does not come through here at all.
 """
 @inline scratch!(owner::O, nbytes::Integer) where {O<:Closed} = scratch!(owner, nbytes, Unified())
 
 """
     scratch!(owner, nbytes, kind) -> Region
 
-`nbytes` of `kind` memory that belong to the recording `owner`: given back by the
-sweep once its submission has passed. `Unified` (the default) is what launch
-arguments need, memory the GPU reads by address. A staging upload needs
-`Readback`, host-cached system memory: the CPU writes it at memory speed and the
-copy engine moves it, where a memcpy into `Unified` (BAR) memory crosses PCIe
-from the CPU, 0.78 GB/s measured on an RTX 3070 Laptop.
+Borrow owner-held memory: Unified for addressed arguments, Readback for CPU
+staging writes followed by a GPU copy. The owner returns it at its release point.
+
 """
 @inline function scratch!(owner::O, nbytes::Integer, kind) where {O<:Closed}
     bq = queueof(owner)
@@ -520,13 +386,9 @@ end
 """
     indirect_command!(owner) -> LavaArray{UInt32,1}
 
-One `VkDispatchIndirectCommand` for an unmodelled indirect launch: three
-`UInt32`s a prepare kernel writes and the command processor reads.
+One owner-held indirect dispatch triple, written by a prepare kernel and read
+by the command processor. Declared plans use their compiled argument slots.
 
-`get_indirect_buffer` was this, from a slab ring on the queue that was rewound
-whenever the queue drained — while a recording holds the address of its
-command for as long as it can be replayed. A modelled plan has no need of either:
-its commands are laid out at compile, in its own slot, beside its arguments.
 """
 function indirect_command!(owner::O) where {O<:Closed}
     r = scratch!(owner, INDIRECT_STRIDE)

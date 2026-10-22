@@ -209,3 +209,7 @@ backend assertions pass; the required existing SDK source is pinned explicitly.
 encoding copies, fixing Vulkan overlap ordering and early large-store submission.
 656 Vulkan regression, 32 encoding and 74 ROCm assertions pass; fresh loading and
 paired zero-allocation store/drain checks also pass.
+
+[Redundant native argument packers](consolidation-argument-packers.md) deletes
+two methods already covered by generic primitive/aggregate packing. 24 paired
+byte checks and 3,492 native packing/move/allocation assertions pass.
