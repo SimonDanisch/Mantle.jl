@@ -202,7 +202,7 @@ export begin_pass!, end_pass!, draw_in_pass!, draw_indexed_in_pass!,
 
 export isdepth, target_extent, checkextents, refit!,
        collect!
-export blit!, present_frame!, acquire_next_image!, transition_image!
+export blit!, present_frame!, acquire_next_image!
 export InstanceBatches, register!, batchof, ninstances
 export readback_framebuffer, readback_window, readback_target
 

@@ -303,7 +303,7 @@ function vk_blend(::Premultiplied)
 end
 
 """Record a layout transition of `image`'s first color mip level and layer."""
-function transition_image!(cmd, image::VK.Image,
+function imagebarrier!(cmd, image::VK.Image,
                               old_layout, new_layout,
                               src_stage, dst_stage,
                               src_access, dst_access)
@@ -376,7 +376,7 @@ function begin_pass!(e::Emitter,
                 VK.ClearValue(VK.ClearColorValue((0f0, 0f0, 0f0, 0f0)))
         elseif clear !== nothing
             # Clear: the old contents are discarded.
-            transition_image!(cmd, color_images[i],
+            imagebarrier!(cmd, color_images[i],
                 VK.IMAGE_LAYOUT_UNDEFINED, VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 # srcStage COLOR_ATTACHMENT_OUTPUT, not TOP_OF_PIPE: the submit waits
                 # on the acquire semaphore at that stage, and a TOP_OF_PIPE barrier
@@ -389,7 +389,7 @@ function begin_pass!(e::Emitter,
             clear_val = VK.ClearValue(VK.ClearColorValue(clear))
         else
             # Load: keep the previous contents.
-            transition_image!(cmd, color_images[i],
+            imagebarrier!(cmd, color_images[i],
                 VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                 VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK.ACCESS_COLOR_ATTACHMENT_READ_BIT)

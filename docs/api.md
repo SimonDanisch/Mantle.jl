@@ -934,7 +934,6 @@ of today's names.
 | `trace_closest_hits_indirect!` | goes |
 | `trace_rays!` | goes: `trace!(dev or g, …)` |
 | `trace_rays_indirect!` | goes |
-| `transition_image!` | goes as a call: image layouts are `barriers!` output (no implementation on either device type) |
 | `upload!` | goes: stores are pending changes (`Store`; inline ones written by `emitstore!`) |
 | `use_bindings!` | goes: bindings compiled with the plan (`compilebindings`), textures through the device-wide table; draw-binding code whose last caller is the walked draw in `execute!` |
 | `use_frozen_kernels` | goes: the `Kernel` at its `CodeInstance` holds the code and each device's native handle |

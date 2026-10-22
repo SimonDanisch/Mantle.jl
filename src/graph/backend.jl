@@ -571,7 +571,7 @@ const BACKEND_VOCABULARY = (
     :Framebuffer, :Window, :Surface, :Texture2D, :Sampler, :screenshot,
     :acquire_next_image!, :present_frame!, :begin_pass!, :end_pass!, :draw!,
     :draw_in_pass!, :draw_indexed_in_pass!, :draw_indirect_in_pass!, :set_viewport!,
-    :use_bindings!, :bind_textures, :transition_image!, :readback_framebuffer, :readback_target,
+    :use_bindings!, :bind_textures, :readback_framebuffer, :readback_target,
     :readback_window, :target_extent, :target_format, :target_image, :target_view,
     # Core infers accesses; backends supply adapted argument types, interpreters
     # and stage-wrapper signatures.

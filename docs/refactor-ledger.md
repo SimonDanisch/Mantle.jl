@@ -607,7 +607,6 @@ Every comment and docstring checked against the code and the plan (plan,
 | P6.D42 | delete `viewport!` | 10 hits, 3 files | open | |
 | P6.D43 | delete `blit!` as an eager call (becomes an eager `draw!(dev, …)`) | 14 hits, 9 files | open | |
 | P6.D44 | delete `SampledTexture` | 16 hits, 7 files | open | |
-| P6.D50 | delete `transition_image!` | 17 hits, 9 files | open | |
 | P6.D51 | delete `readback_framebuffer` | 35 hits, 8 files | open | |
 | P6.D52 | delete `readback_target` | 21 hits, 4 files | open | |
 | P6.D53 | delete `Attr` with a stored stride | 13 hits, 4 files | open | |

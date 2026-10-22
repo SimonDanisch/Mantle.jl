@@ -87,15 +87,6 @@ function checkacquirable(acquirer::Task)
 end
 
 """
-    transition_image!(image, from, to)
-
-Move `image` between usage states. The graph derives transitions for images it
-knows; this is for one it does not, such as an [`ExternalImage`](@ref) shared
-with another API.
-"""
-function transition_image! end
-
-"""
     readback_framebuffer(fb) -> Array
 
 Read a [`Framebuffer`](@ref)'s colour attachment back to the host. Waits for the

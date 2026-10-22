@@ -147,7 +147,7 @@ end
 """Transition the drawn swapchain image from COLOR_ATTACHMENT_OPTIMAL to PRESENT_SRC; retain its window."""
 function presentready!(e::Emitter, win::VulkanWindow)
     image = win.images[win.current_image_idx + 1]
-    transition_image!(e.cmd, image,
+    imagebarrier!(e.cmd, image,
         VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
         VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.AccessFlag(0))
@@ -160,7 +160,7 @@ end
 """Discard an acquired, undrawn image and transition UNDEFINED to PRESENT_SRC; retain its window."""
 function presentuntouched!(e::Emitter, win::VulkanWindow)
     image = win.images[win.current_image_idx + 1]
-    transition_image!(e.cmd, image,
+    imagebarrier!(e.cmd, image,
         VK.IMAGE_LAYOUT_UNDEFINED, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
         VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         VK.AccessFlag(0), VK.AccessFlag(0))

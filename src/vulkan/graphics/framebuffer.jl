@@ -202,7 +202,7 @@ function readback_framebuffer(fb::VulkanFramebuffer)
 
     tok = oneshot!(bq; tag = :readback) do e
         cmd = e.cmd
-        transition_image!(cmd, fb.color_image,
+        imagebarrier!(cmd, fb.color_image,
             VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
             VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.ACCESS_TRANSFER_READ_BIT)
@@ -246,7 +246,7 @@ function copy_framebuffer!(dst::LavaArray{UInt8, 1}, fb::VulkanFramebuffer)
 
     oneshot!(bq; tag = :copy) do e
         cmd = e.cmd
-        transition_image!(cmd, fb.color_image,
+        imagebarrier!(cmd, fb.color_image,
             VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
             VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.ACCESS_TRANSFER_READ_BIT)
@@ -336,7 +336,7 @@ function readback_window(win::VulkanWindow)
         cmd = e.cmd
         # srcStage COLOR_ATTACHMENT_OUTPUT matches the acquire-semaphore wait
         # `submit_and_present!` adds; TOP_OF_PIPE would not depend on it.
-        transition_image!(cmd, image,
+        imagebarrier!(cmd, image,
             from, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
             VK.AccessFlag(0), VK.ACCESS_TRANSFER_READ_BIT)
@@ -352,7 +352,7 @@ function readback_window(win::VulkanWindow)
             VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mb.buffer, [region])
 
         # Not `presentready!`: a read does not draw, so `holdsframe` stays.
-        transition_image!(cmd, image,
+        imagebarrier!(cmd, image,
             VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
             VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
             VK.ACCESS_TRANSFER_READ_BIT, VK.AccessFlag(0))

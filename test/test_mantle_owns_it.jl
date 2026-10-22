@@ -96,7 +96,7 @@ const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
     :stages, :storebytes!, :submit!, :trace_closest_hits!,
     :trace_closest_hits_anyhit!, :trace_closest_hits_anyhit_indirect!,
     :trace_closest_hits_indirect!, :trace_rays!, :trace_rays_indirect!,
-    :transition_image!, :use_bindings!,
+    :use_bindings!,
     :vertextouches, :fragmenttouches, :shadertouches,
     # Joined 2026-10-10 with the portable lifecycle (`runtime/lifecycle.jl`):
     # answered by Vulkan and Metal, not by the ROCm extension, which no worker
