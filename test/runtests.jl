@@ -551,6 +551,8 @@ if _VULKAN_OK
     check_draw_argument_lifetime(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_host_upload.jl"))
     check_host_upload(Mantle.vk_context())
+    include(joinpath(@__DIR__, "vulkan", "test_recording_trim.jl"))
+    check_recording_trim(Mantle.defaultbackend())
     check_store_submission(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_accel_barriers.jl"))
     check_accel_barriers(Mantle.vk_context())

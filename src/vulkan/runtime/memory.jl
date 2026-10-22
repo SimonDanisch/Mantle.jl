@@ -175,9 +175,15 @@ caller is about to do a heavy synchronous operation anyway.
 # its own terms.
 
 """
-    trim_gpu_pool!() -> (blocks, bytes)
+    trim_gpu_pool!(; invalidate_recordings=false) -> (blocks, bytes)
 
 Hand every empty pool block back to the driver, now.
+
+With `invalidate_recordings=true`, wait for submitted work and discard reusable
+commands held by live arena plans. Plans and their resources remain alive; their
+next `run!` records commands again. Use between frames when changing large input
+buffers would otherwise leave dead blocks pinned by unrelated recorded plans.
+An open recording still refuses cleanup. The default retains all recordings.
 
 The automatic path (`autotrim!`, by `pool(dev).policy`) is rate-limited and only runs
 while something is allocating, so it is the wrong tool for "I have finished a
@@ -198,8 +204,26 @@ that is 15 blocks and 964 MiB with 0 blocks empty; flushing first empties 15 of
 The automatic path keeps the cheap gate; see `Mantle.reclaimable`. This one is
 the explicit "I have finished and want the memory back", so it pays the stall.
 """
-function trim_gpu_pool!(ctx::VkContext = vk_context())
+function trim_gpu_pool!(ctx::VkContext = vk_context(); invalidate_recordings::Bool=false)
     bq = ctx.default_bq
+    if invalidate_recordings
+        # A completed, reusable recording still pins the pool. An explicit
+        # between-frame cleanup may discard those commands, keeping each Plan
+        # and its live resources; run! records it again on its next use.
+        # Never sweep an open recording's positional hold frame.
+        isempty(bq.holds) || return (0, 0)
+        device_lost(ctx) && return (0, 0)
+        flush!(bq)
+        waitidle(lavadevice(ctx))
+        seen=IdDict{Any,Nothing}()
+        for arena in values(spans(ctx).arenas), weak in tenants!(arena)
+            plan=weak.value
+            plan isa Plan && recorded(plan) || continue
+            haskey(seen,plan) && continue
+            seen[plan]=nothing
+            invalidate!(plan)
+        end
+    end
     quiesce_before_reclaim!(bq) || return (0, 0)
     return reclaim_empty_pool_blocks!(bq)
 end
