@@ -369,7 +369,6 @@ checks compatibility.
 arenaroom(p::Pool, dev, kind) = max(arenaof(p, kind).bytes, headroom(p, dev, kind))
 
 """First offset at or after `from` that satisfies `align`."""
-alignup(from::Int, align::Int) = align <= 1 ? from : cld(from, align) * align
 
 """
 How many entries of a straddling bin `carve!` checks before moving up a bin. A

@@ -52,7 +52,6 @@ mutable struct VulkanTLAS{Tri} <: BatchedTLAS{Tri}
 
     # Built by sync!.
     hw_tlas::Union{Nothing, LavaTLAS}
-    hw_accel::Union{Nothing, HardwareAccel{Vector{Tri}}}
     tri_gpu::Union{Nothing, LavaArray{Tri, 1}}
     off_gpu::Union{Nothing, LavaArray{UInt32, 1}}
     # Driver records, every batch's in order, written by `writeinstances!`. Fresh
@@ -93,7 +92,7 @@ function VulkanTLAS{Tri}(backend::LavaBackend; bq::SubmitChannel{<:VulkanQueue}=
         LavaBLAS[],
         InstanceBatches{VulkanInstanceBatch{Tri}}(),
         Raycore.Bounds3(),
-        nothing, nothing, nothing, nothing,
+        nothing, nothing, nothing,
         nothing,                  # combined_instance_buf
         nothing,                  # combined_records
         nothing,
@@ -277,25 +276,13 @@ function rebuild_hw_tlas_from_batch!(hwtlas::VulkanTLAS{Tri}) where {Tri}
         build_tlas(ctx, native, total; allow_update=true, blases=hwtlas.blas_list)
     end
 
-    metadata = trianglemetadata(Tri, hwtlas.instances, Val(true))
+    metadata = trianglemetadata(Tri, hwtlas.instances)
     all_tris, hit_offsets = metadata.triangles, metadata.hits
-    blas_offsets, per_inst_offsets = metadata.starts, metadata.raw
-
-    hw_accel = if hwtlas.hw_accel isa HardwareAccel
-        accel_prev = hwtlas.hw_accel
-        accel_prev.tlas = hw_tlas
-        accel_prev.triangle_data = all_tris
-        accel_prev.blas_offsets = blas_offsets
-        accel_prev.per_instance_tri_offsets = per_inst_offsets
-        accel_prev
-    else
-        HardwareAccel(hw_tlas, all_tris, blas_offsets, per_inst_offsets; bq=hwtlas.bq)
-    end
 
     tri_gpu = reuse_or_alloc(hwtlas.tri_gpu, all_tris, hwtlas.bq)
     off_gpu = reuse_or_alloc(hwtlas.off_gpu, hit_offsets, hwtlas.bq)
 
-    return (hw_tlas, hw_accel, tri_gpu, off_gpu, native, shading, dropped_blases)
+    return (hw_tlas, tri_gpu, off_gpu, native, shading, dropped_blases)
 end
 
 """
@@ -314,7 +301,7 @@ function Raycore.sync!(hwtlas::VulkanTLAS)
     if hwtlas.dirty
         # Topology change, or the first sync (constructed dirty). Queued
         # transform updates are written as part of it (`writeinstances!`).
-        hw_tlas, hw_accel, tri_gpu, off_gpu, native, shading, dropped_blases =
+        hw_tlas, tri_gpu, off_gpu, native, shading, dropped_blases =
             rebuild_hw_tlas_from_batch!(hwtlas)
 
         old_hw_tlas = hwtlas.hw_tlas
@@ -324,7 +311,6 @@ function Raycore.sync!(hwtlas::VulkanTLAS)
         old_off_gpu = hwtlas.off_gpu === off_gpu ? nothing : hwtlas.off_gpu
 
         hwtlas.hw_tlas   = hw_tlas
-        hwtlas.hw_accel  = hw_accel
         hwtlas.tri_gpu   = tri_gpu
         hwtlas.off_gpu   = off_gpu
         hwtlas.combined_instance_buf = native
@@ -346,7 +332,7 @@ function Raycore.sync!(hwtlas::VulkanTLAS)
     # Transforms only: MODE_UPDATE_KHR refit from what the records hold, queued
     # updates or a caller's kernel writes (`Raycore.refit!`).
     if hwtlas.transforms_dirty
-        if hwtlas.hw_tlas === nothing || !hwtlas.hw_tlas.allow_update
+        if hwtlas.hw_tlas === nothing || hwtlas.hw_tlas.update_scratch === nothing
             # Rebuild if the last build cannot be refit; rebuilds always allow it.
             hwtlas.dirty = true
             return Raycore.sync!(hwtlas)

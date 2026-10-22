@@ -115,9 +115,24 @@ target_extent(t::WindowTarget) = target_extent(t.window)
     eltypeof(format) -> Type
 
 The Julia element type of an attachment format: a backend's answer for its own
-format type, `VK.Format` or `MTLPixelFormat`.
+format type, `VK.Format` or `MTLPixelFormat`, through [`eltypefor`](@ref).
 """
 function eltypeof end
+
+"""
+    eltypefor(format, f) -> Type
+
+The attachment element type that the backend's `format(T; srgb)` maps to `f`, in
+its plain or sRGB form. sRGB and UNORM share a memory layout, so both read back as
+the same colorant.
+"""
+function eltypefor(format, f)
+    for T in (BGRA{N0f8}, RGBA{N0f8}, RGBA{Float16}, RGBA{Float32}, Float32, UInt32, SVector{2,UInt32})
+        srgb = T <: Union{BGRA{N0f8},RGBA{N0f8}}
+        (format(T) == f || srgb && format(T; srgb) == f) && return T
+    end
+    throw(ArgumentError("no Julia element type is registered for the format $f"))
+end
 
 # The element type a pipeline is compiled against: the target's format read back
 # as the Julia type it was lowered from. In core, since two loaded backends cannot

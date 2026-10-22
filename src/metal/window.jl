@@ -95,8 +95,9 @@ function Mantle.target_view(w::MetalWindow)
     return d.texture
 end
 
-# A `MTLTexture` is both the image and the view.
+# A `MTLTexture` is both the image and the view; a manual pass draws into it too.
 Mantle.target_image(w::MetalWindow) = Mantle.target_view(w)
+Mantle.currentimage(w::MetalWindow) = Mantle.target_view(w)
 
 Mantle.target_extent(w::MetalWindow) = (w.width, w.height)
 

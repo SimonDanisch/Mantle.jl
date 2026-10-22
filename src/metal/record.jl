@@ -101,12 +101,19 @@ A dispatch compiled for recording: pipeline, argument bindings, grid, and the
 `adapted` values `pack_recorded!` writes at `record!`, held to avoid a per-launch
 `mtlconvert`. Core lays out the argument memory from `argsize`.
 """
-struct MetalRecordedDispatch{A<:Tuple,R<:Tuple,G,T}
+struct MetalRecordedDispatch{A<:Tuple,R<:Tuple,G,T,D,X<:Tuple,C<:Tuple}
     kernel::Metal.HostKernel
     args::Vector{RecordedArg}
     adapted::A
-    # The arguments before `mtlconvert`, for an immediate run (see the call operator).
+    # The arguments before `mtlconvert` at compile, whose Metal.jl records a
+    # recording claims (`argmanaged`).
     raw::R
+    # The device and the declared arguments, resolved again at every walked run:
+    # a resource may have moved since compile. `kactx` is a KA kernel's context
+    # argument, empty for a KernelInterface kernel.
+    dev::D
+    declared::X
+    kactx::C
     state::Metal.KernelState
     groups::G
     nthreads::T
@@ -121,13 +128,14 @@ struct MetalRecordedDispatch{A<:Tuple,R<:Tuple,G,T}
 end
 
 """
-Run this dispatch now, as a walked plan (one that draws) does. Passes the raw
-arguments: `encode_arguments!` converting an `MtlArray` calls `useResource`, which
-feeds hazard tracking; pre-converted values skip it, and the driver may overlap the
-next command buffer (a render pass then reads a stale indirect count).
+Run this dispatch now, as a walked plan (one that draws) does. Passes the resolved
+arguments unconverted: `encode_arguments!` converting an `MtlArray` calls
+`useResource`, which feeds hazard tracking; pre-converted values skip it, and the
+driver may overlap the next command buffer (a render pass then reads a stale
+indirect count).
 """
 function (d::MetalRecordedDispatch)()
-    d.kernel(d.adapted[1], d.raw...; groups = d.groups, threads = d.nthreads)
+    d.kernel(d.kactx..., Mantle.resolve(d.dev, d.declared)...; groups = d.groups, threads = d.nthreads)
     return nothing
 end
 
@@ -275,13 +283,12 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
                                    name = entry, indirect = true)
         wrapped = KI.Kernel(Mantle.backend(dev), kernel)
         nd = recordedrange(d.ndrange)
-        group = d.group === nothing ? () : d.group
-        threads, groups = Mantle.ki_launch_extents(wrapped, nd, group, ())
+        threads, groups = Mantle.ki_launch_extents(wrapped, nd, d.group)
         kernel.loggingEnabled && throw(ArgumentError(
             "record!: kernel $(entry) uses device-side logging, which needs a per-launch buffer"))
         state = recorded_state(dev, kernel)
         recargs, nbytes = recorded_args((state, d.kernel, adapted...), argoff)
-        return MetalRecordedDispatch(kernel, recargs, adapted, raw, state,
+        return MetalRecordedDispatch(kernel, recargs, adapted, raw, dev, d.args, (), state,
                                      groups, threads, entry, argoff, nbytes, indirect,
                                      d.ndrange)
     end
@@ -317,7 +324,7 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
         "per-launch path; run the plan without recording it to use the log."))
     state = recorded_state(dev, kernel)
     recargs, nbytes = recorded_args((state, obj.f, adapted...), argoff)
-    return MetalRecordedDispatch(kernel, recargs, adapted, raw, state,
+    return MetalRecordedDispatch(kernel, recargs, adapted, raw, dev, d.args, (adapted[1],), state,
                                  length(KA.blocks(iterspace)),
                                  length(KA.workitems(iterspace)),
                                  entry, argoff, nbytes, indirect, d.ndrange)
@@ -703,10 +710,8 @@ Encode one dispatch as the next command of the recording.
 """
 function Mantle.emitdispatch!(e::MetalRecorder, d::MetalRecordedDispatch,
                               name::AbstractString)
-    am = e.plan.args
-    am === nothing && throw(ArgumentError(
-        "record!: the plan has no argument memory, so a recorded command has " *
-        "nowhere to bind its arguments from."))
+    # Metal's `argbytes` always lays out argument memory.
+    am = e.plan.args::Mantle.ArgMemory
     pack_recorded!(am.ptr, d.args, (d.state, d.kernel.f, d.adapted...), e.plan, am)
     slotoff = d.indirect == 0 ? -1 : writeslot!(e, am, d)
     encode!(e, d.kernel.pipeline, d.args, am.store,
@@ -1005,9 +1010,7 @@ function Mantle.closerecording!(e::MetalRecorder, pl::Mantle.Plan)
     e.cursor == e.ncommands || error(
         "record!: $(e.cursor) commands were encoded and the buffer was sized for " *
         "$(e.ncommands); the walk and `planshape` disagree.")
-    am = pl.args
-    am === nothing && throw(ArgumentError(
-        "record!: the plan has no argument memory to bind commands against."))
+    am = pl.args::Mantle.ArgMemory
     if encodes(e.dev.queue)
         # The grids an open gate restores, uploaded once on the adopted queue.
         e.gridcursor == 0 || copyto!(e.templ, e.templhost)
@@ -1052,11 +1055,11 @@ Mantle.recordable(::MetalDevice, pl::Mantle.Plan) = Mantle.recordable(pl) && !wa
     Mantle.openrun(dev, plan) -> Immediate
 
 The emitter for host stores or patches in front of a run's recording. Core opens
-it only for such a run, and a recorded plan's run first calls `Metal.synchronize()`:
-the stores land through the host pointer, unordered against frames still reading.
+it only for such a run, and a recorded plan's run first waits for the device: the
+stores land through the host pointer, unordered against frames still reading.
 """
 function Mantle.openrun(d::MetalDevice, pl::Mantle.Plan)
-    pl.recording === nothing || Metal.synchronize()
+    pl.recording === nothing || waitidle(d)
     enterrun!(d)
     return Mantle.Immediate()
 end

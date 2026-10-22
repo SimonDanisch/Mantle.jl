@@ -25,15 +25,6 @@ const BDA_POISON = UInt64(0)
 
 # Everything here is per `VkContext`, so `reset_device!`'s new context starts fresh.
 
-"""
-    eager_gc!([ctx,] flag::Bool)
-
-Enable or disable the pressure-driven `maybe_collect` for this context, e.g. to
-keep allocator GC out of a benchmark.
-"""
-eager_gc!(ctx::VkContext, flag::Bool) = (mempolicy(ctx).eager_gc = flag)
-eager_gc!(flag::Bool) = eager_gc!(vk_context(), flag)
-
 """Sum of device-local heap sizes in bytes for `ctx`'s physical device."""
 function probe_device_local_heap(ctx::VkContext)
     mem_props = ctx.memory_properties
@@ -238,9 +229,6 @@ function vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
         "vk_alloc",
         "Vulkan device is lost — cannot allocate new buffers",
         "Call reset_device!() to reinitialize, or restart Julia."))
-    if mempolicy(ctxof(bq)).track_allocs
-        record_alloc_site!(ctxof(bq), Int(nbytes))
-    end
     drain!(bq)
     maybe_collect(ctxof(bq))
     result = try_vk_alloc(bq, nbytes; extra_usage, unified)
@@ -378,11 +366,6 @@ function try_vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
         @lock p.livelock push!(p.live_buffers, result)
         Threads.atomic_add!(p.live_bytes, nbytes)
     end
-    if (ctxof(bq)).diag.alloc_debug
-        push!((ctxof(bq)).diag.alloc_log,
-              (kind=:direct, addr=address, size=Int(nbytes), pool=false,
-               mtype=Int(mem_type_idx), unified=unified, usage=UInt32(usage)))
-    end
     return result
 end
 
@@ -514,53 +497,6 @@ function scan_unified_for_bda!(buf::VkManagedBuffer)
     return hits
 end
 
-"""
-    scan_slabs_for_unknown_bdas(bq) -> Vector{NamedTuple}
-
-Words of the unified arena that look like device addresses (`>=
-0xffff800000000000`, not all ones) but are neither a dedicated buffer in
-`live_buffers` nor inside a pool block: stale addresses argument packing let
-through. Run before submit when `ctx.diag.presubmit_scan` is set.
-"""
-function scan_slabs_for_unknown_bdas(bq)
-    bq === nothing && return NamedTuple[]
-    ctx = ctxof(bq)
-    # Freed but not yet destroyed buffers count as unknown: packing one is a use after free.
-    live = let p = mempolicy(ctx)
-        @lock p.livelock Set{UInt64}(b.address for b in p.live_buffers if (@atomic b.state) == BUF_STATE_ALIVE)
-    end
-    # Unified blocks count too: a by-value argument's slot points into the
-    # argument block itself (`base + inline_offset`).
-    ranges = Tuple{UInt64,UInt64}[]
-    for blk in poolblocks(ctx)
-        bb = blk.memory
-        bb isa BufferBlock || continue
-        push!(ranges, (bb.address, bb.address + UInt64(bb.bytes)))
-    end
-    @inline function in_known_range(addr)
-        for (lo, hi) in ranges
-            lo <= addr < hi && return true
-        end
-        return false
-    end
-    results = NamedTuple[]
-    for (i, blk) in enumerate(unifiedblocks(ctx))
-        mb = (blk.memory::BufferBlock).ref[]::VkManagedBuffer
-        mb.mapped_ptr == Ptr{UInt8}(0) && continue
-        n = Int(mb.size) ÷ 8
-        p = Ptr{UInt64}(mb.mapped_ptr)
-        for k in 0:(n-1)
-            v = unsafe_load(p, k+1)
-            v < UInt64(0xffff800000000000) && continue
-            v == typemax(UInt64) && continue  # 0xff..ff often appears in scratch
-            v in live && continue
-            in_known_range(v) && continue
-            push!(results, (slab=:unified, idx=i, offset=k*8, val=v))
-        end
-    end
-    return results
-end
-
 # Sub-allocation uses `Mantle.Pool`, the pool graph arenas use too: a second
 # allocator over the same `VkDevice` could not reuse its bytes. `carve!` splits
 # exactly, and each allocation gets a fresh `VkManagedBuffer` (a suballocation
@@ -582,7 +518,7 @@ more and takes the dedicated path (`bda_alignment_for`).
 """
 const POOL_ALIGN = 256
 
-MemoryPolicy() = MemoryPolicy(false, false, true, MemoryStats(),
+MemoryPolicy() = MemoryPolicy(false, true, MemoryStats(),
                               Threads.Atomic{Int}(0), Set{VkManagedBuffer}(), ReentrantLock())
 
 """
@@ -657,34 +593,6 @@ function destroy_pool!(ctx::VkContext)
     return nothing
 end
 
-# With `mempolicy(ctx).track_allocs`, every allocation adds its first four user
-# frames, as one call-site key, to `ctx.diag.alloc_trace` (site => (count,
-# bytes)).
-function record_alloc_site!(ctx::VkContext, nbytes::Int)
-    bt = stacktrace(backtrace())
-    user_frames = String[]
-    for f in bt
-        s = string(f.file)
-        # Skip allocator, array and Base frames.
-        if occursin("memory.jl", s) || occursin("lavaarray.jl", s) ||
-           occursin("launch.jl", s) || occursin("ka_backend.jl", s) ||
-           occursin("KernelAbstractions", s) || occursin("Base.jl", s) ||
-           occursin("/Base/", s) || occursin("Adapt/src", s) ||
-           occursin("gpuarrays", s) || occursin("dict.jl", s) ||
-           occursin("./", s) && length(s) < 30
-            continue
-        end
-        push!(user_frames, "$(basename(s)):$(f.line) ($(f.func))")
-        length(user_frames) >= 4 && break
-    end
-    site = Symbol(isempty(user_frames) ? "unknown" : join(user_frames, " <- "))
-    d = ctx.diag
-    lock(d.alloc_trace_lock) do
-        c, b = get(d.alloc_trace, site, (0, 0))
-        d.alloc_trace[site] = (c + 1, b + nbytes)
-    end
-end
-
 """
     pool_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes; extra_usage=UInt32(0)) -> VkManagedBuffer
 
@@ -702,7 +610,6 @@ function pool_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer; extra_usa
         "Call reset_device!() to reinitialize, or restart Julia."))
     p = mempolicy(ctx)
     nbytes = max(Int(nbytes), POOL_MIN_SIZE)
-    p.track_allocs && record_alloc_site!(ctx, nbytes)
     drain!(bq)
     # Same hook as `vk_alloc`; without it the pool grows until full and then
     # pays a 2-5 ms `GC.gc` inside one allocation.

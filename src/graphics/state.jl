@@ -14,7 +14,7 @@ abstract type BlendMode end
 "No blending: the fragment replaces the target."
 struct Opaque <: BlendMode end
 
-"`src.a * src + (1 - src.a) * dst`."
+"`src.a * src + (1 - src.a) * dst`; alpha composites as `src.a + (1 - src.a) * dst.a`."
 struct AlphaBlend <: BlendMode end
 
 "`src + dst`."
@@ -41,6 +41,22 @@ struct PerAttachment{M<:Tuple{Vararg{BlendMode}}} <: BlendMode
     modes::M
 end
 PerAttachment(modes::BlendMode...) = PerAttachment(modes)
+
+"""
+    blendfactors(mode) -> (src, dst, srcalpha, dstalpha) or nothing
+
+The factors of `mode`'s additive blend equation, as `:one`, `:srcalpha` or
+`:oneminussrcalpha`; `nothing` when the fragment is not blended. Backends map the
+symbols to their native factors.
+"""
+blendfactors(::Union{Opaque,NoWrite}) = nothing
+blendfactors(::AlphaBlend) = (:srcalpha, :oneminussrcalpha, :one, :oneminussrcalpha)
+blendfactors(::Premultiplied) = (:one, :oneminussrcalpha, :one, :oneminussrcalpha)
+blendfactors(::Additive) = (:one, :one, :one, :one)
+
+"""Whether `mode` writes the colour attachment at all."""
+writescolor(::BlendMode) = true
+writescolor(::NoWrite) = false
 
 """
     attachmentblend(blend, i, integer) -> BlendMode
@@ -102,6 +118,22 @@ struct DepthAlways <: DepthMode end
 
 "No depth test and no depth write."
 struct DepthOff <: DepthMode end
+
+"""
+    depthtest(mode) -> Symbol or nothing
+
+The comparison `mode` tests with (`:less`, `:lessequal`, `:greater`, `:always`),
+or `nothing` for no depth test. Backends map it to their native compare op.
+"""
+depthtest(::DepthLess) = :less
+depthtest(::Union{DepthLessEq,DepthLessEqReadOnly}) = :lessequal
+depthtest(::DepthGreater) = :greater
+depthtest(::DepthAlways) = :always
+depthtest(::DepthOff) = nothing
+
+"""Whether `mode` writes depth."""
+depthwrites(::DepthMode) = true
+depthwrites(::Union{DepthLessEqReadOnly,DepthOff}) = false
 
 """
     RenderTarget

@@ -32,7 +32,6 @@ include("device_intrinsics.jl")
 include("ka.jl")
 include("raytracing.jl")
 # After raytracing.jl: needs `MetalTLAS`.
-include("trace.jl")
 include("hwtlas.jl")
 include("procedural.jl")
 

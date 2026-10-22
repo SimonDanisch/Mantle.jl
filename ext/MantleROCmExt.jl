@@ -370,11 +370,8 @@ function kicompile(c::Mantle.Compile{ROCmDevice}, dev::ROCmDevice, d::Mantle.Dis
     be = Mantle.kibackend(dev)
     args = map(a -> Mantle.resolve(dev, a), d.args)
     nd = Mantle.dispatchrange(d.ndrange)
-    ndt = nd isa Integer ? (Int(nd),) : map(Int, Tuple(nd))
     kern = Mantle.kikernel(d.kernel, dev, args)
-    wgin = d.group === nothing ? () :
-           (d.group isa Integer ? (Int(d.group),) : map(Int, Tuple(d.group)))
-    wg, ng = Mantle.ki_launch_extents(kern, ndt, wgin, ())
+    wg, ng = Mantle.ki_launch_extents(kern, Mantle.groupdims(nd), d.group)
     # The tuples, not their products (see `ROCmCompiledDispatch`): the geometry
     # a `KI.Kernel` call resolves before `KI.launch`. `kern.kern.kernel` is the
     # `HIPKernel`; a plain function captures nothing, so it launches alone.

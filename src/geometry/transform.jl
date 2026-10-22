@@ -38,12 +38,6 @@ returned as a 9-tuple (m00, m01, m02, m10, m11, m12, m20, m21, m22).
     )
 end
 
-"""build_4x3(rot9, scale::Float32, p::Point3f) -> NTuple{12,Float32}
-
-Combine row-major rotation, uniform scale and translation in core affine layout."""
-@inline build_4x3(rot9::NTuple{9,Float32}, scale::Float32, p::Point3f) =
-    build_4x3_pervec(rot9, Vec3f(scale), p)
-
 """build_4x3_pervec(rot9, sc::Vec3f, p::Point3f) -> NTuple{12,Float32}
 
 Scale rotation row i by sc[i], then append translation in core affine layout."""
@@ -52,15 +46,4 @@ Scale rotation row i by sc[i], then append translation in core affine layout."""
     (rot9[1] * sx, rot9[2] * sy, rot9[3] * sz, p[1],
      rot9[4] * sx, rot9[5] * sy, rot9[6] * sz, p[2],
      rot9[7] * sx, rot9[8] * sy, rot9[9] * sz, p[3])
-end
-
-
-"""Convert an indexable 4×4 matrix to the core row-major Mat3x4f layout."""
-function mat4_to_vk_transform(m)::Mat3x4f
-    # SMatrix columns hold the affine rows in linear storage order.
-    return Mat3x4f(
-        Float32(m[1,1]), Float32(m[1,2]), Float32(m[1,3]), Float32(m[1,4]),
-        Float32(m[2,1]), Float32(m[2,2]), Float32(m[2,3]), Float32(m[2,4]),
-        Float32(m[3,1]), Float32(m[3,2]), Float32(m[3,3]), Float32(m[3,4]),
-    )
 end

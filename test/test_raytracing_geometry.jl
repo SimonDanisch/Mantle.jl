@@ -52,9 +52,8 @@ Base.length(b::MetadataBatch) = b.n
 
 @testset "portable TLAS triangle tables" begin
     bs = Mantle.InstanceBatches{MetadataBatch}()
-    empty = Mantle.trianglemetadata(Int, bs, Val(true))
+    empty = Mantle.trianglemetadata(Int, bs)
     @test isempty(empty.triangles) && isempty(empty.hits)
-    @test isempty(empty.raw) && isempty(empty.starts)
     add(tris, n) = Mantle.register!(bs, h -> MetadataBatch(tris, n, h, false))
     leading = add(Int[], 2)
     first = add([11, 12], 3)
@@ -62,22 +61,15 @@ Base.length(b::MetadataBatch) = b.n
     add([21], 0) # Geometry without live instances still occupies metadata space.
     last = add([31, 32, 33], 2)
     @test Mantle.sethidden!(bs, first, true)
-    result = Mantle.trianglemetadata(Int, bs, Val(true))
+    result = Mantle.trianglemetadata(Int, bs)
     @test result.triangles == [11, 12, 21, 31, 32, 33]
     @test result.hits == UInt32[Mantle.NOTRIANGLES, Mantle.NOTRIANGLES,
                                 0, 0, 0, Mantle.NOTRIANGLES, 3, 3]
-    @test result.raw == UInt32[0, 0, 0, 0, 0, 2, 3, 3]
-    @test result.starts == UInt32[0, 0, 2, 2, 3]
-    hitonly = Mantle.trianglemetadata(Int, bs)
-    @test hitonly.triangles == result.triangles && hitonly.hits == result.hits
-    @test hitonly.raw === nothing && hitonly.starts === nothing
     @test Mantle.delete!(bs, first)
-    changed = Mantle.trianglemetadata(Int, bs, Val(true))
+    changed = Mantle.trianglemetadata(Int, bs)
     @test changed.triangles == [21, 31, 32, 33]
     @test changed.hits == UInt32[Mantle.NOTRIANGLES, Mantle.NOTRIANGLES,
                                  Mantle.NOTRIANGLES, 1, 1]
-    @test changed.starts == UInt32[0, 0, 0, 1]
-    @test changed.raw == UInt32[0, 0, 0, 1, 1]
     @test Mantle.batchof(bs, last).handle == last
 end
 

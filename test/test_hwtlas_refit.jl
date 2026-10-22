@@ -27,7 +27,7 @@ if Mantle.supports_hwtlas(TESTBACKEND)
     phys = Mantle.devicearray(TESTBACKEND, Raycore.InstanceRecord, n)
     rend = Mantle.devicearray(TESTBACKEND, Raycore.InstanceRecord, n)
     writegrains!(positions) =
-        KI.Kernel(TESTBACKEND, Mantle.write_grain_instances_kernel)(
+        KI.Kernel(TESTBACKEND, write_grain_instances_kernel)(
             Mantle.devicearray(TESTBACKEND, positions), quats, radius, phys, rend; ndrange = n)
 
     at = [Point3f(3f0 * (i - 1), 0f0, 0f0) for i in 1:n]

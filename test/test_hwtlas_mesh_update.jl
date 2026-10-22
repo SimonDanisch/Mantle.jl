@@ -210,7 +210,7 @@ end
     # A bulk transform update, which is what goes through the refit.
     Raycore.update_transforms!(hwtlas, handle,
         Mantle.devicearray(TESTBACKEND,
-            [Mantle.mat4_to_vk_transform(tlastranslation(x, 0f0, 1f0)) for x in xs]))
+            [Raycore.mat4_to_mat3x4(tlastranslation(x, 0f0, 1f0)) for x in xs]))
     Raycore.sync!(hwtlas)
 
     after = tlastrace(probe, hwtlas)

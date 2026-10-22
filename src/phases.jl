@@ -612,7 +612,7 @@ function run!(::Barriers, c)
 
         # Nothing is coalesced across resources: a buffer barrier orders only its
         # buffer and a layout change is per image. `pre` is already minimal.
-        needed = copy(pre)
+        needed = pre
 
         # The aliasing handover, which `transition!` cannot see because the two
         # transients never name each other. It waits for the last usages of the
@@ -633,7 +633,6 @@ function run!(::Barriers, c)
         end
 
         c.prepass[p] = needed
-        append!(c.transitions, pre)
     end
     c
 end

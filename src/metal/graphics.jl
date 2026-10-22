@@ -17,49 +17,21 @@ mtl_primitive(::Mantle.TriangleStrip) = MTLm.MTLPrimitiveTypeTriangleStrip
 mtl_primitive(::Mantle.LineList)      = MTLm.MTLPrimitiveTypeLine
 mtl_primitive(::Mantle.PointList)     = MTLm.MTLPrimitiveTypePoint
 
-mtl_depth_compare(::Mantle.DepthLess)    = MTLm.MTLCompareFunctionLess
-mtl_depth_compare(::Mantle.DepthLessEq)  = MTLm.MTLCompareFunctionLessEqual
-mtl_depth_compare(::Mantle.DepthLessEqReadOnly) = MTLm.MTLCompareFunctionLessEqual
-mtl_depth_compare(::Mantle.DepthGreater) = MTLm.MTLCompareFunctionGreater
-mtl_depth_compare(::Mantle.DepthAlways)  = MTLm.MTLCompareFunctionAlways
-mtl_depth_compare(::Mantle.DepthOff)     = MTLm.MTLCompareFunctionAlways
-
-depth_writes(::Mantle.DepthMode)  = true
-depth_writes(::Mantle.DepthOff)   = false
-depth_writes(::Mantle.DepthLessEqReadOnly) = false
+mtl_depth_compare(mode::Mantle.DepthMode) = getproperty(
+    (less = MTLm.MTLCompareFunctionLess, lessequal = MTLm.MTLCompareFunctionLessEqual,
+     greater = MTLm.MTLCompareFunctionGreater, always = MTLm.MTLCompareFunctionAlways),
+    something(Mantle.depthtest(mode), :always))
 
 """Configure one colour attachment's blending from the portable `BlendMode`."""
-function apply_blend!(att, ::Mantle.Opaque)
-    att.blendingEnabled = false
-    return att
-end
-function apply_blend!(att, ::Mantle.NoWrite)
-    att.blendingEnabled = false
-    att.writeMask = MTLm.MTLColorWriteMaskNone
-    return att
-end
-function apply_blend!(att, ::Mantle.AlphaBlend)
-    att.blendingEnabled = true
-    att.sourceRGBBlendFactor        = MTLm.MTLBlendFactorSourceAlpha
-    att.destinationRGBBlendFactor   = MTLm.MTLBlendFactorOneMinusSourceAlpha
-    att.sourceAlphaBlendFactor      = MTLm.MTLBlendFactorOne
-    att.destinationAlphaBlendFactor = MTLm.MTLBlendFactorOneMinusSourceAlpha
-    return att
-end
-function apply_blend!(att, ::Mantle.Premultiplied)
-    att.blendingEnabled = true
-    att.sourceRGBBlendFactor        = MTLm.MTLBlendFactorOne
-    att.destinationRGBBlendFactor   = MTLm.MTLBlendFactorOneMinusSourceAlpha
-    att.sourceAlphaBlendFactor      = MTLm.MTLBlendFactorOne
-    att.destinationAlphaBlendFactor = MTLm.MTLBlendFactorOneMinusSourceAlpha
-    return att
-end
-function apply_blend!(att, ::Mantle.Additive)
-    att.blendingEnabled = true
-    att.sourceRGBBlendFactor        = MTLm.MTLBlendFactorOne
-    att.destinationRGBBlendFactor   = MTLm.MTLBlendFactorOne
-    att.sourceAlphaBlendFactor      = MTLm.MTLBlendFactorOne
-    att.destinationAlphaBlendFactor = MTLm.MTLBlendFactorOne
+function apply_blend!(att, mode::Mantle.BlendMode)
+    Mantle.writescolor(mode) || (att.writeMask = MTLm.MTLColorWriteMaskNone)
+    f = Mantle.blendfactors(mode)
+    att.blendingEnabled = f !== nothing
+    f === nothing && return att
+    mtl = (one = MTLm.MTLBlendFactorOne, srcalpha = MTLm.MTLBlendFactorSourceAlpha,
+           oneminussrcalpha = MTLm.MTLBlendFactorOneMinusSourceAlpha)
+    att.sourceRGBBlendFactor, att.destinationRGBBlendFactor,
+        att.sourceAlphaBlendFactor, att.destinationAlphaBlendFactor = map(s -> getproperty(mtl, s), f)
     return att
 end
 
@@ -78,7 +50,7 @@ function depthstate(dev, depth, depth_format)
     (depth_format === nothing || depth isa Mantle.DepthOff) && return nothing
     dd = MTLm.MTLDepthStencilDescriptor()
     dd.depthCompareFunction = mtl_depth_compare(depth)
-    dd.depthWriteEnabled = depth_writes(depth)
+    dd.depthWriteEnabled = Mantle.depthwrites(depth)
     return MTLm.MTLDepthStencilState(dev, dd)
 end
 
@@ -87,6 +59,7 @@ struct MetalTexture2D{T} <: Mantle.Texture2D{T}
     tex::MTLm.MTLTexture
     width::Int
     height::Int
+    dev::MetalDevice
 end
 
 Base.size(t::MetalTexture2D) = (t.width, t.height)
@@ -116,13 +89,13 @@ naming the format. `data[x, y]`: the first index is horizontal, as in GLMakie an
 the Vulkan backend. `Shared` storage, not a buffer-backed linear texture.
 `mipmap = true` regenerates the full mip chain from level 0 at every upload.
 """
-function Mantle.Texture2D(::Metal.MetalBackend, data::AbstractMatrix{T}; mipmap::Bool = false) where {T}
-    dev = Metal.device()
+function Mantle.Texture2D(be::Metal.MetalBackend, data::AbstractMatrix{T}; mipmap::Bool = false) where {T}
+    d = Device(be)
     w, h = size(data)          # first index is x, second is y
     desc = MTLm.MTLTextureDescriptor(mtlsampledformat(T), w, h, mipmap)
     desc.usage = MTLm.MTLTextureUsageShaderRead
     desc.storageMode = MTLm.MTLStorageModeShared
-    t = MetalTexture2D{T}(MTLm.MTLTexture(dev, desc), w, h)
+    t = MetalTexture2D{T}(MTLm.MTLTexture(d.dev, desc), w, h, d)
     Mantle.upload_texture_data!(t, data)
     return t
 end
@@ -141,7 +114,7 @@ function Mantle.upload_texture_data!(t::MetalTexture2D{T}, data::AbstractMatrix{
     # `collect` for anything without a dense host pointer (views, adjoints).
     rows = data isa Matrix{T} ? data : collect(data)
     nbytes = length(rows) * sizeof(T)
-    staging = GC.@preserve rows MTLm.MTLBuffer(Metal.device(), nbytes, pointer(rows);
+    staging = GC.@preserve rows MTLm.MTLBuffer(t.dev.dev, nbytes, pointer(rows);
                                                storage = Metal.SharedStorage)
     blit_into_texture!(t, staging, 0)
     return t
@@ -164,7 +137,7 @@ end
 function blit_into_texture!(t::MetalTexture2D{T}, src::MTLm.MTLBuffer, soff::Integer) where {T}
     w, h = size(t)
     # Behind the device's uncommitted batch: commit order is execution order.
-    cb = framebuffer!(Device(MetalAPI()))
+    cb = framebuffer!(t.dev)
     MTLm.MTLBlitCommandEncoder(cb) do enc
         MTLm.append_copy!(enc, t.tex, MTLm.MTLOrigin(0, 0, 0), MTLm.MTLSize(w, h, 1),
                           src, soff, w * sizeof(T), 0)
@@ -214,6 +187,8 @@ struct MetalFramebuffer <: Mantle.Framebuffer
     height::Int
     color_format::MTLm.MTLPixelFormat
     depth_format::MTLm.MTLPixelFormat
+    # Its passes commit on this device's queue, which a readback waits for.
+    dev::MetalDevice
 end
 
 """
@@ -224,7 +199,8 @@ Allocate an offscreen target. `color_format` is a Julia element type lowered by
 """
 function Mantle.Framebuffer(be::Metal.MetalBackend, width::Integer, height::Integer;
                             depth::Bool = true, color_format = nothing)
-    dev = Device(be).dev
+    d = Device(be)
+    dev = d.dev
     cfmt = color_format === nothing ? MTLm.MTLPixelFormatBGRA8Unorm :
                                       mtlformat(color_format)
     cdesc = MTLm.MTLTextureDescriptor(cfmt, width, height, false)
@@ -241,7 +217,7 @@ function Mantle.Framebuffer(be::Metal.MetalBackend, width::Integer, height::Inte
         ddesc.storageMode = MTLm.MTLStorageModePrivate
         dtex = MTLm.MTLTexture(dev, ddesc)
     end
-    return MetalFramebuffer(ctex, dtex, Int(width), Int(height), cfmt, dfmt)
+    return MetalFramebuffer(ctex, dtex, Int(width), Int(height), cfmt, dfmt, d)
 end
 
 """
@@ -555,7 +531,6 @@ function compile_pipeline(d::MetalDevice, p::Mantle.GraphicsPipeline,
         desc.vertexFunction = vfun
         ffun === nothing || (desc.fragmentFunction = ffun)
         # Attachments in pass order, matching `air.render_target <i>`.
-        Mantle.checkdepthtarget(p.depth, depth_format !== nothing)
         apply_attachments!(desc, color_formats, depth_format, p.blend)
         state = MTLm.MTLRenderPipelineState(dev, desc)
         dstate = depthstate(dev, p.depth, depth_format)
@@ -719,8 +694,8 @@ colorant carries the channel order. Waits for outstanding GPU work, then reads
 with `getBytes!`.
 """
 function Mantle.readback_framebuffer(fb::MetalFramebuffer)
-    # `getBytes!` is a host copy that does not wait for the queue.
-    Metal.synchronize()
+    # `getBytes!` is a host copy that does not wait for the device's queue.
+    waitidle(fb.dev)
     # The colorant's layout matches the texel's, so bytes are read directly.
     px = Matrix{eltypeof(fb.color_format)}(undef, fb.width, fb.height)
     GC.@preserve px MTLm.getBytes!(pointer(px), fb.color, fb.width * sizeof(eltype(px)),
@@ -972,14 +947,7 @@ Mantle.target_format(fb::MetalFramebuffer) = fb.color_format
 # The inverse of `mtlformat` over a framebuffer's colour formats, for core's
 # `blittarget` and for `readback_framebuffer`.
 
-eltypeof(f::MTLm.MTLPixelFormat) =
-    f === MTLm.MTLPixelFormatBGRA8Unorm      ? BGRA{N0f8} :
-    f === MTLm.MTLPixelFormatBGRA8Unorm_sRGB ? BGRA{N0f8} :
-    f === MTLm.MTLPixelFormatRGBA8Unorm      ? RGBA{N0f8} :
-    f === MTLm.MTLPixelFormatRGBA8Unorm_sRGB ? RGBA{N0f8} :
-    f === MTLm.MTLPixelFormatRGBA16Float     ? RGBA{Float16} :
-    f === MTLm.MTLPixelFormatRGBA32Float     ? RGBA{Float32} :
-    error("no Julia element type recorded for $f; add it beside `mtlformat`")
+eltypeof(f::MTLm.MTLPixelFormat) = Mantle.eltypefor(mtlformat, f)
 
 """
 End the encoder and commit the pass's command buffer.

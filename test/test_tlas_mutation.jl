@@ -66,7 +66,7 @@ end
     @test t.updates == 1 && t.transforms_dirty
     updated = Raycore.instance_buffer(t, second)
     @test getproperty.(updated,:id) == UInt32[21,22]
-    @test all(r -> r.transform == Mantle.mat4_to_vk_transform(moved), updated)
+    @test all(r -> r.transform == Raycore.mat4_to_mat3x4(moved), updated)
     @test delete!(t, first)
     @test !delete!(t, first)
     @test_throws ArgumentError Raycore.instance_buffer(t, first)

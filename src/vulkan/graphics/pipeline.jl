@@ -47,33 +47,18 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
             "stage is what replaces them."))
     end
 
-    frag_mod = create_shader_module(dev, fragment_spirv)
-    front_mod = create_shader_module(dev, mesh_spirv === nothing ? vertex_spirv : mesh_spirv)
-    front_bit = mesh_spirv === nothing ? VK.SHADER_STAGE_VERTEX_BIT : VK.SHADER_STAGE_MESH_BIT_EXT
-    modules = VK.ShaderModule[front_mod, frag_mod]
-
-    stages = VK.PipelineShaderStageCreateInfo[
-        VK.PipelineShaderStageCreateInfo(front_bit, front_mod, "main"),
-        VK.PipelineShaderStageCreateInfo(
-            VK.SHADER_STAGE_FRAGMENT_BIT, frag_mod, "main"),
-    ]
-
-    if geometry_spirv !== nothing
-        geom_mod = create_shader_module(dev, geometry_spirv)
-        push!(modules, geom_mod)
-        push!(stages, VK.PipelineShaderStageCreateInfo(
-            VK.SHADER_STAGE_GEOMETRY_BIT, geom_mod, "main"))
-    end
-
-    if tess_ctrl_spirv !== nothing && tess_eval_spirv !== nothing
-        tc_mod = create_shader_module(dev, tess_ctrl_spirv)
-        te_mod = create_shader_module(dev, tess_eval_spirv)
-        push!(modules, tc_mod, te_mod)
-        push!(stages, VK.PipelineShaderStageCreateInfo(
-            VK.SHADER_STAGE_TESSELLATION_CONTROL_BIT, tc_mod, "main"))
-        push!(stages, VK.PipelineShaderStageCreateInfo(
-            VK.SHADER_STAGE_TESSELLATION_EVALUATION_BIT, te_mod, "main"))
-    end
+    (tess_ctrl_spirv === nothing) == (tess_eval_spirv === nothing) || throw(ArgumentError(
+        "tessellation needs both a control and an evaluation shader"))
+    specs = [mesh_spirv === nothing ? VK.SHADER_STAGE_VERTEX_BIT => vertex_spirv :
+                                      VK.SHADER_STAGE_MESH_BIT_EXT => mesh_spirv,
+             VK.SHADER_STAGE_FRAGMENT_BIT => fragment_spirv]
+    geometry_spirv === nothing || push!(specs, VK.SHADER_STAGE_GEOMETRY_BIT => geometry_spirv)
+    tess_ctrl_spirv === nothing || push!(specs,
+        VK.SHADER_STAGE_TESSELLATION_CONTROL_BIT => tess_ctrl_spirv,
+        VK.SHADER_STAGE_TESSELLATION_EVALUATION_BIT => tess_eval_spirv)
+    modules = [create_shader_module(dev, spirv) for (_, spirv) in specs]
+    stages = [VK.PipelineShaderStageCreateInfo(st, m, "main") for ((st, _), m) in zip(specs, modules)]
+    all_stage_flags = reduce(|, first.(specs))
 
     # Empty vertex input (vertices are pulled by device address), and none for a
     # mesh pipeline, whose topology is the shader's own `OutputTrianglesEXT`.
@@ -111,19 +96,13 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
     # the depth mode: this format must equal the view bound at `vkCmdBeginRendering`,
     # UNDEFINED for none (VUID-vkCmdDraw-pDepthAttachment-06181).
     has_depth = depth_format != VK.FORMAT_UNDEFINED
-    checkdepthtarget(depth, has_depth)
     depth_enable, depth_compare = vk_depth(depth)
+    keep = VK.StencilOpState(VK.STENCIL_OP_KEEP, VK.STENCIL_OP_KEEP, VK.STENCIL_OP_KEEP,
+                             VK.COMPARE_OP_ALWAYS, 0, 0, 0)
+    # No depth-bounds or stencil test.
     depth_stencil = VK.PipelineDepthStencilStateCreateInfo(
-        depth_enable, depth_enable && vk_depth_write(depth),
-        depth_compare,
-        false,    # depth bounds test
-        false,    # stencil test
-        VK.StencilOpState(VK.STENCIL_OP_KEEP, VK.STENCIL_OP_KEEP,
-            VK.STENCIL_OP_KEEP, VK.COMPARE_OP_ALWAYS, 0, 0, 0),
-        VK.StencilOpState(VK.STENCIL_OP_KEEP, VK.STENCIL_OP_KEEP,
-            VK.STENCIL_OP_KEEP, VK.COMPARE_OP_ALWAYS, 0, 0, 0),
-        0.0f0, 1.0f0,
-    )
+        depth_enable, depth_enable && depthwrites(depth), depth_compare,
+        false, false, keep, keep, 0.0f0, 1.0f0)
 
     # Integer attachments are unblended: IDs must remain exact even when the
     # colour target uses alpha blending. Device creation enables independentBlend.
@@ -138,26 +117,10 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
     dynamic_states = [VK.DYNAMIC_STATE_VIEWPORT, VK.DYNAMIC_STATE_SCISSOR]
     dynamic_state = VK.PipelineDynamicStateCreateInfo(dynamic_states)
 
-    all_stage_flags = front_bit | VK.SHADER_STAGE_FRAGMENT_BIT
-    if geometry_spirv !== nothing
-        all_stage_flags |= VK.SHADER_STAGE_GEOMETRY_BIT
-    end
-    if tess_ctrl_spirv !== nothing
-        all_stage_flags |= VK.SHADER_STAGE_TESSELLATION_CONTROL_BIT |
-                            VK.SHADER_STAGE_TESSELLATION_EVALUATION_BIT
-    end
-
-    push_ranges = VK.PushConstantRange[]
-    if push_constant_size > 0
-        push!(push_ranges, VK.PushConstantRange(
-            all_stage_flags, UInt32(0), UInt32(push_constant_size)))
-    end
-
-    ds_layouts = VK.DescriptorSetLayout[]
-    if descriptor_set_layout !== nothing
-        push!(ds_layouts, descriptor_set_layout)
-    end
-
+    push_ranges = push_constant_size > 0 ?
+        [VK.PushConstantRange(all_stage_flags, UInt32(0), UInt32(push_constant_size))] :
+        VK.PushConstantRange[]
+    ds_layouts = descriptor_set_layout === nothing ? VK.DescriptorSetLayout[] : [descriptor_set_layout]
     layout = VK.PipelineLayout(dev, ds_layouts, push_ranges)
 
     rendering_info = VK.PipelineRenderingCreateInfo(
@@ -231,65 +194,36 @@ vk_cull(::NoCull)    = VK.CULL_MODE_NONE
 vk_cull(::CullBack)  = VK.CULL_MODE_BACK_BIT
 vk_cull(::CullFront) = VK.CULL_MODE_FRONT_BIT
 
-vk_depth(::DepthLess)           = (true, VK.COMPARE_OP_LESS)
-vk_depth(::DepthLessEq)         = (true, VK.COMPARE_OP_LESS_OR_EQUAL)
-vk_depth(::DepthGreater)        = (true, VK.COMPARE_OP_GREATER)
-vk_depth(::DepthAlways)         = (true, VK.COMPARE_OP_ALWAYS)
-vk_depth(::DepthLessEqReadOnly) = (true, VK.COMPARE_OP_LESS_OR_EQUAL)
-vk_depth(::DepthOff)            = (false, VK.COMPARE_OP_ALWAYS)
-
-vk_depth_write(::DepthMode) = true
-vk_depth_write(::DepthLessEqReadOnly) = false
-
-# Additive blending of colour and alpha with the given factors.
-blendstate(enable, src, dst, srcalpha, dstalpha,
-           mask = VK.COLOR_COMPONENT_R_BIT | VK.COLOR_COMPONENT_G_BIT |
-                  VK.COLOR_COMPONENT_B_BIT | VK.COLOR_COMPONENT_A_BIT) =
-    VK.PipelineColorBlendAttachmentState(enable, src, dst, VK.BLEND_OP_ADD,
-                                         srcalpha, dstalpha, VK.BLEND_OP_ADD, mask)
-
-vk_blend(::Opaque) = blendstate(false, VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO,
-                                VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO)
-vk_blend(::AlphaBlend) = blendstate(true, VK.BLEND_FACTOR_SRC_ALPHA, VK.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
-                                    VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO)
-vk_blend(::Additive) = blendstate(true, VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ONE,
-                                  VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ONE)
-vk_blend(::NoWrite) = blendstate(false, VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO,
-                                 VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO, VK.ColorComponentFlag(0))
-vk_blend(::Premultiplied) = blendstate(true, VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
-                                       VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA)
-
-"""Record a layout transition of `image`'s first color mip level and layer."""
-function imagebarrier!(cmd, image::VK.Image,
-                              old_layout, new_layout,
-                              src_stage, dst_stage,
-                              src_access, dst_access)
-    barrier = VK.ImageMemoryBarrier(
-        src_access, dst_access,
-        old_layout, new_layout,
-        VK.QUEUE_FAMILY_IGNORED, VK.QUEUE_FAMILY_IGNORED,
-        image,
-        VK.ImageSubresourceRange(VK.IMAGE_ASPECT_COLOR_BIT,
-            UInt32(0), UInt32(1), UInt32(0), UInt32(1)),
-    )
-    VK.cmd_pipeline_barrier(cmd, [], [], [barrier];
-        src_stage_mask=src_stage, dst_stage_mask=dst_stage)
+# (enabled, compare op) of a depth mode.
+function vk_depth(mode::DepthMode)
+    test = depthtest(mode)
+    ops = (less = VK.COMPARE_OP_LESS, lessequal = VK.COMPARE_OP_LESS_OR_EQUAL,
+           greater = VK.COMPARE_OP_GREATER, always = VK.COMPARE_OP_ALWAYS)
+    return test !== nothing, getproperty(ops, something(test, :always))
 end
 
-"""
-    begin_pass!(e, color_view(s), color_image(s), extent; clear_color, load_op,
-                depth_view, depth_image, depth_clear=1f0, depth_load_op,
-                depth_store_op, transition=true)
+function vk_blend(mode::BlendMode)
+    mask = writescolor(mode) ? VK.COLOR_COMPONENT_R_BIT | VK.COLOR_COMPONENT_G_BIT |
+                               VK.COLOR_COMPONENT_B_BIT | VK.COLOR_COMPONENT_A_BIT :
+                               VK.ColorComponentFlag(0)
+    f = blendfactors(mode)
+    vk = (one = VK.BLEND_FACTOR_ONE, srcalpha = VK.BLEND_FACTOR_SRC_ALPHA,
+          oneminussrcalpha = VK.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA)
+    src, dst, srca, dsta = f === nothing ? (VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO,
+                                            VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO) :
+                           map(s -> getproperty(vk, s), f)
+    return VK.PipelineColorBlendAttachmentState(f !== nothing, src, dst, VK.BLEND_OP_ADD,
+                                                srca, dsta, VK.BLEND_OP_ADD, mask)
+end
 
-Begin a dynamic rendering pass; record draws with `draw_in_pass!` and finish with
-`end_pass!`. One colour attachment or vectors of several (fragment location `i`
-writes attachment `i`), with `clear_color` and `load_op` once or once each. A
-clear value means CLEAR, `nothing` means LOAD, and only an explicit load op
-reaches DONT_CARE; `depth_clear` and `depth_load_op` work the same way.
-"""
-begin_pass!(target, color_view::VK.ImageView, color_image::VK.Image,
-               extent::VK.Extent2D; kw...) =
-    begin_pass!(target, [color_view], [color_image], extent; kw...)
+"""Record a layout transition of `image`'s mip `levels` (0-based) of its first layer."""
+function imagebarrier!(cmd, image::VK.Image, old_layout, new_layout, src_stage, dst_stage,
+                       src_access, dst_access; aspect = VK.IMAGE_ASPECT_COLOR_BIT, levels = 0:0)
+    barrier = VK.ImageMemoryBarrier(src_access, dst_access, old_layout, new_layout,
+        VK.QUEUE_FAMILY_IGNORED, VK.QUEUE_FAMILY_IGNORED, image,
+        VK.ImageSubresourceRange(aspect, UInt32(first(levels)), UInt32(length(levels)), UInt32(0), UInt32(1)))
+    VK.cmd_pipeline_barrier(cmd, [], [], [barrier]; src_stage_mask = src_stage, dst_stage_mask = dst_stage)
+end
 
 """One value for every attachment (anything but a vector), or a vector with one
 value each. Any other length is an error."""
@@ -299,6 +233,16 @@ function perattachment(x, n::Integer, what::String)
     error("$what has $(length(x)) entries but the pass has $n colour attachments")
 end
 
+"""
+    begin_pass!(e, color_views, color_images, extent; clear_color, load_op,
+                depth_view, depth_image, depth_clear=1f0, depth_load_op, transition=true)
+
+Begin a dynamic rendering pass; record draws with `draw_in_pass!` and finish with
+`end_pass!`. One colour attachment or vectors of several (fragment location `i`
+writes attachment `i`), with `clear_color` and `load_op` once or once each. A
+clear value means CLEAR, `nothing` means LOAD, and only an explicit load op
+reaches DONT_CARE; `depth_clear` and `depth_load_op` work the same way.
+"""
 function begin_pass!(e::Emitter,
                          color_views::AbstractVector{<:VK.ImageView},
                          color_images::AbstractVector{<:VK.Image},
@@ -308,7 +252,6 @@ function begin_pass!(e::Emitter,
                          depth_image::Union{Nothing, VK.Image}=nothing,
                          depth_clear::Union{Nothing, Float32}=1.0f0,
                          depth_load_op::Union{Nothing, VK.AttachmentLoadOp}=nothing,
-                         depth_store_op::VK.AttachmentStoreOp=VK.ATTACHMENT_STORE_OP_STORE,
                          transition::Bool=true,
                          load_op=nothing)
     cmd = e.cmd
@@ -379,21 +322,13 @@ function begin_pass!(e::Emitter,
             old = dop === VK.ATTACHMENT_LOAD_OP_LOAD ?
                   VK.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL :
                   VK.IMAGE_LAYOUT_UNDEFINED
-            depth_barrier = VK.ImageMemoryBarrier(
-                # Ordered after the previous depth write either way: the transition
-                # is a write itself, so a discarding one is a hazard too.
+            # Ordered after the previous depth write either way: the transition is
+            # a write itself, so a discarding one is a hazard too.
+            imagebarrier!(cmd, depth_image, old, VK.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                VK.PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK.PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
                 VK.ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                VK.ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                    VK.ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                old, VK.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                VK.QUEUE_FAMILY_IGNORED, VK.QUEUE_FAMILY_IGNORED,
-                depth_image,
-                VK.ImageSubresourceRange(VK.IMAGE_ASPECT_DEPTH_BIT,
-                    UInt32(0), UInt32(1), UInt32(0), UInt32(1)),
-            )
-            VK.cmd_pipeline_barrier(cmd, [], [], [depth_barrier];
-                src_stage_mask=VK.PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                dst_stage_mask=VK.PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT)
+                VK.ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK.ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                aspect = VK.IMAGE_ASPECT_DEPTH_BIT)
         end
         depth_clear_val = VK.ClearValue(VK.ClearDepthStencilValue(
             depth_clear === nothing ? 1.0f0 : depth_clear, UInt32(0)))
@@ -401,7 +336,7 @@ function begin_pass!(e::Emitter,
             VK.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
             VK.IMAGE_LAYOUT_UNDEFINED,
             dop,
-            depth_store_op,
+            VK.ATTACHMENT_STORE_OP_STORE,
             depth_clear_val;
             image_view=depth_view,
             resolve_mode=VK.RESOLVE_MODE_NONE,
@@ -419,168 +354,82 @@ function begin_pass!(e::Emitter,
 end
 
 """
-    draw_in_pass!(e, pipeline, vertex_count; push_data, push_bda, instances,
-                  viewport, scissor)
-
-Record a draw inside an active rendering pass. `viewport` and `scissor` are Vulkan
-structs, set only when given.
+Bind the pipeline and push the argument address. A graph gives every draw an
+argument-memory offset, including shaders whose ABI has no arguments, whose layout
+has no push-constant range at all.
 """
-function draw_in_pass!(e::Emitter,
-                           pipeline::VulkanCompiledGraphicsPipeline,
-                           vertex_count::Integer;
-                           push_data::Vector{UInt8}=UInt8[],
-                           # The device address by value; `push_data` allocates per draw.
-                           push_bda::UInt64=UInt64(0),
-                           instances::Integer=1,
-                           viewport::Union{Nothing, VK.Viewport}=nothing,
-                           scissor::Union{Nothing, VK.Rect2D}=nothing)
-    bind_for_draw!(e, pipeline; push_data, push_bda, viewport, scissor)
-    VK.cmd_draw(e.cmd, UInt32(vertex_count), UInt32(instances), UInt32(0), UInt32(0))
-    # Hold the pipeline: the command buffer names it until its submission passes.
+function bind_for_draw!(e::Emitter, pipeline::VulkanCompiledGraphicsPipeline, push_bda::UInt64)
+    VK.cmd_bind_pipeline(e.cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
+    if pipeline.push_constant_size > 0 && push_bda != UInt64(0)
+        bda = Ref(push_bda)
+        GC.@preserve bda VK.cmd_push_constants(e.cmd, pipeline.pipeline_layout,
+            pipeline.push_stage_flags, UInt32(0), UInt32(8),
+            Ptr{Nothing}(Base.unsafe_convert(Ptr{UInt64}, bda)))
+    end
+    # The command buffer names the pipeline until its submission passes.
     hold!(e, pipeline)
+    return nothing
 end
 
 """
-    draw_mesh_in_pass!(e, pipeline, groups; push_data, push_bda, viewport, scissor)
+    draw_in_pass!(e, pipeline, vertex_count; push_bda, instances = 1)
+
+Record a draw inside an active rendering pass; `push_bda` is the argument buffer's
+device address.
+"""
+function draw_in_pass!(e::Emitter, pipeline::VulkanCompiledGraphicsPipeline, vertex_count::Integer;
+                       push_bda::UInt64 = UInt64(0), instances::Integer = 1)
+    bind_for_draw!(e, pipeline, push_bda)
+    VK.cmd_draw(e.cmd, UInt32(vertex_count), UInt32(instances), UInt32(0), UInt32(0))
+end
+
+"""
+    draw_mesh_in_pass!(e, pipeline, groups; push_bda)
 
 Record a mesh draw inside an active rendering pass. `groups` is a workgroup count;
 the mesh stage's `set_mesh_outputs!` says how much geometry each group emits.
 """
-function draw_mesh_in_pass!(e::Emitter,
-                            pipeline::VulkanCompiledGraphicsPipeline,
-                            groups::Integer;
-                            push_data::Vector{UInt8}=UInt8[],
-                            push_bda::UInt64=UInt64(0),
-                            viewport::Union{Nothing, VK.Viewport}=nothing,
-                            scissor::Union{Nothing, VK.Rect2D}=nothing)
-    bind_for_draw!(e, pipeline; push_data, push_bda, viewport, scissor)
+function draw_mesh_in_pass!(e::Emitter, pipeline::VulkanCompiledGraphicsPipeline, groups::Integer;
+                            push_bda::UInt64 = UInt64(0))
+    bind_for_draw!(e, pipeline, push_bda)
     VK.cmd_draw_mesh_tasks_ext(e.cmd, UInt32(groups), UInt32(1), UInt32(1))
-    hold!(e, pipeline)
-end
-
-# A graph gives every draw an argument-memory offset, including shaders whose
-# ABI has no arguments. Such a layout has no push-constant range at all.
-function push_draw_args!(cmd, pipeline::VulkanCompiledGraphicsPipeline,
-                         push_bda::UInt64, push_data::Vector{UInt8})
-    pipeline.push_constant_size == 0 && return nothing
-    # `push_bda` by value if given, else the bytes of `push_data`.
-    if push_bda != UInt64(0)
-        bda = Ref(push_bda)
-        GC.@preserve bda begin
-            VK.cmd_push_constants(cmd, pipeline.pipeline_layout,
-                pipeline.push_stage_flags, UInt32(0), UInt32(8),
-                Ptr{Nothing}(Base.unsafe_convert(Ptr{UInt64}, bda)))
-        end
-    elseif !isempty(push_data)
-        GC.@preserve push_data begin
-            VK.cmd_push_constants(cmd, pipeline.pipeline_layout,
-                pipeline.push_stage_flags, UInt32(0), UInt32(length(push_data)),
-                Ptr{Nothing}(pointer(push_data)))
-        end
-    end
-    return nothing
-end
-
-"""
-Bind the pipeline and set everything a draw reads before the draw command:
-viewport, scissor and the push constant block.
-"""
-function bind_for_draw!(e::Emitter, pipeline::VulkanCompiledGraphicsPipeline;
-                        push_data::Vector{UInt8}=UInt8[],
-                        push_bda::UInt64=UInt64(0),
-                        viewport::Union{Nothing, VK.Viewport}=nothing,
-                        scissor::Union{Nothing, VK.Rect2D}=nothing)
-    cmd = e.cmd
-
-    VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
-
-    if viewport !== nothing
-        VK.cmd_set_viewport(cmd, [viewport])
-    end
-    if scissor !== nothing
-        VK.cmd_set_scissor(cmd, [scissor])
-    end
-
-    push_draw_args!(cmd, pipeline, push_bda, push_data)
-    return nothing
 end
 
 """
     draw_indirect_in_pass!(e, pipeline, commands; first = 1, count = 1, push_bda)
 
 Record `count` draws whose parameters are in device memory, from `commands` (a
-`LavaArray{DrawIndirectCommand}`) starting at the
-1-based `first`, inside an active rendering pass. The host never reads them, so a
-compute pass of the same frame can write them.
+`LavaArray{DrawIndirectCommand}`) starting at the 1-based `first`, inside an
+active rendering pass. The host never reads them, so a compute pass of the same
+frame can write them.
 """
-function draw_indirect_in_pass!(e::Emitter,
-                                   pipeline::VulkanCompiledGraphicsPipeline,
-                                   commands::LavaArray{DrawIndirectCommand,1};
-                                   first::Integer=1,
-                                   count::Integer=1,
-                                   push_bda::UInt64=UInt64(0))
-    cmd = e.cmd
-
-    VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
-
-    if push_bda != UInt64(0)
-        bda = Ref(push_bda)
-        GC.@preserve bda begin
-            VK.cmd_push_constants(cmd, pipeline.pipeline_layout,
-                pipeline.push_stage_flags, UInt32(0), UInt32(8),
-                Ptr{Nothing}(Base.unsafe_convert(Ptr{UInt64}, bda)))
-        end
-    end
-
+function draw_indirect_in_pass!(e::Emitter, pipeline::VulkanCompiledGraphicsPipeline,
+                                commands::LavaArray{DrawIndirectCommand,1};
+                                first::Integer = 1, count::Integer = 1, push_bda::UInt64 = UInt64(0))
+    bind_for_draw!(e, pipeline, push_bda)
     managed = commands.buf[]
-    offset = pool_offset(managed) + commands.offset +
-             (first - 1) * sizeof(DrawIndirectCommand)
-    VK.cmd_draw_indirect(cmd, managed.buffer, UInt64(offset),
-                             UInt32(count), UInt32(sizeof(DrawIndirectCommand)))
-    hold!(e, pipeline)
+    offset = pool_offset(managed) + commands.offset + (first - 1) * sizeof(DrawIndirectCommand)
+    VK.cmd_draw_indirect(e.cmd, managed.buffer, UInt64(offset), UInt32(count),
+                         UInt32(sizeof(DrawIndirectCommand)))
     # The device reads the commands, so the array must outlive the draw.
     hold!(e, commands)
 end
 
 """
-    draw_indexed_in_pass!(e, pipeline, index_count; push_data, push_bda,
-                          indices_buffer, indices_offset, instances)
+    draw_indexed_in_pass!(e, pipeline, index_count; push_bda, indices_buffer,
+                          indices_offset, instances)
 
 Record an indexed draw with `UInt32` indices at byte `indices_offset` of
-`indices_buffer`, inside an active rendering pass. Holds only the pipeline: the
-caller keeps the index buffer alive.
+`indices_buffer` (a `LavaArray` may be a slice of its buffer), inside an active
+rendering pass. Holds only the pipeline: the caller keeps the index buffer alive.
 """
-function draw_indexed_in_pass!(e::Emitter,
-                                   pipeline::VulkanCompiledGraphicsPipeline,
-                                   index_count::Integer;
-                                   push_data::Vector{UInt8}=UInt8[],
-                                   push_bda::UInt64=UInt64(0),
-                                   indices_buffer::VK.Buffer,
-                                   # A `LavaArray` may be a slice of its buffer.
-                                   indices_offset::UInt64=UInt64(0),
-                                   instances::Integer=1)
-    cmd = e.cmd
-
-    VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
-
-    push_draw_args!(cmd, pipeline, push_bda, push_data)
-
-    VK.cmd_bind_index_buffer(cmd, indices_buffer, indices_offset, VK.INDEX_TYPE_UINT32)
-    VK.cmd_draw_indexed(cmd, UInt32(index_count), UInt32(instances),
-                             UInt32(0), Int32(0), UInt32(0))
-    hold!(e, pipeline)
-end
-
-"""
-    set_viewport!(e, viewport, scissor)
-
-Set viewport and scissor once for every following draw in the pass, rather than
-per draw (two commands and two vector allocations each).
-"""
-function set_viewport!(e::Emitter, viewport::VK.Viewport, scissor::VK.Rect2D)
-    VK.cmd_set_viewport(e.cmd, [viewport])
-    VK.cmd_set_scissor(e.cmd, [scissor])
-    nothing
+function draw_indexed_in_pass!(e::Emitter, pipeline::VulkanCompiledGraphicsPipeline,
+                               index_count::Integer; push_bda::UInt64 = UInt64(0),
+                               indices_buffer::VK.Buffer, indices_offset::UInt64 = UInt64(0),
+                               instances::Integer = 1)
+    bind_for_draw!(e, pipeline, push_bda)
+    VK.cmd_bind_index_buffer(e.cmd, indices_buffer, indices_offset, VK.INDEX_TYPE_UINT32)
+    VK.cmd_draw_indexed(e.cmd, UInt32(index_count), UInt32(instances), UInt32(0), Int32(0), UInt32(0))
 end
 
 """
@@ -626,6 +475,3 @@ function use_bindings!(e::Emitter, compiled, bindings)
     return nothing
 end
 
-# Portable form: the area as `w`, `h` instead of a `VK.Extent2D`.
-begin_pass!(e::Emitter, view, image, w::Integer, h::Integer; kw...) =
-    begin_pass!(e, view, image, VK.Extent2D(UInt32(w), UInt32(h)); kw...)

@@ -37,10 +37,6 @@ using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             lava_ray_query_generate_intersection,
             lava_ray_query_get_object_ray_origin,
             lava_ray_query_get_object_ray_direction,
-            # Not in KernelInterface: only this backend's raygen and
-            # closest-hit shaders call them (`raytracing/raycore_compat.jl`).
-            lava_rt_payload_load_f32_at, lava_rt_payload_store_f32_at,
-            lava_rt_terminate_ray, lava_rt_trace_ray,
             lava_workgroup_barrier,
             lava_workgroup_id_x, lava_workgroup_id_y, lava_workgroup_id_z,
             run_spirv_opt, set_position!, spirv_content_hash, subgroup_add,
@@ -80,7 +76,6 @@ include("raytracing/instance_record.jl")
 include("raytracing/acceleration.jl")
 include("raytracing/pipeline.jl")
 include("raytracing/shaders.jl")
-include("raytracing/raycore_compat.jl")
 include("raytracing/hwtlas.jl")
 # `runtime/video_h265.jl` is included by `runtime/video.jl`.
 

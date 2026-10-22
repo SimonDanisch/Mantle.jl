@@ -44,6 +44,10 @@ include(joinpath(@__DIR__, "testbackend.jl"))
         # `target_extent` is the portable question and is already checked.
         t = Mantle.target_view(w)
         @test t !== nothing
+        # A manual pass draws into the acquired image through `currentimage`,
+        # which a backend must answer for its window.
+        @test Mantle.pass!(p -> :drawn, Mantle.Device(TESTBACKEND), Mantle.WindowTarget(w);
+                           clear = (0f0, 0f0, 0f0, 1f0)) === :drawn
         Mantle.present_frame!(Mantle.Device(TESTBACKEND), w)
     finally
         close(w)

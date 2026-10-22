@@ -74,12 +74,12 @@ end
 
 """The KernelAbstractions backend pinned to this device's channel, for kernels
 outside the graph."""
-backend(d::LavaDevice) = LavaBackend(d.bq, d.bq)
+backend(d::LavaDevice) = LavaBackend(d.bq)
 
 """The KernelAbstractions backend that launches on `bq`, a channel from
 `allocate_batch_queue!` or the device's own. Core's `crosswaits!` orders buffers
 shared between channels with timeline-semaphore waits."""
-backend(bq::SubmitChannel{<:VulkanQueue}) = LavaBackend(bq, bq)
+backend(bq::SubmitChannel{<:VulkanQueue}) = LavaBackend(bq)
 
 """What this device can do, as KernelInterface's `DeviceCaps`."""
 caps(dev::LavaDevice) = caps(dev.ctx)
@@ -679,7 +679,7 @@ function kicompile_dispatch(c::Compile{LavaDevice}, dev::LavaDevice, d::Dispatch
     args = devargs(adaptor(dev.bq), raw)
     nd = dispatchrange(d.ndrange)
     kern = kikernel(d.kernel, dev, args)
-    wg, blocks = ki_launch_extents(kern, nd, d.group === nothing ? () : d.group, ())
+    wg, blocks = ki_launch_extents(kern, nd, d.group)
     iter = IterPlan(nothing, pad_to_3d(dev.ctx, blocks), wg, prod(blocks))
     tlas = find_tlas_in_args(raw)
     all_args = (nothing, args...)
@@ -955,26 +955,9 @@ end
 
 # One begin/end per pass, with the clear as pass configuration.
 # `transition = false`: `emitbarriers!` already set the layouts.
-function beginrender!(e::Emitter, ::Plan, pp::PassPlan)
-    p = pp.pass
-    begin_pass!(e,
-                VK.ImageView[target_view(t) for t in p.targets],
-                VK.Image[target_image(t) for t in p.targets],
-                VK.Extent2D(target_extent(first_target(p))...);
-                clear_color = map(clearvalue, p.loads),
-                load_op = map(loadop, p.loads),
-                depth_view = p.depth === nothing ? nothing : target_view(p.depth),
-                depth_clear = p.depth === nothing ? nothing : depthclear(p.depth_load),
-                depth_load_op = p.depth === nothing ? nothing : loadop(p.depth_load),
-                transition = false)
-    # Viewport and scissor are dynamic state; without them nothing rasterizes
-    # and nothing errors.
-    ext = target_extent(first_target(p))
-    set_viewport!(e,
-        VK.Viewport(0f0, 0f0, Float32(ext[1]), Float32(ext[2]), 0f0, 1f0),
-        VK.Rect2D(VK.Offset2D(0, 0), VK.Extent2D(ext...)))
-    return nothing
-end
+beginrender!(e::Emitter, ::Plan, pp::PassPlan) =
+    beginattachments!(e, pp.pass.targets, pp.pass.loads, pp.pass.depth, pp.pass.depth_load;
+                      transition = false)
 endrender!(e::Emitter, ::Nothing) = (end_pass!(e); nothing)
 
 

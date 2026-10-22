@@ -592,9 +592,7 @@ const BACKEND_VOCABULARY = (
     :kernelinterpreter, :kakernelaccesssignature,
     :vertextouches, :fragmenttouches, :shadertouches,
     # ray tracing
-    :build_accel!, :build_blas, :refit_tlas!, :set_anyhit_pipeline!, :trace_rays!,
+    :build_accel!, :build_blas, :refit_tlas!,
     # Native batch hooks apply only to hardware BatchedTLAS implementations.
-    :buildgeometry!, :instancearray, :updatebatch!,
-    :trace_rays_indirect!, :trace_closest_hits!, :trace_closest_hits_indirect!,
-    :trace_closest_hits_anyhit!, :trace_closest_hits_anyhit_indirect!,
+    :buildgeometry!, :geometryref, :instancearray, :updatebatch!,
 )

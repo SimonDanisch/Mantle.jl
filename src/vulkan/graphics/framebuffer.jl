@@ -27,34 +27,25 @@ const COLOR_USAGE = VK.IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                     VK.IMAGE_USAGE_SAMPLED_BIT
 
 """
-    image_2d(ctx, width, height, format, usage) -> Image
+    image_2d(ctx, width, height, format, usage; levels = 1) -> Image
 
 A 2D image with no memory bound. Bind it with `alloc_image_memory` for one of its
 own, or with `bind_image!` to place it in a shared allocation.
 """
-image_2d(ctx::VkContext, width::Integer, height::Integer,
-         format::VK.Format, usage::VK.ImageUsageFlag) =
-    VK.Image(ctx.device,
-        VK.IMAGE_TYPE_2D, format,
-        VK.Extent3D(UInt32(width), UInt32(height), UInt32(1)),
-        UInt32(1), UInt32(1),
-        VK.SAMPLE_COUNT_1_BIT,
-        VK.IMAGE_TILING_OPTIMAL,
-        usage,
-        VK.SHARING_MODE_EXCLUSIVE, UInt32[],
-        VK.IMAGE_LAYOUT_UNDEFINED,
-    )
+image_2d(ctx::VkContext, width::Integer, height::Integer, format::VK.Format,
+         usage::VK.ImageUsageFlag; levels::Integer = 1) =
+    VK.Image(ctx.device, VK.IMAGE_TYPE_2D, format,
+        VK.Extent3D(UInt32(width), UInt32(height), UInt32(1)), UInt32(levels), UInt32(1),
+        VK.SAMPLE_COUNT_1_BIT, VK.IMAGE_TILING_OPTIMAL, usage,
+        VK.SHARING_MODE_EXCLUSIVE, UInt32[], VK.IMAGE_LAYOUT_UNDEFINED)
 
-"""A full-subresource 2D view. Must be created after the image has memory bound."""
+"""A 2D view of `levels` mip levels. Must be created after the image has memory bound."""
 image_view(ctx::VkContext, image::VK.Image, format::VK.Format,
-           aspect::VK.ImageAspectFlag = VK.IMAGE_ASPECT_COLOR_BIT) =
+           aspect::VK.ImageAspectFlag = VK.IMAGE_ASPECT_COLOR_BIT; levels::Integer = 1) =
     VK.ImageView(ctx.device, image, VK.IMAGE_VIEW_TYPE_2D, format,
-        VK.ComponentMapping(
-            VK.COMPONENT_SWIZZLE_IDENTITY, VK.COMPONENT_SWIZZLE_IDENTITY,
-            VK.COMPONENT_SWIZZLE_IDENTITY, VK.COMPONENT_SWIZZLE_IDENTITY,
-        ),
-        VK.ImageSubresourceRange(aspect, UInt32(0), UInt32(1), UInt32(0), UInt32(1)),
-    )
+        VK.ComponentMapping(VK.COMPONENT_SWIZZLE_IDENTITY, VK.COMPONENT_SWIZZLE_IDENTITY,
+                            VK.COMPONENT_SWIZZLE_IDENTITY, VK.COMPONENT_SWIZZLE_IDENTITY),
+        VK.ImageSubresourceRange(aspect, UInt32(0), UInt32(levels), UInt32(0), UInt32(1)))
 
 """
     VulkanFramebuffer(width, height; ctx, depth=true, color_format=VK.FORMAT_B8G8R8A8_SRGB, srgb=false)

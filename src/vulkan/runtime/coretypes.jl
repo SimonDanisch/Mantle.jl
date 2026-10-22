@@ -68,7 +68,6 @@ allocation from another device's memory (reads of 0.0, or a segfault).
 mutable struct MemoryPolicy
     # Trim threshold, soft cap and collection pacing are core's `PoolPolicy`.
     disabled::Bool
-    track_allocs::Bool
     # Whether `maybe_collect` runs, and its cached heap size.
     eager_gc::Bool
     stats::MemoryStats
@@ -139,69 +138,32 @@ context so two devices are instrumented independently. Off by default except
 `freed_bda_scan_poisons` and `launch_arg_validation`; each read is a field load
 behind a branch.
 """
-mutable struct Diagnostics
+Base.@kwdef mutable struct Diagnostics
     # ── allocation / free
-    alloc_debug::Bool
-    free_debug::Bool
-    freed_bda_scan::Bool
+    free_debug::Bool = false
+    freed_bda_scan::Bool = false
     # Whether the scan zeroes the stale BDAs it finds, so the GPU faults on null.
     # Off makes it observe only, to tell a prevented fault from a timing change.
-    freed_bda_scan_poisons::Bool
-    destroy_freed_bdas_throws::Bool
-    presubmit_scan::Bool
-    presubmit_scan_throws::Bool
-    pack_arg_assert_live::Bool
-    # `UInt64`, not `Any`: `submit!` scans when `slab_dump_target != UInt64(0)`,
-    # which `nothing` passes, and then every submit scanned the arg slab
-    # (~41 µs per dispatch).
-    slab_dump_target::UInt64
-    # ── dispatch / batch
-    batch_timing::Bool
-    dispatch_logging::Bool
-    dispatch_log_file::Union{Nothing,String}
-    dispatch_timing::Bool
-    # ── compiler / cache
-    launch_arg_validation::Bool
-    spirv_dump_dir::Union{Nothing,String}
-    spirv_dump_counter::Int
-    kernel_debug_counter::Int
-    broadcast_probe::Any
-
+    freed_bda_scan_poisons::Bool = true
+    destroy_freed_bdas_throws::Bool = false
+    # ── dispatch
+    dispatch_logging::Bool = false
+    dispatch_log_file::Union{Nothing,String} = nothing
+    dispatch_timing::Bool = false
+    launch_arg_validation::Bool = true
     # ── logs the flags above fill
-    alloc_log::Vector{NamedTuple}
-    free_log::Vector{NamedTuple}
-    freed_bda_scan_log::Vector{NamedTuple}
-    slab_dump_log::Vector{NamedTuple}
-    # Call site => (count, bytes), filled when `track_allocs` is on.
-    alloc_trace::Dict{Symbol,Tuple{Int,Int}}
-    alloc_trace_lock::ReentrantLock
-    # The rolling dispatch log `throw_with_validation_context` prints, and the
-    # per-batch wait times behind `batch_timing`.
-    dispatch_log::Vector{String}
-    batch_wait_times::Vector{Float64}
-    batch_wait_info::Vector{String}
-    batch_wait_dispatches::Vector{Int}
+    free_log::Vector{NamedTuple} = NamedTuple[]
+    freed_bda_scan_log::Vector{NamedTuple} = NamedTuple[]
+    # The rolling dispatch log `throw_with_validation_context` prints.
+    dispatch_log::Vector{String} = String[]
     # Set inside `no_pipeline_compilation`; the pipelines the driver then refused to compile.
-    no_pipeline_compile::Bool
-    pipeline_compile_misses::Vector{String}
-    pipeline_compiles_refused::Int
+    no_pipeline_compile::Bool = false
+    pipeline_compile_misses::Vector{String} = String[]
+    pipeline_compiles_refused::Int = 0
     # Atomics: `submit!` may run off the main thread.
-    flush_counter::Threads.Atomic{Int}
-    total_dispatches::Threads.Atomic{Int}
-    # Closed command buffers that began with the global barrier (one per
-    # one-shot and per recording); see `headbarrier!`.
-    head_barriers::Threads.Atomic{Int}
+    flush_counter::Threads.Atomic{Int} = Threads.Atomic{Int}(0)
+    total_dispatches::Threads.Atomic{Int} = Threads.Atomic{Int}(0)
 end
-
-Diagnostics() = Diagnostics(false, false, false, true, false, false, false, false, UInt64(0),
-                            false, false, nothing, false,
-                            true, nothing, 0, 0, nothing,
-                            NamedTuple[], NamedTuple[], NamedTuple[], NamedTuple[],
-                            Dict{Symbol,Tuple{Int,Int}}(), ReentrantLock(),
-                            String[], Float64[], String[], Int[],
-                            false, String[], 0,
-                            Threads.Atomic{Int}(0), Threads.Atomic{Int}(0),
-                            Threads.Atomic{Int}(0))
 
 const VAL_RING_SLOTS      = 64
 const VAL_RING_SLOT_BYTES = 2048
@@ -291,8 +253,7 @@ end
 
 # `DeviceCaps` is `KernelInterface`'s; `caps(ctx)` fills it. On this backend
 # `cores` and `warps` are 0 when unreported (only `VK_NV_shader_sm_builtins` and
-# `VK_AMD_shader_core_properties2` report them); `shader_warps_per_sm` returns
-# `nothing` then.
+# `VK_AMD_shader_core_properties2` report them).
 # `coopmatsubgroup` is not `subgroup`: coopmat pipelines are pinned to
 # `COOPMAT_SUBGROUP` (`pipeline.jl`), so on RDNA 3.5 (default 64, pinned 32) a
 # coopmat workgroup sized in `subgroup` units has twice the threads the kernel indexes.

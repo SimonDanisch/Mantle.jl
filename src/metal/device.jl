@@ -16,8 +16,6 @@ mutable struct MetalDevice{Q} <: Device
     pool::Pool
     # Built on first `caps` call (`caps.jl`).
     caps::Union{Nothing,DeviceCaps}
-    # The hardware-traversal pipeline, compiled on first trace (`trace.jl`).
-    trace_pipeline::Union{Nothing,MTL.MTLComputePipelineState}
     # Per-argument access summaries keyed on the inferred signature, asked per
     # dispatch per build; a property of the code, not the graph.
     accesses::AccessCache
@@ -104,7 +102,7 @@ metalqueue(dev::MTL.MTLDevice) = LegacyQueue(dev)
 
 function MetalDevice(mtldev::MTL.MTLDevice, q, debug::DebugConfig = DebugConfig())
     checkdebug(mtldev, debug)
-    d = MetalDevice(mtldev, q, Pool(), nothing, nothing, AccessCache(), CompilationCache{Any,Any}(),
+    d = MetalDevice(mtldev, q, Pool(), nothing, AccessCache(), CompilationCache{Any,Any}(),
                     Dict{UInt,Metal.Managed}(), debug, false, Metal.ConcreteBatchedQueue[], 0)
     # Registered before anything allocates on it, so the exit hook reaches it.
     push!(METAL.live, WeakRef(d))

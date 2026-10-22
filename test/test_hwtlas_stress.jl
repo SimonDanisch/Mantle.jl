@@ -55,7 +55,7 @@ end
 
 """Translation as `Mat3x4f` (row-major 3×4), the form an instance stores, for
 `update_transform!`."""
-mat3x4translation(dx, dy, dz) = Mantle.mat4_to_vk_transform(tlastranslation(dx, dy, dz))
+mat3x4translation(dx, dy, dz) = Raycore.mat4_to_mat3x4(tlastranslation(dx, dy, dz))
 
 # ------------------------------------------------------------------------------
 # Shared setup

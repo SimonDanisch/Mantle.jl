@@ -46,7 +46,6 @@ import Vulkan.VkCore: VkMemoryBarrier, VK_STRUCTURE_TYPE_MEMORY_BARRIER,
     VK_PIPELINE_STAGE_TRANSFER_BIT, VkDependencyFlags
 # `vkCmdPipelineBarrier` is a per-device pointer, resolved in the `VkContext`
 # constructor.
-@inline barrier_fptr(bq::SubmitChannel{<:VulkanQueue}) = (ctxof(bq)).cmd_pipeline_barrier_fptr
 
 # VK.jl types `PIPELINE_STAGE_2_ALL_COMMANDS_BIT` as the sync1
 # `PipelineStageFlag`; sync2 fields need a `PipelineStageFlag2` (same value, 0x10000).
@@ -234,7 +233,6 @@ end
 @inline function headbarrier!(cmd::VK.CommandBuffer, ctx::VkContext)
     both = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT
     memorybarrier!(cmd,ctx,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,both,both)
-    Threads.atomic_add!(ctx.diag.head_barriers, 1)
     return nothing
 end
 
@@ -414,40 +412,6 @@ function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Clos
             sem.vks, UInt64(v), UInt64(stage), UInt32(0))
     end
 
-    # Opt-in debug scan for stale device addresses in argument memory before the
-    # GPU reads them; costs hundreds of µs per submit.
-    if ctx.diag.presubmit_scan
-        unknowns = scan_slabs_for_unknown_bdas(bq)
-        if !isempty(unknowns)
-            @warn "Pre-submit found $(length(unknowns)) unknown BDA(s) in argument memory"
-            for u in unknowns
-                @warn "  STALE: slab=$(u.slab) idx=$(u.idx) offset=$(u.offset) val=0x$(string(u.val, base=16, pad=16))"
-            end
-            if ctx.diag.presubmit_scan_throws
-                throw(LavaError("submit!", "stale BDA in argument memory", "see warnings"))
-            end
-        end
-    end
-
-    # Opt-in debug: log the offsets in the unified arena that hold
-    # `slab_dump_target`.
-    if ctx.diag.slab_dump_target != UInt64(0)
-        target = ctx.diag.slab_dump_target
-        hits = Int[]
-        for blk in unifiedblocks(ctx)
-            mb = (blk.memory::BufferBlock).ref[]::VkManagedBuffer
-            mb.mapped_ptr == Ptr{UInt8}(0) && continue
-            p = Ptr{UInt64}(mb.mapped_ptr)
-            for k in 0:(Int(mb.size) ÷ 8 - 1)
-                unsafe_load(p, k+1) == target && push!(hits, k*8)
-            end
-        end
-        if !isempty(hits)
-            push!(ctx.diag.slab_dump_log,
-                  (sub=Int(token), target=target, offsets=hits))
-        end
-    end
-
     raw_subs = q.raw_submits
     # This device's pointer from the dispatch table; the lookup allocates nothing.
     fptr = VK.function_pointer(VK.global_dispatcher[], vkdevice(bq), :vkQueueSubmit2)
@@ -476,19 +440,6 @@ function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Clos
     end
 
     q.prev_dispatch_info = q.last_dispatch_info
-    dg = ctx.diag
-    # Opt-in debug: wait for each submission to time it; serializes the queue.
-    if dg.batch_timing
-        t0 = time()
-        wr = VK.wait_semaphores(vkdevice(bq),
-            VK.SemaphoreWaitInfo([timelineof(bq)], [token]),
-            typemax(UInt64))
-        push!(dg.batch_wait_times, time() - t0)
-        push!(dg.batch_wait_info, driver(bq).last_dispatch_info)
-        push!(dg.batch_wait_dispatches, ncb)
-        # Do not throw here; mark device loss so the next gate fires.
-        mark_if_lost!(bq, wr)
-    end
     return token
 end
 
@@ -791,24 +742,6 @@ Return the unwrapped value on success. On error, mark device loss for
 end
 @inline throw_if_error(ctx::VkContext, result) = throw_if_error(ctx, "Vulkan call", result)
 @inline throw_if_error(bq::SubmitChannel{<:VulkanQueue}, args...) = throw_if_error(ctxof(bq), args...)
-
-"""
-    queue_submit!(bq, submits; fence=VK.Fence(C_NULL))
-
-`vkQueueSubmit` through `throw_if_error`.
-"""
-@inline queue_submit!(bq::SubmitChannel{<:VulkanQueue}, submits::AbstractVector{VK.SubmitInfo};
-                      fence=VK.Fence(C_NULL)) =
-    throw_if_error(bq, "vkQueueSubmit", VK.queue_submit(vkqueue(bq), submits; fence=fence))
-
-"""
-    queue_submit_2!(bq, submits; fence=VK.Fence(C_NULL))
-
-`vkQueueSubmit2` through `throw_if_error`.
-"""
-@inline queue_submit_2!(bq::SubmitChannel{<:VulkanQueue}, submits::AbstractVector{VK.SubmitInfo2};
-                        fence=VK.Fence(C_NULL)) =
-    throw_if_error(bq, "vkQueueSubmit2", VK.queue_submit_2(vkqueue(bq), submits; fence=fence))
 
 """
     wait_for_fences!(bq, fences; wait_all=true, timeout=typemax(UInt64))

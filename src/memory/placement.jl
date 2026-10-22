@@ -1,4 +1,4 @@
-alignup(x::Integer, a::Integer) = ((x + a - 1) ÷ a) * a
+alignup(x::Integer, a::Integer) = a <= 1 ? x : cld(x, a) * a
 
 """
 Two items conflict if they are ever live at the same instant. With gaps this is

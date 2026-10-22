@@ -424,7 +424,6 @@ struct Immediate end
 
 mutable struct Plan{D,H<:Tuple}
     graph::Graph{D}
-    transitions::Vector{Transition}
     passes::Vector{PassPlan}
     pipelines::Set{Any}
     slabs::Vector{Any}                  # shared region of each arena, not owned
@@ -479,9 +478,23 @@ mutable struct Plan{D,H<:Tuple}
     # needs a recompile, since `passes` hold concrete device arrays; `remap!` runs
     # mid-growth, so `run!`'s per-frame `refit!` does it.
     replaced::Bool
-    # Set at teardown so `free!` and the finalizer cannot both run it. Last because
-    # the constructor is positional.
+    # Set at teardown so `free!` and the finalizer cannot both run it.
     @atomic freed::Bool
+
+    # The compiled fields are set by `install!`.
+    function Plan(g::Graph{D}, hostwritten::H, alias::Bool, policy::Policy, budget::Float64,
+                  profile::Bool) where {D,H<:Tuple}
+        pl = new{D,H}()
+        pl.graph, pl.hostwritten, pl.alias, pl.policy = g, hostwritten, alias, policy
+        # `stamped`: `recordplan!` decides it again for a recording.
+        pl.budget, pl.profile, pl.stamped = budget, profile, profile
+        pl.passes, pl.passcost, pl.partition = PassPlan[], Float64[], UnitRange{Int}[]
+        pl.profiler, pl.recording = nothing, nothing
+        pl.patchtab, pl.pending_patches = Dict{UInt64,Vector{Tuple{Any,Int}}}(), Tuple{Any,Int,UInt64}[]
+        pl.stale, pl.replaced = false, false
+        @atomic pl.freed = false
+        return pl
+    end
 end
 
 """
@@ -493,7 +506,6 @@ mutable struct Compile{D} <: Compilation
     alias::Bool
     policy::Policy
     analysis::Analysis
-    transitions::Vector{Transition}            # Barriers
     prepass::IdDict{Pass,Vector{Transition}}
     passes::Vector{PassPlan}                          # Pipelines
     pipelines::Set{Any}

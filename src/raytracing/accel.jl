@@ -24,14 +24,6 @@ end
         Adapt.adapt(to, accel.instances))
 end
 
-# Optional traversal fields default to nothing.
-AdaptedAccel(hwtlas, triangles, offsets, empty) =
-    AdaptedAccel(hwtlas, triangles, offsets, empty, nothing, nothing, nothing)
-AdaptedAccel(hwtlas, triangles, offsets, empty, scene) =
-    AdaptedAccel(hwtlas, triangles, offsets, empty, scene, nothing, nothing)
-AdaptedAccel(hwtlas, triangles, offsets, empty, scene, procedural) =
-    AdaptedAccel(hwtlas, triangles, offsets, empty, scene, procedural, nothing)
-
 # Holds the exposed leaves, not `hwtlas`: the native owner is cyclic through `static_tlas`.
 @inline function holdleaves!(holder, a::AdaptedAccel)
     holdleaves!(holder, a.triangles)
@@ -70,7 +62,7 @@ end
 
 
 """
-    AccelBuildContext(bq, into[, preserves])
+    AccelBuildContext(bq, into, preserves)
 
 What a `build_accel!` callback records builds into: the submit channel `bq`, the
 backend's emitter `into` over the build command buffer, and `preserves`, objects
@@ -81,7 +73,6 @@ mutable struct AccelBuildContext{Q,E}
     into::E
     preserves::Vector{Any}
 end
-AccelBuildContext(bq, into) = AccelBuildContext(bq, into, Any[])
 
 # Procedural geometry. A payload implements `procedural_miss`, `procedural_candidate`
 # and `procedural_commit`; `Nothing` implements them as identities, so a

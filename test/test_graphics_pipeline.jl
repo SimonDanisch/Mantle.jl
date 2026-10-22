@@ -195,6 +195,8 @@ end
         p = pixels[8, 8]
         @test p.r ≈ 1f0 atol=0.05  # red
         @test p.g ≈ 0.5f0 atol=0.05  # green (blended)
+        # Alpha composites "over": 0.5 + (1 - 0.5) * 1 on an opaque target.
+        @test p.alpha ≈ 1f0 atol=0.05
     end
 
     # ── Depth test ──

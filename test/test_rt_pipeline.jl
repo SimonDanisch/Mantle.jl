@@ -10,7 +10,7 @@ this kind, it traverses from inside the shading kernel, so everything that trace
 here is gated on `supports_rt_pipeline`.
 
 The shaders follow Hikari's pattern. The raygen only traces; closest-hit and miss
-take the raygen's arguments (`chit_miss_take_args = true`) and write the result
+take the raygen's arguments and write the result
 at the launch index themselves. `rt_hit_object_trace_ray` followed by
 `rt_reorder_thread` and `rt_hit_object_execute_shader` is the one trace verb: on a
 device without shader execution reordering the first is a plain trace that runs
@@ -68,7 +68,7 @@ wrote, `-2` where no shader ran. The device caches the compiled pipeline by its
 shaders, so a description per call compiles once."""
 function rtp_trace(dev, hw, origins, mask, n = length(origins))
     pipe = Mantle.RayTracingPipeline(; raygen = rtp_raygen, closest_hit = rtp_closesthit,
-                                     miss = rtp_miss, chit_miss_take_args = true)
+                                     miss = rtp_miss)
     out = Mantle.Buffer(dev, fill(-2f0, length(origins)))
     org = Mantle.Buffer(dev, origins)
     g = Mantle.Graph(dev)

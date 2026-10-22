@@ -293,10 +293,6 @@ mutable struct VkContext
     # Hardware queue slots handed back by `release_batch_queue!`, reused before
     # `next_queue_index` advances.
     free_queue_indices::Vector{Int}
-    # A compute+transfer family other than the primary (RADV: family 1, 4
-    # queues). Its queues are created; nothing submits to them.
-    async_queue_family_index::Union{Nothing, UInt32}
-    async_queue_count::Int
     # Set on `ERROR_DEVICE_LOST` and on retirement (`mark_device_lost!`).
     # Finalizers check it to skip Vulkan calls.
     device_lost::Bool
@@ -381,9 +377,6 @@ mutable struct VkContext
     # overwrote it and the first device's commands went through the second
     # device's driver (segfault in lavapipe while dispatching on NVIDIA).
     cmd_pipeline_barrier_fptr::Ptr{Nothing}
-    # Identity for diagnostics, not a cache key. A counter, not `objectid`,
-    # because object ids are reused after collection.
-    id::UInt64
 
     # Per-device caches: they die with the context, so nothing outlives the
     # handles they hold. See `DeviceCaches`.
@@ -393,107 +386,28 @@ mutable struct VkContext
     diag::Diagnostics
 
     # Two-phase init via `new()` so `SubmitChannel` gets the live `ctx`; no
-    # constructor leaves `default_bq` unset. `primary_queue` is the default
-    # channel's queue; the other arguments map to fields.
-    function VkContext(instance::VK.Instance,
-                       physical_device::VK.PhysicalDevice,
-                       device::VK.Device,
-                       queue_family_index::UInt32,
-                       device_name::String,
-                       primary_queue::VK.Queue,
-                       compute_queue::VK.Queue,
-                       rt_pipeline_properties::Union{Nothing, RTPipelineProperties},
-                       debug_messenger::Any,
-                       validation::ValidationRing,
-                       next_queue_index::Int,
-                       max_queue_count::Int,
-                       async_queue_family_index::Union{Nothing, UInt32},
-                       async_queue_count::Int,
-                       device_lost::Bool,
-                       memory_properties::VK.PhysicalDeviceMemoryProperties,
-                       max_wg_dims::NTuple{3, Int},
-                       as_scratch_align::UInt64,
-                       ray_query_available::Bool=false,
-                       ser_available::Bool=false,
-                       conditional_rendering_available::Bool=false,
-                       coopmat_available::Bool=false,
-                       coopmat_shapes=nothing,
-                       coopmat2::CoopMat2Caps=CoopMat2Caps(),
-                       coopvec_available::Bool=false,
-                       maximal_reconvergence_available::Bool=false,
-                       subgroup_uniform_control_flow_available::Bool=false,
-                       subgroup_rotate_available::Bool=false,
-                       mesh_shader_available::Bool=false,
-                       memory_budget_available::Bool=false,
-                       external_memory_available::Bool=false,
-                       gpu_assisted::Bool=false,
-                       debug::DebugConfig=DebugConfig(),
-                       driver_version::AbstractString="unknown",
-                       video_decode_available::Bool=false,
-                       video_decode_queue::Union{Nothing, VK.Queue}=nothing,
-                       video_decode_queue_family_index::Union{Nothing, UInt32}=nothing,
-                       pipeline_exec_props_available::Bool=false)
+    # constructor leaves `default_bq` unset. Every keyword names a field;
+    # `primary_queue` is the default channel's queue.
+    function VkContext(primary_queue::VK.Queue; fields...)
         ctx = new()
-        ctx.instance = instance
-        ctx.physical_device = physical_device
-        ctx.device = device
-        ctx.queue_family_index = queue_family_index
-        ctx.device_name = device_name
-        ctx.compute_queue = compute_queue
-        ctx.rt_pipeline_properties = rt_pipeline_properties
-        ctx.debug_messenger = debug_messenger
-        ctx.validation = validation
-        ctx.next_queue_index = next_queue_index
-        ctx.max_queue_count = max_queue_count
-        ctx.extra_queues = SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}[]
+        for (name, value) in fields
+            setproperty!(ctx, name, value)
+        end
+        ctx.extra_queues = eltype(fieldtype(VkContext, :extra_queues))[]
         ctx.free_queue_indices = Int[]
-        ctx.async_queue_family_index = async_queue_family_index
-        ctx.async_queue_count = async_queue_count
-        ctx.device_lost = device_lost
-        ctx.memory_properties = memory_properties
-        ctx.max_wg_dims = max_wg_dims
-        ctx.as_scratch_align = as_scratch_align
-        ctx.ray_query_available = ray_query_available
-        ctx.ser_available = ser_available
-        ctx.features = TargetFeatures(; ser = ser_available, ray_query = ray_query_available)
-        ctx.conditional_rendering_available = conditional_rendering_available
-        ctx.coopmat_available = coopmat_available
-        ctx.coopmat_shapes = coopmat_shapes === nothing ?
-            eltype(fieldtype(VkContext, :coopmat_shapes))[] : coopmat_shapes
-        ctx.coopmat2 = coopmat2
-        ctx.coopvec_available = coopvec_available
-        ctx.maximal_reconvergence_available = maximal_reconvergence_available
-        ctx.subgroup_uniform_control_flow_available = subgroup_uniform_control_flow_available
-        ctx.subgroup_rotate_available = subgroup_rotate_available
-        ctx.mesh_shader_available = mesh_shader_available
-        ctx.memory_budget_available = memory_budget_available
-        ctx.pipeline_exec_props_available = pipeline_exec_props_available
-        ctx.external_memory_available = external_memory_available
-        ctx.video_decode_available = video_decode_available
-        ctx.video_decode_queue = video_decode_queue
-        ctx.video_decode_queue_family_index = video_decode_queue_family_index
-        ctx.gpu_assisted = gpu_assisted
-        ctx.debug = debug
-        # Set by `VkContext(; …)` once it knows whether the layer loaded.
-        ctx.validating = false
-        ctx.driver_version = driver_version
-        ctx.id = (VK_CONTEXT_COUNTER[] += 1)
+        ctx.features = TargetFeatures(; ser = ctx.ser_available, ray_query = ctx.ray_query_available)
         # Registered before anything can allocate against it, so the exit hook
         # marks it lost (`LIVE_CONTEXTS`).
         push!(LIVE_CONTEXTS, WeakRef(ctx))
         ctx.caches = DeviceCaches()
         ctx.diag = Diagnostics()
-        # Null until `VkContext(; …)` sets it, so a barrier recorded earlier is
-        # skipped rather than jumping to garbage.
-        ctx.cmd_pipeline_barrier_fptr = C_NULL
-        ctx.host_import_alignment = 0
         # Seeded from disk; the header is validated against this physical
         # device first, since `vkCreatePipelineCache` is no safe place to find
         # a mismatch.
-        ctx.pipeline_cache = create_lava_pipeline_cache(
-            device, lava_pipeline_cache_path(device_name, driver_version), physical_device)
+        ctx.pipeline_cache = create_lava_pipeline_cache(ctx.device,
+            lava_pipeline_cache_path(ctx.device_name, ctx.driver_version), ctx.physical_device)
         register_pipeline_cache_atexit!()
-        ctx.default_bq = SubmitChannel(device, primary_queue, queue_family_index, ctx)
+        ctx.default_bq = SubmitChannel(ctx.device, primary_queue, ctx.queue_family_index, ctx)
         return ctx
     end
 end
@@ -563,15 +477,6 @@ function workgroup_matrix_granularity(ctx::VkContext)
     return rows
 end
 
-"""
-    shader_warps_per_sm(ctx) -> Union{Nothing,Int}
-
-Maximum resident subgroups per SM, or `nothing` when unreported (only
-`VK_NV_shader_sm_builtins` reports it).
-"""
-shader_warps_per_sm(ctx::VkContext) =
-    (w = caps(ctx).warps) == 0 ? nothing : w
-
 const VK_CONTEXT_REF = Ref{Union{Nothing, VkContext}}(nothing)
 
 """
@@ -616,13 +521,9 @@ const VK_CONTEXT_LOCK = ReentrantLock()
 """
     device_lost(ctx::VkContext)  ->  Bool
 
-Whether this context's device has been marked lost. The no-argument form reads
-the bound context (`false` if none).
+Whether this context's device has been marked lost.
 """
 device_lost(ctx::VkContext) = ctx.device_lost
-device_lost() = let ctx = VK_CONTEXT_REF[]
-    ctx === nothing ? false : ctx.device_lost
-end
 
 """
     mark_device_lost!(ctx)
@@ -635,12 +536,6 @@ unretired hands its finalizers a device VK.jl may already have destroyed, and
 the driver crashes at the next GC.
 """
 mark_device_lost!(ctx::VkContext) = (ctx.device_lost = true; nothing)
-
-"""
-Source of `VkContext.id`: monotonic, never reused. Nothing in `src/` keys on
-the id; it identifies contexts in diagnostics.
-"""
-const VK_CONTEXT_COUNTER = Ref{UInt64}(0)
 
 """
     vk_context() -> VkContext
@@ -896,16 +791,6 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     queue_priorities = ones(Float32, n_queues)
     queue_ci = [VK.DeviceQueueCreateInfo(qf_idx, queue_priorities)]
 
-    # Queues from a second compute+transfer family, if any (RADV: family 0 is
-    # graphics+compute with 1 queue, family 1 compute-only with 4). Nothing
-    # submits to them.
-    async_qf_idx = find_async_compute_queue_family(phys_dev, qf_idx)
-    async_n_queues = 0
-    if async_qf_idx !== nothing
-        async_max = qf_props[async_qf_idx + 1].queue_count
-        async_n_queues = min(4, Int(async_max))
-        push!(queue_ci, VK.DeviceQueueCreateInfo(async_qf_idx, ones(Float32, async_n_queues)))
-    end
 
     # One video-decode queue whenever offered: extensions and queue have no
     # effect until a decode session exists.
@@ -958,7 +843,7 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     # and QueueFamily memory scope. Wanted: the emitter declares Int64Atomics (also
     # for @localmem), 64-bit subgroup shuffles need extended types
     # (VUID-RuntimeSpirv-None-06275), and Device scope is not QueueFamily scope when
-    # work runs on the async compute family.
+    # work runs on more than one queue family.
     feature!(VK.PhysicalDeviceVulkan12Features,
         (:shader_buffer_int_64_atomics, :shader_shared_int_64_atomics,
          :shader_subgroup_extended_types, :vulkan_memory_model_device_scope);
@@ -1090,37 +975,25 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         end
     end
 
-    ctx = VkContext(
-        instance, phys_dev, device, qf_idx, dev_name,
-        queue, compute_queue,
-        rt_props, debug_messenger, validation,
-        2, n_queues,  # next_queue_index=2 (0=primary, 1=compute), max=n_queues
-        async_qf_idx, async_n_queues,
-        false,        # device_lost (fresh context)
-        mem_props, max_wg,
-        as_scratch_align,
-        has_ray_query,
-        has_ser,
-        has_cond_render,
-        has_coopmat,
-        coopmat_shapes,
-        coopmat2_caps,
-        has_coopvec,
-        has_max_reconv,
-        has_subgroup_ucf,
-        has_subgroup_rotate,
-        has_mesh_shader,
-        has_memory_budget,
-        has_external_memory,
-        gpu_assisted,
-        debug,
-        string(phys_props.driver_version),
-        has_video_decode, video_decode_queue, video_qf_idx,
-        exec_props,
-    )
-    ctx.cmd_pipeline_barrier_fptr = cmd_barrier_fptr
-    ctx.host_import_alignment = host_import_alignment
-    ctx.validating = has_validation
+    # Queue indices 0 and 1 of the primary family are the primary and compute
+    # queues; `allocate_batch_queue!` hands out from 2.
+    ctx = VkContext(queue; instance, physical_device = phys_dev, device,
+        queue_family_index = qf_idx, device_name = dev_name, compute_queue,
+        rt_pipeline_properties = rt_props, debug_messenger, validation,
+        next_queue_index = 2, max_queue_count = n_queues, device_lost = false,
+        memory_properties = mem_props, max_wg_dims = max_wg, as_scratch_align,
+        ray_query_available = has_ray_query, ser_available = has_ser,
+        conditional_rendering_available = has_cond_render, coopmat_available = has_coopmat,
+        coopmat_shapes, coopmat2 = coopmat2_caps, coopvec_available = has_coopvec,
+        maximal_reconvergence_available = has_max_reconv,
+        subgroup_uniform_control_flow_available = has_subgroup_ucf,
+        subgroup_rotate_available = has_subgroup_rotate, mesh_shader_available = has_mesh_shader,
+        memory_budget_available = has_memory_budget, external_memory_available = has_external_memory,
+        host_import_alignment, gpu_assisted, debug, validating = has_validation,
+        driver_version = string(phys_props.driver_version),
+        video_decode_available = has_video_decode, video_decode_queue,
+        video_decode_queue_family_index = video_qf_idx,
+        pipeline_exec_props_available = exec_props, cmd_pipeline_barrier_fptr = cmd_barrier_fptr)
     flag = try_vk_alloc(ctx.default_bq, 16; unified = true)
     flag isa AllocFailure && throw(LavaError("device initialization",
         "could not allocate the 16-byte exception flag: $(flag.code) from $(flag.op)",
@@ -1272,22 +1145,6 @@ function find_graphics_compute_queue_family(phys_dev)
         "device initialization",
         "No compute-capable queue family found",
         "Ensure your GPU supports Vulkan compute"))
-end
-
-"""
-A compute+transfer queue family other than `primary_qf_idx`, or `nothing`.
-"""
-function find_async_compute_queue_family(phys_dev, primary_qf_idx::UInt32)
-    qf_props = VK.get_physical_device_queue_family_properties(phys_dev)
-    for (i, qfp) in enumerate(qf_props)
-        family = UInt32(i - 1)
-        family == primary_qf_idx && continue
-        if (qfp.queue_flags & VK.QUEUE_COMPUTE_BIT) != 0 &&
-           (qfp.queue_flags & VK.QUEUE_TRANSFER_BIT) != 0
-            return family
-        end
-    end
-    return nothing
 end
 
 """
@@ -1539,7 +1396,6 @@ function waitidle(ctx::VkContext)
     throw_if_error(ctx, "vkDeviceWaitIdle", VK.device_wait_idle(ctx.device))
     return nothing
 end
-waitidle(d::VK.Device) = VK.device_wait_idle(d)
 
 supports_graphics(::VkContext) = true
 

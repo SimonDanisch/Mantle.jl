@@ -233,8 +233,8 @@ function compile_draw end
     checkdepthtarget(depth, hasdepth::Bool)
 
 Refuse a depth test against a render target without a depth attachment instead
-of drawing untested. Every backend's `compile_draw` calls it, so the refusal is
-the same everywhere.
+of drawing untested. Core calls it before every `compile_draw`, for raster and
+mesh pipelines alike.
 """
 function checkdepthtarget(depth, hasdepth::Bool)
     depth isa DepthOff || hasdepth || throw(ArgumentError(

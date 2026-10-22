@@ -16,6 +16,7 @@
 # Both halves are pinned here from the outside: same plan object, right numbers.
 
 using Test, Mantle, KernelAbstractions
+import KernelInterface as KI
 import Lava   # the extension trigger
 using ColorTypes: RGBA
 using GeometryBasics: Vec4f
@@ -56,6 +57,29 @@ function _movepatch_chainplan(dev, n, nstage)
     out = M.Buffer(dev, zeros(Float32, n))
     M.dispatch!(g, _movepatch_bump!, (out, t[end]), n; name = "out")
     (; out, plan = M.record!(M.Plan(g; budget = Inf)), keep = (seed, t))
+end
+
+# The same copy as a plain KernelInterface kernel, which has no KA context argument.
+function _movepatch_kicopy!(dst, src)
+    i = KI.get_global_id().x
+    i <= length(dst) && (@inbounds dst[i] = src[i])
+    return nothing
+end
+
+"""Both copies and a render pass: where a device records no render pass, the plan
+is walked, and every run calls the kernels itself."""
+function _movepatch_walkedplan(dev, src, out, kiout, n)
+    g = M.Graph(dev)
+    M.dispatch!(g, _movepatch_copy!, (out, src), n; name = "copy")
+    M.dispatch!(g, _movepatch_kicopy!, (kiout, src), n; name = "kicopy")
+    img = M.Transient.Image(g, RGBA{Float16}, (8, 8))
+    M.render!(g, "tri", img => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+        M.draw!(p, _MOVEPATCH_TRI, (), 3)
+    end
+    M.copy!(g, "read", M.Buffer(dev, zeros(RGBA{Float16}, 64)), img)
+    pl = M.Plan(g; budget = Inf)
+    M.recordable(dev, pl) && M.record!(pl)
+    return pl
 end
 
 """Two transients alive at once — the placement that forces the arena to grow."""
@@ -107,6 +131,29 @@ const _MOVEPATCH_TRI = M.Rasterizer(; vertex = M.VertexShader(_movepatch_tri_ver
 
     @test pl.recording === rec                      # patched: the same recording ran
     @test Array(M.storage(out)) == fill(2f0, n)     # …and it read the NEW store
+    M.free!(pl)
+end
+
+@testset "a resize!d buffer reaches the next run of a walked plan" begin
+    dev = M.Device(TESTBACKEND)
+    be = M.backend(dev)
+    n = 64
+    src = M.Buffer(dev, ones(Float32, n))
+    out = M.Buffer(dev, zeros(Float32, n))
+    kiout = M.Buffer(dev, zeros(Float32, n))
+    pl = Base.invokelatest(_movepatch_walkedplan, dev, src, out, kiout, n)
+    M.run!(pl)
+    KA.synchronize(be)
+    @test Array(M.storage(out)) == ones(Float32, n)
+    @test Array(M.storage(kiout)) == ones(Float32, n)
+    # A walked plan has no recording to patch: its next run must resolve `src`
+    # again rather than read the store it was compiled against.
+    M.resize!(src, 4n)
+    copyto!(M.storage(src), fill(2f0, 4n))
+    M.run!(pl)
+    KA.synchronize(be)
+    @test Array(M.storage(out)) == fill(2f0, n)
+    @test Array(M.storage(kiout)) == fill(2f0, n)
     M.free!(pl)
 end
 

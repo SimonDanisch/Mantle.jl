@@ -38,7 +38,7 @@ if Mantle.supports_hwtlas(TESTBACKEND)
     positions = Mantle.devicearray(TESTBACKEND, [grid(i) for i in 1:N])
     phys = Mantle.devicearray(TESTBACKEND, Raycore.InstanceRecord, N)
     rend = Mantle.devicearray(TESTBACKEND, Raycore.InstanceRecord, N)
-    writegrains! = KI.Kernel(TESTBACKEND, Mantle.write_grain_instances_kernel)
+    writegrains! = KI.Kernel(TESTBACKEND, write_grain_instances_kernel)
 
     # Initial instance record write.
     writegrains!(positions, quats, radius, phys, rend; ndrange = N)

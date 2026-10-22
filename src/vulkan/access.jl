@@ -29,15 +29,13 @@ end
 isdevicearray(::LavaArray) = true
 
 """
-The union of what a trace's shaders do to `args`. The raygen and any-hit
-shaders always take the arguments (`rt_stages` compiles any-hit at
-`raygen_tt`); closest-hit and miss only with `chit_miss_take_args`.
+The union of what a trace's shaders do to `args`; every shader takes them
+(`rt_stages`).
 """
 function kerneltouches(dev::LavaDevice, pipe::RayTracingPipeline, args::Tuple, ndrange, group)
     argT = map(a -> devicetype(dev, a), args)
     merged = fill(NOTOUCH, length(args))
-    for (sh, witharg) in shaderargs(pipe)
-        witharg || continue
+    for sh in shaders(pipe)
         ts = accessof(Lava.kernelinterpreter(sh, Tuple{argT...}), sh, argT;
                       cache = accesscache(dev))
         for i in eachindex(merged)
@@ -50,19 +48,9 @@ end
 """What each shader does to what it closed over, in `shaders` order."""
 function shadertouches(dev::LavaDevice, pipe::RayTracingPipeline, args::Tuple)
     argT = map(a -> devicetype(dev, a), args)
-    return [begin
-                tt = witharg ? argT : ()
-                accessof(Lava.kernelinterpreter(sh, Tuple{tt...}), sh, tt; cache = accesscache(dev))[1]
-            end
-            for (sh, witharg) in shaderargs(pipe)]
+    return [accessof(Lava.kernelinterpreter(sh, Tuple{argT...}), sh, argT; cache = accesscache(dev))[1]
+            for sh in shaders(pipe)]
 end
-
-"""Each shader beside whether it is compiled with the raygen's arguments."""
-shaderargs(p::RayTracingPipeline) =
-    ((p.raygen_func, true),
-     ((c, p.chit_miss_take_args) for c in p.closesthit_funcs)...,
-     (p.miss_func, p.chit_miss_take_args),
-     (p.anyhit_func === nothing ? () : ((p.anyhit_func, true),))...)
 
 # Draw stages are compiled as wrappers (`resolve_shader_pair`) that add the
 # varyings and outputs, so accesses are inferred on the wrapper; the user

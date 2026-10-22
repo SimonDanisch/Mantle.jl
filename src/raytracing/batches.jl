@@ -112,32 +112,22 @@ function sethidden!(bs::InstanceBatches, h::Raycore.TLASHandle, hidden::Bool)
 end
 
 """
-    trianglemetadata(Tri, batches, [Val(false)])
+    trianglemetadata(Tri, batches) -> (; triangles, hits)
 
 Concatenate each batch's shading triangles in registration order and give each
 instance its batch's zero-based triangle offset (`hits`), or `NOTRIANGLES` for a
-triangle-free batch. Hidden batches keep their positions. `Val(true)` also
-returns the raw per-batch (`starts`) and per-instance (`raw`) offsets
-`HardwareAccel` uses.
+triangle-free batch. Hidden batches keep their positions.
 """
-function trianglemetadata(::Type{Tri}, batches::InstanceBatches,
-                          ::Val{Bookkeeping} = Val(false)) where {Tri,Bookkeeping}
+function trianglemetadata(::Type{Tri}, batches::InstanceBatches) where {Tri}
     triangles = Vector{Tri}(undef, sum(b -> length(b.triangles), batches; init=0))
     hits = Vector{UInt32}(undef, ninstances(batches))
-    raw = Bookkeeping ? similar(hits) : nothing
-    starts = Bookkeeping ? Vector{UInt32}(undef, length(batches)) : nothing
     offset, first = 0, 1
-    for (i, batch) in enumerate(batches)
+    for batch in batches
         ntri = length(batch.triangles)
         copyto!(triangles, offset + 1, batch.triangles, 1, ntri)
-        hit = ntri == 0 ? NOTRIANGLES : UInt32(offset)
-        fill!(view(hits, first:first + batch.n - 1), hit)
-        if Bookkeeping
-            starts[i] = UInt32(offset)
-            fill!(view(raw, first:first + batch.n - 1), UInt32(offset))
-        end
+        fill!(view(hits, first:first + batch.n - 1), ntri == 0 ? NOTRIANGLES : UInt32(offset))
         offset += ntri
         first += batch.n
     end
-    return (; triangles, hits, raw, starts)
+    return (; triangles, hits)
 end

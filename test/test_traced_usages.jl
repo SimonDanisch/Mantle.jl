@@ -63,7 +63,7 @@ tu_miss(src, dst) = nothing
         g = Mantle.Graph(dev)
         plain = Mantle.dispatch!(g, tu_bump!, (a,), 16; name = "plain")
         pipe = Mantle.RayTracingPipeline(; raygen = tu_raygen, closest_hit = tu_chit,
-                                           miss = tu_miss, chit_miss_take_args = true)
+                                           miss = tu_miss)
         tracing = Mantle.trace!(g, pipe, nothing, (a, b), 16)
 
         @test all(U -> !(U <: Traced), last.(plain.usages))
@@ -82,7 +82,7 @@ end
         b = Mantle.Buffer(dev, zeros(Float32, 16))
         g = Mantle.Graph(dev)
         pipe = Mantle.RayTracingPipeline(; raygen = tu_chit, closest_hit = tu_chit,
-                                           miss = tu_miss, chit_miss_take_args = true)
+                                           miss = tu_miss)
         tracing = Mantle.trace!(g, pipe, nothing, (a, b), 16)
         byid = Dict(id => U for (id, U) in tracing.usages)
         @test byid[Mantle.resourceid(g, b)] ===

@@ -167,22 +167,8 @@ kernel void __metal_proc_table_host(device uint *sink [[buffer(0)]],
 { return trace_proc(scene, ox,oy,oz, dx,dy,dz, tmin, tmax, cull, true); }
 """
 
-"""Devices (by `MTLDevice` pointer) whose MSL procedural traversal is registered."""
-const PROC_FUNCS = Dict{Any,Nothing}()
-const PROC_FUNCS_LOCK = ReentrantLock()
-
-function ensure_procedural_linked!(d::MetalDevice)
-    key = pointer(d.dev)
-    Base.@lock PROC_FUNCS_LOCK begin
-        haskey(PROC_FUNCS, key) && return nothing
-        lib = MTL.MTLLibrary(d.dev, PROCEDURAL_MSL)
-        for name in ("__metal_linked_closest_proc", "__metal_linked_any_proc")
-            Metal.register_linked_function!(d.dev, MTL.MTLFunction(lib, name))
-        end
-        PROC_FUNCS[key] = nothing
-    end
-    return nothing
-end
+procedurallib(d::MetalDevice) = linkmsl!(d, :procedural, PROCEDURAL_MSL,
+                                         ("__metal_linked_closest_proc", "__metal_linked_any_proc"))
 
 """
     procedural_payload_bytes(payload) -> MtlVector{UInt8}
@@ -222,9 +208,6 @@ function procedural_resident!(d::MetalDevice, payload)
     return nothing
 end
 
-"""The device-side type of `payload`, the `P` of `ProceduralVisible`."""
-procedural_device_type(payload) = typeof(Metal.mtlconvert(payload))
-
 """
     procedural_table(d, payload, best_type) -> (table, pipeline)
 
@@ -233,10 +216,8 @@ in a one-entry table. A function handle only exists for a pipeline that links th
 function, so the table is built against a pipeline created for that purpose.
 """
 function procedural_table(d::MetalDevice, payload, ::Type{B}) where {B}
-    P = procedural_device_type(payload)
-    fn = compile_procedural_candidate(d, P, B)
-    ensure_procedural_linked!(d)
-    lib = MTL.MTLLibrary(d.dev, PROCEDURAL_MSL)
+    fn = compile_procedural_candidate(d, typeof(Metal.mtlconvert(payload)), B)
+    lib = procedurallib(d)
     host = MTL.MTLFunction(lib, "__metal_proc_table_host")
     desc = MTL.MTLComputePipelineDescriptor()
     desc.computeFunction = host

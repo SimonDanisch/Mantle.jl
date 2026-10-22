@@ -15,25 +15,36 @@ depthimage(fb::VulkanFramebuffer) =
 currentimage(w::VulkanWindow) =
     VulkanAttachment(target_view(w), target_image(w),
                      Int(w.extent.width), Int(w.extent.height))
+target_view(a::VulkanAttachment) = a.view
+target_image(a::VulkanAttachment) = a.image
+target_extent(a::VulkanAttachment) = (a.width, a.height)
+
+"""
+    beginattachments!(e, targets, loads, depth, depth_load; transition)
+
+Open a dynamic-rendering pass over `targets` (anything with `target_view`,
+`target_image` and `target_extent`) and set the whole-attachment viewport: a
+draw without the dynamic viewport and scissor rasterises nothing, silently.
+`transition = false` leaves the layouts to a caller that derives its own barriers.
+"""
+function beginattachments!(e::Emitter, targets, loads, depth, depth_load; transition::Bool)
+    ext = target_extent(isempty(targets) ? depth : first(targets))
+    # Vectors: `perattachment` treats any other container as one value for all.
+    begin_pass!(e, VK.ImageView[target_view(t) for t in targets],
+                VK.Image[target_image(t) for t in targets], VK.Extent2D(ext...);
+                clear_color = [clearvalue(l) for l in loads], load_op = [loadop(l) for l in loads],
+                depth_view = depth === nothing ? nothing : target_view(depth),
+                depth_image = depth === nothing || !transition ? nothing : target_image(depth),
+                depth_clear = depth === nothing ? nothing : depthclearvalue(depth_load),
+                depth_load_op = depth === nothing ? nothing : loadop(depth_load), transition)
+    set_viewport!(e, 0, 0, ext[1], ext[2])
+    return nothing
+end
 
 # Target extent/format forwarding is defined by the resource wrappers.
-"""eltypeof(::VK.Format) -> Type
-
-Element type of a supported attachment format. This projection loses sRGB versus
-UNORM; graph compilation must retain the native format rather than round-trip it."""
-function eltypeof(f::VK.Format)
-    f === VK.FORMAT_B8G8R8A8_SRGB   && return BGRA{N0f8}
-    f === VK.FORMAT_B8G8R8A8_UNORM  && return BGRA{N0f8}
-    f === VK.FORMAT_R8G8B8A8_SRGB   && return RGBA{N0f8}
-    f === VK.FORMAT_R8G8B8A8_UNORM  && return RGBA{N0f8}
-    f === VK.FORMAT_R16G16B16A16_SFLOAT && return RGBA{Float16}
-    f === VK.FORMAT_R32G32B32A32_SFLOAT && return RGBA{Float32}
-    f === VK.FORMAT_D32_SFLOAT      && return Float32
-    f === VK.FORMAT_R32_UINT       && return UInt32
-    f === VK.FORMAT_R32G32_UINT    && return SVector{2,UInt32}
-    throw(ArgumentError("no Julia element type is registered for $f — add it " *
-                        "here and to `vkformat`, which is the other direction"))
-end
+# Loses sRGB versus UNORM; graph compilation keeps the native format rather than
+# round-tripping it.
+eltypeof(f::VK.Format) = eltypefor((T; srgb = false) -> vkformat(VulkanAPI(), T; srgb), f)
 
 """Compiled native pipeline plus the shader defining its packed argument layout."""
 struct VulkanDraw
@@ -80,21 +91,7 @@ function begin_render_pass!(dev::LavaDevice, targets, loads, depth, depth_load)
     bq = dev.bq
     o = openoneshot(bq)
     e = Emitter(o, nothing)
-    first_t = first(targets)
-    begin_pass!(e,
-                VK.ImageView[t.view for t in targets],
-                VK.Image[t.image for t in targets],
-                VK.Extent2D(UInt32(first_t.width), UInt32(first_t.height));
-                # Vectors: `perattachment` treats any other container as one value for all.
-                clear_color = [clearvalue(l) for l in loads],
-                load_op = [loadop(l) for l in loads],
-                depth_view = depth === nothing ? nothing : depth.view,
-                depth_image = depth === nothing ? nothing : depth.image,
-                depth_clear = depth === nothing ? nothing : depthclearvalue(depth_load),
-                depth_load_op = depth === nothing ? nothing : loadop(depth_load))
-    # Whole-attachment viewport by default: a draw without the dynamic viewport
-    # and scissor silently rasterises nothing.
-    set_viewport!(e, 0, 0, first_t.width, first_t.height)
+    beginattachments!(e, targets, loads, depth, depth_load; transition = true)
     return VulkanPassHandle(e, o)
 end
 

@@ -14,6 +14,7 @@
 
 import Adapt, Raycore, Mantle
 import KernelAbstractions
+import KernelInterface
 import LinearAlgebra
 using KernelAbstractions: @kernel, @index, @Const
 using GeometryBasics: Point3f, Vec3f
@@ -167,3 +168,23 @@ movedby(tri, offset) = map(v -> Point3f(v + Vec3f(offset...)), tri)
 
 """The centroid of a vertex triple, to compare with the probe's."""
 tricentroid(tri) = (tri[1] + tri[2] + tri[3]) / 3f0
+
+"""
+    write_grain_instances_kernel(positions, quats, radius, phys, rend)
+
+One work item per grain `i`: an instance record into `phys[i]` (mask `0x02`) and
+one into `rend[i]` (mask `0x04`), each the instance buffer of its own batch. Both
+get custom index `i - 1` and the transform of unit quaternion `quats[i]` (x, y,
+z, w), uniform scale `radius` and translation `positions[i]`.
+"""
+function write_grain_instances_kernel(positions, quats, radius::Float32, phys, rend)
+    i = KernelInterface.get_global_id().x
+    i <= length(positions) || return nothing   # the launch is whole workgroups
+    @inbounds p = positions[i]
+    @inbounds q = quats[i]
+    T = Mantle.Mat3x4f(Mantle.build_4x3_pervec(Mantle.quat_to_rot3x3(q), Vec3f(radius), p))
+    id = (i - 1) % UInt32
+    @inbounds phys[i] = Raycore.InstanceRecord(T, id, UInt32(0x02))
+    @inbounds rend[i] = Raycore.InstanceRecord(T, id, UInt32(0x04))
+    return nothing
+end

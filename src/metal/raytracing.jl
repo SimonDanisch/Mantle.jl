@@ -4,6 +4,10 @@
 # `UInt32` index into `instancedAccelerationStructures`, not by address. Callers
 # write `Raycore.InstanceRecord`s; [`MetalInstanceDescriptor`](@ref) converts.
 
+# The `MTLBuffer` behind an `MtlArray` and the byte offset into it. Views over
+# pool regions share a buffer; binding at offset 0 reads another region's bytes.
+mtlbuffer(a::MtlArray) = (a.data[].buffer, a.offset * sizeof(eltype(a)))
+
 """
     MetalInstanceDescriptor
 

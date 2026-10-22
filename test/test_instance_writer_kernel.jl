@@ -34,7 +34,7 @@ function grain_records()
     rend = Mantle.devicearray(TESTBACKEND, Raycore.InstanceRecord, NGRAINS)
     # A plain KernelInterface kernel since Mantle stopped defining `@kernel`s,
     # so it is launched the way `src/` launches its siblings, `KI.Kernel`.
-    KI.Kernel(TESTBACKEND, Mantle.write_grain_instances_kernel)(positions, quats, RADIUS, phys, rend;
+    KI.Kernel(TESTBACKEND, write_grain_instances_kernel)(positions, quats, RADIUS, phys, rend;
                                                                ndrange = NGRAINS)
     KA.synchronize(TESTBACKEND)
     return phys, rend

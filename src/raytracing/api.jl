@@ -45,20 +45,6 @@ that move far degrade traversal until the structure is rebuilt.
 function refit_tlas! end
 
 """
-    trace_rays!(queue, pipeline, tlas, args...; width, height, depth = 1)
-
-Trace through a [`RayTracingPipeline`](@ref), passing `args` to the raygen shader.
-"""
-function trace_rays! end
-
-"""
-    trace_rays_indirect!(queue, pipeline, tlas, args...; n_rays)
-
-[`trace_rays!`](@ref) with the ray count read from device memory.
-"""
-function trace_rays_indirect! end
-
-"""
     trace!(g, pipeline, accel, args, ndrange; name = nothing) -> pass
 
 Trace as a graph pass, ordered by what it reads and writes; the ray-tracing
@@ -103,43 +89,6 @@ What each of `shaders(pipeline)` does to its own captured state, in the same
 order. A shader that captures nothing answers `NOTOUCH`.
 """
 function shadertouches end
-
-"""
-    trace_closest_hits!(results, rays, accel, n_rays; cull_mask = 0xff)
-
-Trace `rays` and write the nearest intersection of each into `results`. Needs no
-user closest-hit shader.
-"""
-function trace_closest_hits! end
-
-"""
-    trace_closest_hits_indirect!(results, rays, accel, n_rays)
-
-[`trace_closest_hits!`](@ref) with a device-supplied ray count.
-"""
-function trace_closest_hits_indirect! end
-
-"""
-    trace_closest_hits_anyhit!(results, rays, accel, n_rays, extra_args...)
-
-[`trace_closest_hits!`](@ref) with the any-hit shader run, for alpha-tested
-geometry where the nearest *opaque* hit is not the nearest hit.
-"""
-function trace_closest_hits_anyhit! end
-
-"""
-    trace_closest_hits_anyhit_indirect!(results, rays, accel, n_rays, extra_args...)
-
-[`trace_closest_hits_anyhit!`](@ref) with a device-supplied ray count.
-"""
-function trace_closest_hits_anyhit_indirect! end
-
-"""
-    set_anyhit_pipeline!(accel, anyhit_func, raygen_func)
-
-Set the any-hit pipeline used when tracing against `accel`.
-"""
-function set_anyhit_pipeline! end
 
 """
     supports_rt_pipeline(x) -> Bool

@@ -92,10 +92,8 @@ const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
     :makeimage, :makerecording, :present_frame!, :readback_framebuffer,
     :readback_window, :record_draw!, :recorder, :refit_tlas!,
     :release_batch_queue!, :remakeimage!, :reset_device!, :resetrecording!,
-    :screenshot, :set_anyhit_pipeline!, :set_viewport!, :setviewport!,
-    :stages, :storebytes!, :submit!, :trace_closest_hits!,
-    :trace_closest_hits_anyhit!, :trace_closest_hits_anyhit_indirect!,
-    :trace_closest_hits_indirect!, :trace_rays!, :trace_rays_indirect!,
+    :screenshot, :set_viewport!, :setviewport!,
+    :stages, :storebytes!, :submit!,
     :use_bindings!,
     :vertextouches, :fragmenttouches, :shadertouches,
     # Joined 2026-10-10 with the portable lifecycle (`runtime/lifecycle.jl`):

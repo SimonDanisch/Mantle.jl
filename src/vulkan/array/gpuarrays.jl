@@ -84,30 +84,6 @@ Base.Broadcast.BroadcastStyle(::Type{W}) where {T, W <: LinearAlgebra.Transpose{
 Base.Broadcast.BroadcastStyle(::Type{W}) where {T, W <: LinearAlgebra.Adjoint{T}} =
     lavastyle(W, Val(2))
 
-"""
-    lavaroot(x) -> LavaArray
-
-The device array underneath any stack of view wrappers.
-"""
-lavaroot(x::LavaArray) = x
-lavaroot(x::Union{PermutedDimsArray, SubArray, Base.ReshapedArray,
-                  LinearAlgebra.Transpose, LinearAlgebra.Adjoint}) = lavaroot(parent(x))
-
-"""
-    dense(x) -> LavaArray
-
-Materialise a wrapped device array as a dense `LavaArray` by broadcast.
-`Array(x)` and `copyto!` iterate a nested wrapper and hit the scalar-indexing
-guard, so download with `Array(dense(x))`. Other arrays pass through unchanged.
-"""
-dense(x::LavaArray) = x
-function dense(x::AbstractArray)
-    lavabacked(typeof(x)) || return x
-    y = similar(lavaroot(x), eltype(x), size(x))
-    y .= x                      # not copyto!, which iterates
-    return y
-end
-
 const AnyLavaArray{T} = Union{LavaArray{T},
                               SubArray{T, <:Any, <:LavaArray},
                               PermutedDimsArray{T, <:Any, <:Any, <:Any, <:LavaArray},
@@ -198,26 +174,6 @@ flat1(x) = x
 flat1(x::AbstractArray) = reshape(x, length(x))
 flat1(bc::Broadcast.Broadcasted) = Broadcast.broadcasted(bc.f, map(flat1, bc.args)...)
 
-leafsizes(x) = Any[]
-leafsizes(x::AbstractArray) = Any[(size(x), nameof(typeof(x)), IndexStyle(x) === IndexLinear())]
-leafsizes(x::PermutedDimsArray{T,N,perm}) where {T,N,perm} = Any[(size(parent(x)), :Permuted, perm)]
-leafsizes(x::Broadcast.Extruded) = leafsizes(x.x)
-leafsizes(bc::Broadcast.Broadcasted) = reduce(vcat, map(leafsizes, bc.args); init = Any[])
-
-"""
-    probe_broadcast!(path, dest, bc)
-
-When `ctx.diag.broadcast_probe` is a `Dict` (default `nothing`), count the
-broadcast under `(path, dest size, leaf sizes)`. The paths differ by about 3x
-in bandwidth and are chosen by operand shapes.
-"""
-function probe_broadcast!(path, dest, bc)
-    p = vk_context(dest).diag.broadcast_probe
-    p === nothing && return
-    key = (path, size(dest), Tuple(unique(leafsizes(bc))))
-    p[key] = get(p, key, 0) + 1
-    return
-end
 
 # `fastdiv` is a keyword so tests can compare both index paths.
 function GPUArrays._copyto!(dest::AnyLavaArray, bc::Broadcast.Broadcasted;
@@ -230,7 +186,6 @@ function GPUArrays._copyto!(dest::AnyLavaArray, bc::Broadcast.Broadcasted;
     backend = KernelAbstractions.get_backend(dest)
     wg, u, nd = broadcastlaunch(n)
     if ndims(dest) > 1 && IndexStyle(dest) === IndexLinear() && flatok(dest, bc)
-        probe_broadcast!(:flat, dest, bc)
         flat = Broadcast.instantiate(flat1(bc))
         d1 = reshape(dest, n)
         launchbroadcast!(backend, d1, Broadcast.preprocess(d1, flat), LinearPair(), n, u, wg, nd)
@@ -240,13 +195,10 @@ function GPUArrays._copyto!(dest::AnyLavaArray, bc::Broadcast.Broadcasted;
     # One launch per branch, so each sees a concrete pair. Extents are magic
     # numbers built on the host, so `cart32` multiplies instead of dividing.
     if ndims(dest) == 1
-        probe_broadcast!(:linear1d, dest, bc)
         launchbroadcast!(backend, dest, bc, LinearPair(), n, u, wg, nd)
     elseif IndexStyle(dest) === IndexLinear()
-        probe_broadcast!(:mixed, dest, bc)
         launchbroadcast!(backend, dest, bc, MixedPair(broadcastextents(size(dest); fastdiv)), n, u, wg, nd)
     else
-        probe_broadcast!(:cartesian, dest, bc)
         launchbroadcast!(backend, dest, bc, CartesianPair(broadcastextents(size(dest); fastdiv)), n, u, wg, nd)
     end
     return dest

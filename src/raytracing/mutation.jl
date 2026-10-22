@@ -77,7 +77,7 @@ end
 # `Mat3x4f` arrays pass to `instancearray` as they are; anything else, device
 # `Mat4f` arrays included, is converted on the host.
 transformbuffer(t::BatchedTLAS, transforms::AbstractVector) =
-    instancearray(t, Mat3x4f[m isa Mat3x4f ? m : mat4_to_vk_transform(m)
+    instancearray(t, Mat3x4f[m isa Mat3x4f ? m : Raycore.mat4_to_mat3x4(m)
                             for m in Array(transforms)])
 transformbuffer(t::BatchedTLAS, transforms::AbstractVector{Mat3x4f}) =
     instancearray(t, transforms)
@@ -94,7 +94,7 @@ end
 
 function Raycore.update_transform!(t::BatchedTLAS, handle::Raycore.TLASHandle, transform)
     b = requirebatch(t, handle, "update_transform!")
-    canonical = transform isa Mat3x4f ? transform : mat4_to_vk_transform(transform)
+    canonical = transform isa Mat3x4f ? transform : Raycore.mat4_to_mat3x4(transform)
     return Raycore.update_transforms!(t, handle, fill(canonical, b.n))
 end
 

@@ -36,28 +36,28 @@ static inline HitOut pack(float tmax, thread const intersection_result<instancin
     return h;
 }
 
-[[visible]] HitOut __metal_linked_closest(device const SceneAB *scene,
+// `accept_any_intersection` is Metal's spelling of Vulkan's
+// RayFlagsTerminateOnFirstHitKHR: stop at the first hit rather than the nearest.
+static inline HitOut trace(device const SceneAB *scene,
         float ox, float oy, float oz, float dx, float dy, float dz,
-        float tmin, float tmax, uint cull)
+        float tmin, float tmax, uint cull, bool anyhit)
 {
     ray r; r.origin = float3(ox,oy,oz); r.direction = float3(dx,dy,dz);
     r.min_distance = tmin; r.max_distance = tmax;
     intersector<instancing, triangle_data> isect;
+    isect.accept_any_intersection(anyhit);
     return pack(tmax, isect.intersect(r, scene->accel, cull));
 }
 
-// `accept_any_intersection` is Metal's spelling of Vulkan's
-// RayFlagsTerminateOnFirstHitKHR: stop at the first hit rather than the nearest.
+[[visible]] HitOut __metal_linked_closest(device const SceneAB *scene,
+        float ox, float oy, float oz, float dx, float dy, float dz,
+        float tmin, float tmax, uint cull)
+{ return trace(scene, ox,oy,oz, dx,dy,dz, tmin, tmax, cull, false); }
+
 [[visible]] HitOut __metal_linked_any(device const SceneAB *scene,
         float ox, float oy, float oz, float dx, float dy, float dz,
         float tmin, float tmax, uint cull)
-{
-    ray r; r.origin = float3(ox,oy,oz); r.direction = float3(dx,dy,dz);
-    r.min_distance = tmin; r.max_distance = tmax;
-    intersector<instancing, triangle_data> isect;
-    isect.accept_any_intersection(true);
-    return pack(tmax, isect.intersect(r, scene->accel, cull));
-}
+{ return trace(scene, ox,oy,oz, dx,dy,dz, tmin, tmax, cull, true); }
 """
 
 """The hit record the linked MSL functions return; mirrors `HitOut` field for field."""
@@ -72,23 +72,28 @@ struct MetalHit
 end
 @assert sizeof(MetalHit) == 28 "MetalHit must match MSL's HitOut (28 bytes)"
 
-# Compiled once per device: `MTLLibrary(dev, source)` runs the Metal frontend,
-# tens of milliseconds.
-const HWTLAS_FUNCS = Dict{Any,Nothing}()
-const HWTLAS_FUNCS_LOCK = ReentrantLock()
+# Per `MTLDevice`, as Metal.jl's linked-function registry is: `MTLLibrary(dev,
+# source)` runs the Metal frontend, tens of milliseconds.
+const LINKED_MSL = Dict{Tuple{Any,Symbol},MTL.MTLLibrary}()
+const LINKED_MSL_LOCK = ReentrantLock()
 
-function ensure_traversal_linked!(d::MetalDevice)
-    key = pointer(d.dev)
-    Base.@lock HWTLAS_FUNCS_LOCK begin
-        haskey(HWTLAS_FUNCS, key) && return nothing
-        lib = MTL.MTLLibrary(d.dev, HWTLAS_MSL)
-        for name in ("__metal_linked_closest", "__metal_linked_any")
+"""
+    linkmsl!(d, tag, source, names) -> MTLLibrary
+
+Compile `source` once per device and register its `[[visible]]` functions
+`names` for linking into the kernels that call them.
+"""
+function linkmsl!(d::MetalDevice, tag::Symbol, source::String, names)
+    Base.@lock LINKED_MSL_LOCK get!(LINKED_MSL, (pointer(d.dev), tag)) do
+        lib = MTL.MTLLibrary(d.dev, source)
+        for name in names
             Metal.register_linked_function!(d.dev, MTL.MTLFunction(lib, name))
         end
-        HWTLAS_FUNCS[key] = nothing
+        lib
     end
-    return nothing
 end
+traversallib(d::MetalDevice) =
+    linkmsl!(d, :traversal, HWTLAS_MSL, ("__metal_linked_closest", "__metal_linked_any"))
 
 # Metal cannot infer residency through an argument buffer, and a non-resident
 # structure makes rays miss silently. Through Metal.jl's per-queue residency set
@@ -105,7 +110,7 @@ end
 
 const DeviceU8Ptr = Core.LLVMPtr{UInt8, Metal.AS.Device}
 
-@inline function unpack(accel, h::MetalHit)
+@inline function unpackhit(accel, h::MetalHit)
     if h.hit == UInt32(0)
         return (false, accel.empty, h.t, SVector{3,Float32}(1f0, 0f0, 0f0), UInt32(0))
     end
@@ -127,30 +132,6 @@ end
 const MetalAdaptedTri  = AdaptedAccel{<:Any, <:Metal.MtlDeviceArray, <:Any, <:Any, <:Any, Nothing}
 const MetalAdaptedProc = AdaptedAccel{<:Any, <:Metal.MtlDeviceArray, <:Any, <:Any, <:Any, <:Any}
 
-@propagate_inbounds function Raycore.closest_hit(accel::MetalAdaptedTri, ray::Raycore.AbstractRay, mask::Integer)
-    o = ray.o; d = ray.d
-    p = reinterpret(DeviceU8Ptr, pointer(accel.scene))
-    h = ccall("extern __metal_linked_closest", llvmcall, MetalHit,
-              (DeviceU8Ptr, Float32,Float32,Float32, Float32,Float32,Float32,
-               Float32,Float32, UInt32),
-              p, Float32(o[1]), Float32(o[2]), Float32(o[3]),
-              Float32(d[1]), Float32(d[2]), Float32(d[3]),
-              Float32(ray.t_min), Float32(ray.t_max), mask % UInt32)
-    return unpack(accel, h)
-end
-
-@propagate_inbounds function Raycore.closest_hit(accel::MetalAdaptedProc, ray::Raycore.AbstractRay, mask::Integer)
-    o = ray.o; d = ray.d
-    p = reinterpret(DeviceU8Ptr, pointer(accel.scene))
-    h = ccall("extern __metal_linked_closest_proc", llvmcall, MetalHit,
-              (DeviceU8Ptr, Float32,Float32,Float32, Float32,Float32,Float32,
-               Float32,Float32, UInt32),
-              p, Float32(o[1]), Float32(o[2]), Float32(o[3]),
-              Float32(d[1]), Float32(d[2]), Float32(d[3]),
-              Float32(ray.t_min), Float32(ray.t_max), mask % UInt32)
-    return unpack_procedural(accel, h)
-end
-
 """
     unpack_procedural(accel, h::MetalHit)
 
@@ -168,28 +149,21 @@ the tuple shape and primitive type match a triangle hit.
     return (true, prim, h.t, procedural_bary(accel.procedural, best), h.user)
 end
 
-@propagate_inbounds function Raycore.any_hit(accel::MetalAdaptedTri, ray::Raycore.AbstractRay, mask::Integer)
-    o = ray.o; d = ray.d
-    p = reinterpret(DeviceU8Ptr, pointer(accel.scene))
-    h = ccall("extern __metal_linked_any", llvmcall, MetalHit,
-              (DeviceU8Ptr, Float32,Float32,Float32, Float32,Float32,Float32,
-               Float32,Float32, UInt32),
-              p, Float32(o[1]), Float32(o[2]), Float32(o[3]),
-              Float32(d[1]), Float32(d[2]), Float32(d[3]),
-              Float32(ray.t_min), Float32(ray.t_max), mask % UInt32)
-    return unpack(accel, h)
-end
-
-@propagate_inbounds function Raycore.any_hit(accel::MetalAdaptedProc, ray::Raycore.AbstractRay, mask::Integer)
-    o = ray.o; d = ray.d
-    p = reinterpret(DeviceU8Ptr, pointer(accel.scene))
-    h = ccall("extern __metal_linked_any_proc", llvmcall, MetalHit,
-              (DeviceU8Ptr, Float32,Float32,Float32, Float32,Float32,Float32,
-               Float32,Float32, UInt32),
-              p, Float32(o[1]), Float32(o[2]), Float32(o[3]),
-              Float32(d[1]), Float32(d[2]), Float32(d[3]),
-              Float32(ray.t_min), Float32(ray.t_max), mask % UInt32)
-    return unpack_procedural(accel, h)
+# `closest_hit` and `any_hit` for triangle-only and procedural scenes: the linked
+# function and the unpacking differ, the call does not.
+for (verb, linked) in ((:closest_hit, "closest"), (:any_hit, "any")),
+    (A, suffix, unpack) in ((:MetalAdaptedTri, "", :unpackhit), (:MetalAdaptedProc, "_proc", :unpack_procedural))
+    name = "extern __metal_linked_$(linked)$(suffix)"
+    @eval @propagate_inbounds function Raycore.$verb(accel::$A, ray::Raycore.AbstractRay, mask::Integer)
+        o = ray.o; d = ray.d
+        p = reinterpret(DeviceU8Ptr, pointer(accel.scene))
+        h = ccall($name, llvmcall, MetalHit,
+                  (DeviceU8Ptr, Float32,Float32,Float32, Float32,Float32,Float32, Float32,Float32, UInt32),
+                  p, Float32(o[1]), Float32(o[2]), Float32(o[3]),
+                  Float32(d[1]), Float32(d[2]), Float32(d[3]),
+                  Float32(ray.t_min), Float32(ray.t_max), mask % UInt32)
+        return $unpack(accel, h)
+    end
 end
 
 """One batch of instances that all reference the same BLAS."""
@@ -242,8 +216,8 @@ end
 HWTLAS{Tri}(backend::Metal.MetalBackend; kw...) where {Tri} = MetalHWTLAS{Tri}(backend; kw...)
 
 function MetalHWTLAS{Tri}(backend::Metal.MetalBackend) where {Tri}
-    d = Device(MetalAPI())
-    ensure_traversal_linked!(d)
+    d = Device(backend)
+    traversallib(d)
     MetalHWTLAS{Tri}(backend, d,
         MetalBLAS[],
         Mantle.InstanceBatches{MetalInstanceBatch{Tri}}(),
@@ -253,7 +227,7 @@ function MetalHWTLAS{Tri}(backend::Metal.MetalBackend) where {Tri}
         true, false)
 end
 
-Raycore.wait_for_gpu!(t::MetalHWTLAS) = (Metal.synchronize(); t)
+Raycore.wait_for_gpu!(t::MetalHWTLAS) = (waitidle(t.device); t)
 
 AdaptedAccel(t::MetalHWTLAS{Tri}) where {Tri} =
     AdaptedAccel(t, t.tri_gpu, t.off_gpu, Raycore.empty_triangle(Tri), t.scene_buf,
@@ -370,7 +344,6 @@ function Raycore.sync!(t::MetalHWTLAS{Tri}) where {Tri}
     if t.procedural === nothing
         t.scene_buf = MtlArray(reinterpret(UInt64, [t.built.handle.gpuResourceID]))
     else
-        ensure_procedural_linked!(t.device)
         t.proc_payload = procedural_payload_bytes(t.procedural)
         t.proc_table, t.proc_pipeline =
             procedural_table(t.device, t.procedural, typeof(procedural_miss(t.procedural)))

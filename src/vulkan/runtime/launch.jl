@@ -201,14 +201,6 @@ passedas(::Type{<:VkManagedBuffer}) = DeviceAllocation()
     # The kernel reads through this address, so the submission must outlive the
     # buffer and be ordered against whoever wrote it last.
     hold!(batch, buf)
-    if (buf.ctx::VkContext).diag.pack_arg_assert_live
-        st = @atomic :acquire buf.state
-        if st != BUF_STATE_ALIVE
-            throw(LavaError("pack_arg!",
-                "packing buffer with state=$st (not ALIVE) at addr=0x$(string(buf.address, base=16, pad=16))",
-                "buffer was freed but its BDA is being packed into an arg slab — use-after-free"))
-        end
-    end
     unsafe_store!(Ptr{UInt64}(mapped_ptr + offset), buf.address)
     # A single store at the layout slot, so a move can rewrite exactly there.
     recpatch!(batch, buf.address, mapped_ptr + offset)
@@ -287,14 +279,6 @@ specialised launch callers.
     # `invokelatest` keeps compiler invalidations away from the warm launch path.
     compiled = Base.invokelatest(compile_or_lookup, job)::LavaGPUKernel
     linked = get!(() -> link_kernel(ctx, compiled), ctx.caches.linked, compiled)
-
-    dd = ctx.diag.spirv_dump_dir
-    if dd !== nothing && !isempty(dd)
-        ctx.diag.spirv_dump_counter += 1
-        fname = string(nameof(typeof(f)))
-        path = joinpath(dd, "$(lpad(ctx.diag.spirv_dump_counter, 3, '0'))_$(fname).spv")
-        write(path, linked.compiled.spirv_bytes)
-    end
 
     return linked.compiled, linked.pipeline, linked.offsets, linked.byval_sizes
 end

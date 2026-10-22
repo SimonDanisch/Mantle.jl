@@ -187,22 +187,7 @@ function create_swapchain!(win::VulkanWindow; vsync::Bool=true)
         finalize(old_swapchain)
     end
 
-    win.views = VK.ImageView[]
-    for img in win.images
-        view = VK.ImageView(dev, img, VK.IMAGE_VIEW_TYPE_2D, win.format,
-            VK.ComponentMapping(
-                VK.COMPONENT_SWIZZLE_IDENTITY,
-                VK.COMPONENT_SWIZZLE_IDENTITY,
-                VK.COMPONENT_SWIZZLE_IDENTITY,
-                VK.COMPONENT_SWIZZLE_IDENTITY,
-            ),
-            VK.ImageSubresourceRange(
-                VK.IMAGE_ASPECT_COLOR_BIT,
-                UInt32(0), UInt32(1), UInt32(0), UInt32(1),
-            ),
-        )
-        push!(win.views, view)
-    end
+    win.views = VK.ImageView[image_view(win.ctx, img, win.format) for img in win.images]
 
     # One of each sync object per swapchain image.
     n = length(win.images)

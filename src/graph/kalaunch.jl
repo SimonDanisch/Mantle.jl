@@ -149,19 +149,20 @@ function kikernel(f, dev, args)
 end
 
 """
-    ki_launch_extents(kernel::KI.Kernel, ndrange, workgroupsize, numgroups;
-                      max_work_group_size) -> (wg, blocks)
+    ki_launch_extents(kernel::KI.Kernel, ndrange, group) -> (wg, blocks)
 
 The workgroup size and count a KI launch resolves to, as 3-tuples, from KI's
 own `launch_geometry`, so recording backends that fix extents at compile time
-agree with `KI.launch`. It spreads the device limit across the ndrange's axes.
+agree with `KI.launch`. With `group === nothing` KI spreads the device limit
+across the ndrange's axes.
 """
-function ki_launch_extents(kernel::KI.Kernel, ndrange, workgroupsize, numgroups;
-                           max_work_group_size::Int = typemax(Int))
-    blocks, wg = KI.launch_geometry(kernel, numgroups, workgroupsize, ndrange,
-                                    max_work_group_size)
+function ki_launch_extents(kernel::KI.Kernel, ndrange, group)
+    blocks, wg = KI.launch_geometry(kernel, (), groupdims(group), ndrange, typemax(Int))
     return wg, blocks
 end
+groupdims(::Nothing) = ()
+groupdims(g::Integer) = (Int(g),)
+groupdims(g) = map(Int, Tuple(g))
 
 kernelfor(k, ::Nothing, backend) = k(backend)
 kernelfor(k, group, backend) = k(backend, group)
@@ -445,6 +446,7 @@ function compiledraw(c::Compile, p::Pass, d, argoff::Int)
     # A cell's current contents; `rebind!` cannot change their types.
     vargs = argmap(a -> resolve(dev, a), drawargs(d.args))
     fargs = argmap(a -> resolve(dev, a), d.frag_args)
+    checkdepthtarget(d.shader.depth, depth_format !== nothing)
     compiled = compile_draw(dev, d.shader, color_formats, depth_format, vargs, fargs;
                             bindings = d.bindings)
     indices = d.indices === nothing ? nothing : resolve(dev, d.indices)

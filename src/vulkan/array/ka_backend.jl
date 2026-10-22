@@ -22,23 +22,19 @@ end
 
     LavaBackend()                        # process default device
     LavaBackend(ctx)                     # a specific device
-    LavaBackend(bq)                      # one channel for both
-    LavaBackend(dispatch_bq, upload_bq)
+    LavaBackend(bq)                      # a specific channel
 
-KA backend for one Vulkan device. Kernels are recorded on `dispatch_bq`;
-`KA.synchronize` also flushes `upload_bq` when it differs, though no transfer
-path records on it. Every constructor pins its channels, `LavaBackend()`
-included, so a backend never follows a later default device. After
-`reset_device!` it is dead, like the arrays it allocated.
+KA backend for one Vulkan device; kernels are recorded on `dispatch_bq`. Every
+constructor pins its channel, `LavaBackend()` included, so a backend never
+follows a later default device. After `reset_device!` it is dead, like the
+arrays it allocated.
 """
 struct LavaBackend <: KA.Backend
     dispatch_bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
-    upload_bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
 end
 
 LavaBackend() = LavaBackend(vk_context())
-LavaBackend(ctx::VkContext) = (let bq = ctx.default_bq; LavaBackend(bq, bq); end)
-LavaBackend(bq::SubmitChannel{<:VulkanQueue}) = LavaBackend(bq, bq)
+LavaBackend(ctx::VkContext) = LavaBackend(ctx.default_bq)
 
 """
     LavaDeviceBackend <: KA.Backend
@@ -55,12 +51,8 @@ Adapt.adapt_structure(::LavaAdaptor, ::LavaBackend) = LavaDeviceBackend()
 # `Vulkan.Instance` (see `graph/lifetime.jl`) and overflows the stack.
 holdleaves!(holder, ::LavaBackend) = nothing
 
-# The device it launches on; the two channels only when they differ.
-function Base.show(io::IO, b::LavaBackend)
-    print(io, "LavaBackend(", repr(b.dispatch_bq.channel.ctx.device_name))
-    b.upload_bq === b.dispatch_bq || print(io, ", uploads on ", b.upload_bq)
-    print(io, ")")
-end
+# The device it launches on.
+Base.show(io::IO, b::LavaBackend) = print(io, "LavaBackend(", repr(b.dispatch_bq.channel.ctx.device_name), ")")
 
 # Core verbs on the backend. Not beside the `VkContext` methods in
 # `runtime/device.jl`, which is included before `LavaBackend` is defined.
@@ -91,8 +83,7 @@ supports_int64_atomics(ctx::VkContext) =
     VK.get_physical_device_features_2(ctx.physical_device,
         VK.PhysicalDeviceVulkan12Features).next.shader_buffer_int_64_atomics
 supports_int64_atomics(b::LavaBackend) = supports_int64_atomics(vk_context(b))
-# A view is on its parent's device. One method per `AnyLavaArray` wrapper; keep
-# the two lists in step, since `probe_broadcast!` calls `vk_context(dest)`.
+# A view is on its parent's device. One method per `AnyLavaArray` wrapper.
 vk_context(a::SubArray) = vk_context(parent(a))
 vk_context(a::Base.ReshapedArray) = vk_context(parent(a))
 vk_context(a::Base.PermutedDimsArray) = vk_context(parent(a))
@@ -109,13 +100,7 @@ Base.hash(b::LavaBackend, h::UInt) = hash(objectid(vk_context(b)), hash(:LavaBac
 KA.get_backend(a::LavaArray) = LavaBackend((a.buf[].ctx)::VkContext)
 # Wait for all work submitted on the backend's channels, so the host can read
 # results. Dispatches are ordered on the GPU without it.
-function KA.synchronize(backend::LavaBackend)
-    flush!(backend.dispatch_bq)
-    if backend.upload_bq !== backend.dispatch_bq
-        flush!(backend.upload_bq)
-    end
-    return
-end
+KA.synchronize(backend::LavaBackend) = (flush!(backend.dispatch_bq); nothing)
 KA.supports_unified(::LavaBackend) = true
 # `unified = nothing` is KernelInterface's generic spelling of "no preference".
 function KA.allocate(backend::LavaBackend, ::Type{T}, dims::Tuple; unified::Union{Nothing,Bool}=nothing) where T

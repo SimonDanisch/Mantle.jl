@@ -492,27 +492,34 @@ function refit!(pl::Plan)
     moved || return false
     # The recording names the old placement; `run!` re-records before submitting.
     invalidate!(pl)
-    c = compile!(Compile(pl.graph; pl.alias, pl.policy))
-    # Costs are keyed by pass: the recompile may reorder passes.
-    cost = IdDict{Any,Float64}(pp.pass => pl.passcost[i] for (i, pp) in enumerate(pl.passes))
-    pl.transitions, pl.passes, pl.pipelines = c.transitions, c.passes, c.pipelines
-    pl.passcost = [get(cost, pp.pass, NaN) for pp in pl.passes]
-    pl.loops = loopspans([pp.pass for pp in pl.passes])
-    let a = analysis(c)
-        pl.slabs, pl.arenas, pl.offsets, pl.parts = a.regions, a.arenas, a.offsets, a.parts
-        pl.peak, pl.naive = a.peak, a.naive
-        # The recompile may use other arenas; `tenant!` is idempotent.
-        for ar in a.arenas
-            tenant!(pool(pl.graph.dev), ar, pl)
-        end
-    end
-    # New argument layout. The old region is retired, not released: frames in
-    # flight may still read it, and `reclaim!` frees it after they complete.
+    # The old argument layout is retired, not released: frames in flight may
+    # still read it, and `reclaim!` frees it after they complete.
     let am = pl.args
         am === nothing || retire!(pool(pl.graph.dev), pl.graph.dev, am.store)
     end
-    pl.args = makeargmemory(pl.graph.dev, c.passes)
+    install!(pl, compile!(Compile(pl.graph; pl.alias, pl.policy)))
     return true
+end
+
+"""
+    install!(plan, compile) -> plan
+
+Take a compile's passes, placement, loops and argument layout into `plan`,
+keeping the measured cost of every pass that survives (costs are keyed by pass:
+a recompile may reorder them), and register `plan` with its arenas (idempotent).
+"""
+function install!(pl::Plan, c::Compile)
+    cost = IdDict{Any,Float64}(pp.pass => pl.passcost[i] for (i, pp) in enumerate(pl.passes))
+    pl.passes, pl.pipelines = c.passes, c.pipelines
+    pl.passcost = [get(cost, pp.pass, NaN) for pp in pl.passes]
+    pl.loops = loopspans([pp.pass for pp in pl.passes])
+    a = analysis(c)
+    pl.slabs, pl.arenas, pl.offsets, pl.parts = a.regions, a.arenas, a.offsets, a.parts
+    pl.peak, pl.naive = a.peak, a.naive
+    # So a later plan growing the arena patches or invalidates this one.
+    foreach(ar -> tenant!(pool(pl.graph.dev), ar, pl), a.arenas)
+    pl.args = makeargmemory(pl.graph.dev, c.passes)
+    return pl
 end
 
 Base.size(t::TransientImage) = (t.width, t.height)
@@ -871,7 +878,7 @@ rootresource(v::BufferRange) = rootresource(v.parent)
 rootresource(a::Attr) = rootresource(a.resource)
 
 Compile(g::Graph; alias = true, policy = Overlap()) =
-    Compile(g, alias, policy, Analysis(), Transition[],
+    Compile(g, alias, policy, Analysis(),
             IdDict{Pass,Vector{Transition}}(), PassPlan[], Set{Any}())
 
 # Compilation hooks beyond the generic `Compilation` field accessors: usages,
@@ -1035,33 +1042,18 @@ specifics come through [`makeprofiler`](@ref) and [`makeargmemory`](@ref).
 Plan(g::Graph; alias::Bool = true,
             profile::Bool = false, policy::Policy = Overlap(),
             budget::Real = submissionbudget(g.dev)) =
-    # Before the compile: adds the update pass and its `CopyDst` usages.
-    let hw = hostwritten!(g), c = compile!(Compile(g; alias, policy))
-        let a = analysis(c)
-            # With timestamps and a finite budget, profile even unasked: the plan
-            # measures itself once to partition its recording (`partitionranges`).
-            prof = profile || (timestamps(g.dev) && isfinite(budget)) ?
-                   makeprofiler(g.dev, c.passes, true) : nothing
-            pl = Plan(g, c.transitions, c.passes, c.pipelines, a.regions, a.arenas,
-                          a.offsets, a.parts, a.peak, a.naive, prof,
-                          alias, policy,
-                          makeargmemory(g.dev, c.passes), nothing,
-                          Float64(budget), profile, fill(NaN, length(c.passes)),
-                          UnitRange{Int}[], loopspans([pp.pass for pp in c.passes]),
-                          # `stamped`; `recordplan!` decides it again for a recording.
-                          profile,
-                          Dict{UInt64,Vector{Tuple{Any,Int}}}(),
-                          Tuple{Any,Int,UInt64}[], hw, false, false, false)
-            # So a later plan growing the arena patches or invalidates this one.
-            for ar in a.arenas
-                tenant!(pool(g.dev), ar, pl)
-            end
-            # Teardown is not finalizer-safe (move listeners, command buffers), so
-            # the finalizer queues the plan and `reclaim!` frees it on the owning
-            # thread at the next submission.
-            finalizer(p -> retireplan!(pool(p.graph.dev), p), pl)
-            pl
-        end
+    # `hostwritten!` before the compile: it adds the update pass and its `CopyDst` usages.
+    let pl = Plan(g, hostwritten!(g), alias, policy, Float64(budget), profile)
+        c = compile!(Compile(g; alias, policy))
+        install!(pl, c)
+        # With timestamps and a finite budget, profile even unasked: the plan
+        # measures itself once to partition its recording (`partitionranges`).
+        pl.profiler = profile || (timestamps(g.dev) && isfinite(budget)) ?
+                      makeprofiler(g.dev, c.passes, true) : nothing
+        # Teardown is not finalizer-safe (move listeners, command buffers), so the
+        # finalizer queues the plan and `reclaim!` frees it on the owning thread at
+        # the next submission.
+        finalizer(p -> retireplan!(pool(p.graph.dev), p), pl)
     end
 
 """

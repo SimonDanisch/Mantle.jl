@@ -159,6 +159,7 @@ function draw!(device, pipeline::Union{GraphicsPipeline, MeshPipeline},
     # Manual draws resolve arguments here; graph draws resolve them during placement.
     args = argmap(a -> resolve(dev, a), args)
     frag_args = argmap(a -> resolve(dev, a), frag_args)
+    checkdepthtarget(pipeline.depth, depthtarget(target) !== nothing)
     compiled = compile_draw(dev, pipeline, (blittarget(target),), depthtarget(target),
                             args, frag_args; bindings)
     pass!(dev, target; clear = clear_color, depth_clear) do p

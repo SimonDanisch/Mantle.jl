@@ -223,17 +223,13 @@ export RayTracingPipeline, AdaptedAccel
 export procedural_miss, procedural_candidate, procedural_commit, procedural_bary
 export candidate_primitive_index, candidate_object_ray, commit_intersection!
 
-export build_accel!, build_blas_aabb, refit_tlas!, set_anyhit_pipeline!
-export trace_rays!, trace_rays_indirect!
-# `trace!` declares a tracing pass; `trace_rays!` records already planned native work.
+export build_accel!, build_blas_aabb, refit_tlas!
 export trace!, Trace
-export trace_closest_hits!, trace_closest_hits_indirect!
-export trace_closest_hits_anyhit!, trace_closest_hits_anyhit_indirect!
 export primitivevertices
 export Topology, TriangleList, TriangleStrip, LineList, LineStrip, PointList,
        PatchList, LineListAdjacency, LineStripAdjacency
 
-export Mat3x4f, identity_transform, quat_to_rot3x3, build_4x3, build_4x3_pervec
+export Mat3x4f, identity_transform, quat_to_rot3x3, build_4x3_pervec
 export AABB, AABBsGeometry, TrianglesGeometry, GeometryType
 export ConvexShape, UnitCube, support
 export GJKResult, gjk, EPAResult, epa
