@@ -172,7 +172,7 @@ export Usage, ResourceKind, BufferKind, ImageKind, AccelKind
 export Access, ReadOnly, WriteOnly, ReadWrite, NoAccess, Src, Dst
 export Vertices, Indices, Indirect, Predicated, Uniform, Sampled, Present, Undefined
 export CopySrc, CopyDst, TraceRead, TraceBuild, Storage, ColorAttachment, Depth, Unordered, Traced
-export reads, writes, discards, kindof, aliasable, evictable, unordered, inner
+export reads, writes, discards, kindof, unordered, inner
 export Transition, ResourceState, transition!, transitions, needs_transition, barrierhazards
 export stages, access, layout
 

@@ -116,11 +116,6 @@ discards(::Type{<:Usage}) = false
 discards(::Type{ColorAttachment{D}}) where {D} = D
 discards(::Type{Depth{DA,SA,D}}) where {DA,SA,D} = D
 
-"""Whether a resource in this usage may share memory with a disjoint one
-(`aliasable`) or be evicted (`evictable`). `true` for every usage defined here."""
-aliasable(::Type{<:Usage}) = true
-evictable(::Type{<:Usage}) = true
-
 """
 An access the caller asserts is order-independent (disjoint elements, commutative
 atomics). Two accesses skip the barrier only when both are `Unordered`.
@@ -142,7 +137,7 @@ runs it as compute) orders nothing and occasionally loses the device.
 """
 struct Traced{U<:Usage} <: Usage end
 
-for f in (:kindof, :reads, :writes, :discards, :aliasable, :evictable)
+for f in (:kindof, :reads, :writes, :discards)
     @eval $f(::Type{Unordered{U}}) where {U} = $f(U)
     @eval $f(::Type{Traced{U}}) where {U} = $f(U)
 end
