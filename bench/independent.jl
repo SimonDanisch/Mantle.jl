@@ -40,13 +40,13 @@ const M = Mantle
 end
 
 """`chains` independent chains of `stages` each, interleaved stage by stage."""
-function build_interleaved(dev, n, chains, stages; coalesce = true, alias = true)
+function build_interleaved(dev, n, chains, stages; alias = true)
     g = M.Graph(dev)
     bufs = [[M.Transient.Buffer(g, Float32, n) for _ in 1:(stages + 1)] for _ in 1:chains]
     for s in 1:stages, c in 1:chains
         M.dispatch!(g, stir!, (bufs[c][s + 1], bufs[c][s], 1.001f0), n; name = "c$c s$s")
     end
-    (; g, bufs, plan = M.record!(M.Plan(g; coalesce, alias)))
+    (; g, bufs, plan = M.record!(M.Plan(g; alias)))
 end
 
 nbarriers(plan) = count(pp -> !isempty(pp.pre), plan.passes)

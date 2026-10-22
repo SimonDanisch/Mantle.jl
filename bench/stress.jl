@@ -1,27 +1,9 @@
-# Stress the barrier derivation against the per-resource hazard set.
+# Random graphs and a rule-derived oracle for the barrier derivation: the
+# emitted set must be the per-resource hazard set, with no entry missing (a race)
+# and none extra (serialisation nobody asked for). `test_window.jl` runs it.
 #
-# The question is not "did the answer come out right" — a race that happens to
-# produce the right bytes proves nothing, and on a GPU that serialises anyway it
-# will produce them for hours. The question is whether the *emitted set* is the
-# set a scoped barrier implementation must emit: one entry per genuine state
-# change on each resource's own usage sequence.
-#
-# The oracle is the same graph compiled with `coalesce = false`, i.e. the
-# per-resource walk with nothing removed on top. That walk is confirmed by hand
-# against a written-out derivation in test_window.jl ("the emitted set is the
-# per-resource hazard set, exactly"); here it is the reference and *coalescing*
-# is what is under test. Two directions, because they are different bugs:
-#
-#   missing  — a hazard on some resource that no barrier on that resource
-#              enforces. Correct only while barriers are global.
-#   spurious — an entry the hazard walk does not call for: serialisation
-#              nobody asked for.
-#
-# Graphs are generated two ways. `usage_graph` puts random read/write/readwrite
-# usages on persistent buffers, so WAR, WAW, RAW and read-after-read all appear
-# without any liveness constraint. `chain_graph` follows the write-then-read
-# discipline over transients so the placer aliases them and the handover barrier
-# is exercised.
+# `usage_graph` puts random read/write/readwrite usages on persistent buffers,
+# so WAR, WAW, RAW and read-after-read all appear without any liveness constraint.
 
 import Mantle
 using Lava, KernelAbstractions, Random
@@ -59,8 +41,7 @@ argument and reads the rest — so one buffer landing in position 1 of one pass 
 position 3 of another is what produces a write-after-read, a read-after-write and
 a write-after-write between them.
 """
-function usage_graph(dev, rng, bufs, npasses; n = 256, coalesce = true,
-                     policy = M.Overlap(), slicing = 0.0)
+function usage_graph(dev, rng, bufs, npasses; n = 256, policy = M.Overlap(), slicing = 0.0)
     g = M.Graph(dev)
     # Range bounds drawn from a small fixed set, so the generator produces
     # identical, disjoint *and* partially overlapping slices of one buffer rather
@@ -82,36 +63,8 @@ function usage_graph(dev, rng, bufs, npasses; n = 256, coalesce = true,
         end
         M.dispatch!(g, TOUCH[length(picks)], args, n; name = "p$i")
     end
-    (; g, plan = M.Plan(g; coalesce, policy))
+    (; g, plan = M.Plan(g; policy))
 end
-
-"""
-Write-then-read over transients, so the placer aliases them and the handover
-barrier — the one no per-resource sequence can see — is in the emitted set.
-"""
-function chain_graph(dev, rng, npasses; n = 256, alias = true, coalesce = true,
-                     policy = M.Overlap())
-    g = M.Graph(dev)
-    seed = M.Buffer(dev, fill(1f0, n))
-    bufs = [M.Transient.Buffer(g, Float32, n) for _ in 1:npasses]
-    sources = Any[seed]
-    for i in 1:npasses
-        a = sources[rand(rng, 1:length(sources))]
-        b = sources[rand(rng, 1:length(sources))]
-        M.dispatch!(g, touch3!, (bufs[i],
-                                     a,
-                                     b), n; name = "p$i")
-        push!(sources, bufs[i])
-    end
-    out = M.Buffer(dev, zeros(Float32, n))
-    M.dispatch!(g, touch2!, (out,
-                                 bufs[end]), n; name = "out")
-    (; g, plan = M.Plan(g; alias, coalesce, policy))
-end
-
-"""Every emitted transition, keyed so two compiles are comparable."""
-hazards(plan) = Set((pp.pass.name, t.resource, t.from, t.to, Set(t.waits))
-                    for pp in plan.passes for t in pp.pre)
 
 """
 A resource id as `(parent, span)`, so the emitted set and the oracle are keyed by
@@ -140,10 +93,8 @@ one previous state or every reader outstanding since the last write. Seeded from
 each resource's *last* use in the schedule, because a plan is replayed and frame
 N+1's first use follows frame N's last.
 
-This is the oracle. It must not be `coalesce = false` — that is the compiler's
-own walk, and comparing a thing to itself proves nothing. Their agreement over a
-corpus is what says the walk is right; equality with what is actually *emitted*
-is what says coalescing has not removed a barrier that only globality justified.
+Derived independently of the compiler's own walk, so agreement over a corpus
+says the walk is right.
 """
 function local_hazards(g, plan)
     be = M.VulkanAPI()
@@ -190,57 +141,4 @@ function local_hazards(g, plan)
         M.writes(U) ? (pend[key] = Type[]) : push!(pend[key], U)
     end
     req
-end
-
-"""Which usage kind each side of a dropped hazard was, for the breakdown."""
-kindof(T) = string(nameof(T isa UnionAll ? T.body.name.wrapper : typeof(T).name.wrapper))
-
-"""
-One case both ways. Two graphs, not two plans off one graph: recompiling a graph
-rebinds images that are already bound (VUID-vkBindImageMemory-image-07460), so
-the second plan is not a clean comparison.
-"""
-function case(dev, seed; kind = :usage, npasses = 12, nbufs = 5, n = 256,
-              alias = true, policy = M.Overlap())
-    mk(co) = if kind === :usage
-        rng = MersenneTwister(seed)
-        bufs = [M.Buffer(dev, fill(Float32(i), n)) for i in 1:nbufs]
-        usage_graph(dev, rng, bufs, npasses; n, coalesce = co, policy)
-    else
-        chain_graph(dev, MersenneTwister(seed), npasses; n, alias, coalesce = co, policy)
-    end
-    required = hazards(mk(false).plan)
-    got = hazards(mk(true).plan)
-    (seed = seed,
-     required = length(required),
-     emitted = length(got),
-     missing = setdiff(required, got),
-     spurious = setdiff(got, required))
-end
-
-"""
-Sweep. Reports how much of the hazard set survives coalescing, and what kind of
-hazard the dropped ones are.
-"""
-function stress(seeds = 1:200; kind = :usage, npasses = 12, nbufs = 5,
-                alias = true, policy = M.Overlap(), n = 256)
-    dev = M.Device(M.VulkanAPI())
-    rs = [case(dev, s; kind, npasses, nbufs, n, alias, policy) for s in seeds]
-    miss = sum(r -> length(r.missing), rs)
-    spur = sum(r -> length(r.spurious), rs)
-    req = sum(r -> r.required, rs)
-    bykind = Dict{String,Int}()
-    for r in rs, m in r.missing
-        k = kindof(m[3]) * "->" * kindof(m[4])
-        bykind[k] = get(bykind, k, 0) + 1
-    end
-    (cases = length(rs),
-     required = req,
-     emitted = sum(r -> r.emitted, rs),
-     missing = miss,
-     spurious = spur,
-     missing_frac = req == 0 ? 0.0 : round(miss / req, digits = 3),
-     cases_with_missing = count(r -> !isempty(r.missing), rs),
-     cases_with_spurious = count(r -> !isempty(r.spurious), rs),
-     by_transition = sort(collect(bykind), by = x -> -x[2]))
 end

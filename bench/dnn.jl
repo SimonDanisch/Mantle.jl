@@ -163,7 +163,7 @@ against the same reference as the others, because a replay that has gone stale
 returns a plausible answer rather than an error.
 """
 function benchgraph(model, args...; iters::Int = 20, name::AbstractString = "sam2_encoder",
-                    policy = M.Overlap(), alias::Bool = true, coalesce::Bool = true,
+                    policy = M.Overlap(), alias::Bool = true,
                     bake::Bool = false)
     m = model.model                        # the DNNKernels `Model` behind the SAM2
     graph = m.graphs[name]
@@ -176,7 +176,7 @@ function benchgraph(model, args...; iters::Int = 20, name::AbstractString = "sam
     clampattn = name == "sam2_decoder"
 
     inputs = Dict{String,Any}(zip(graph.inputs, args))
-    gp = X.build(dev, graph, inputs, m.weights; dims, clampattn, policy, alias, coalesce)
+    gp = X.build(dev, graph, inputs, m.weights; dims, clampattn, policy, alias)
 
     # Correctness first, and against the arm that is not being changed.
     want = D.call(m, name, args...; dims, clampattn)

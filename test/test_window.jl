@@ -359,53 +359,20 @@ else
     end
 
     @testset "no barrier is dropped because another resource's covers it" begin
-        # Eight independent chains interleaved: stage 1 of every chain is a first
-        # touch and needs nothing, and one barrier before stage 2 covers all of
-        # them. Emitting per pass without checking coverage gives one barrier per
-        # chain per stage, which is correct but pointless.
-        #
-        # Measured with aliasing *off*. With it on, every pass begins a transient
-        # that took over another's bytes, and the handover is appended after the
-        # coverage test precisely because nothing can cover it — so it is 48 of
-        # 48 whether coalescing runs or not, and the number measures nothing.
-        # Asserted with aliasing ON it passes by a margin of one or two, and
-        # that margin is the aliasing barrier naming every stage and so making
-        # the next few look covered, not coalescing doing its job. With the
-        # handover derived from what the vacating tenant did, the margin is zero
-        # and the real figure is a third.
+        # Eight independent chains interleaved over disjoint buffers. A barrier
+        # scoped to one buffer orders nothing else, so each pass keeps its own,
+        # with aliasing off and on.
         include(joinpath(@__DIR__, "..", "bench", "independent.jl"))
         dev = M.Device(TESTBACKEND)
         emitted(pl) = count(pp -> !isempty(pp.pre), pl.passes)
-        tight = Base.invokelatest(build_interleaved, dev, 1 << 12, 8, 6; alias = false)
-        loose = Base.invokelatest(build_interleaved, dev, 1 << 12, 8, 6;
-                                  alias = false, coalesce = false)
-        @test emitted(loose.plan) == length(loose.plan.passes)   # one per pass
-        # NOT an assertion that a third of them go away, which is true and is
-        # the bug: a barrier scoped to one buffer orders that buffer and
-        # nothing else, so "an earlier barrier already covers this" is only ever
-        # sound about the *same* resource — and the per-resource walk emits only
-        # where a resource's own state changes, so there is nothing left to cover.
-        # Interleaved chains are the case that shows it: eight chains over
-        # disjoint buffers, where the removals were all cross-chain.
-        @test emitted(tight.plan) == emitted(loose.plan)
-
+        unaliased = Base.invokelatest(build_interleaved, dev, 1 << 12, 8, 6; alias = false)
+        @test emitted(unaliased.plan) == length(unaliased.plan.passes)
         s = Base.invokelatest(build_interleaved, dev, 1 << 12, 8, 6)
         @test emitted(s.plan) == length(s.plan.passes)
 
-        # Both strategies must produce the same answer, or the elision is wrong.
-        # SEEDED before each run, and that is not incidental. Every chain's first
-        # buffer is a transient no pass writes — it is only ever a `src` — and
-        # with aliasing on it shares bytes with four transients that ARE written
-        # (measured: bufs[1][1] at [16384, 32768), four writers on exactly those
-        # bytes). So a run leaves its own output in the next run's input, and two
-        # runs of this plan disagree under ANY barrier strategy: measured
-        # 6.015 -> 12.066 -> 17.137 with the strategy held fixed. Comparing two
-        # unseeded runs therefore tested nothing about barriers, which is what it
-        # was there to do.
-        #
-        # Seeding also keeps the elision under test: stage 1's read of the seed
-        # and the aliased write that later takes those bytes are exactly the
-        # hazard a dropped barrier would let race.
+        # Seeded before each run: each chain's first buffer is a transient no pass
+        # writes, aliased with transients that are written, so an unseeded run
+        # reads the previous run's output.
         seedchains!() = for row in s.bufs
             copyto!(M.storage(row[1]), zeros(Float32, length(row[1])))
         end
@@ -423,11 +390,11 @@ else
 
     @kernel function clear_and_tally!(c, tally)
         c[1] = UInt32(0)
-        Atomix.@atomic tally[1] += UInt32(1)
+        Atomix.@atomic :monotonic tally[1] += UInt32(1)
     end
     @kernel function bump_counter!(c)
         i = @index(Global)
-        Atomix.@atomic c[1] += UInt32(1)
+        Atomix.@atomic :monotonic c[1] += UInt32(1)
     end
 
     @testset "a windowed frame runs every pass, every frame" begin
@@ -630,11 +597,9 @@ else
     end
 
     @testset "the emitted set is the per-resource hazard set, exactly" begin
-        # What a *scoped* barrier set has to be, written out by hand rather than
-        # counted. A barrier on one buffer cannot stand in for one on another, so
-        # nothing here is droppable: the required set is one entry per genuine
-        # state change on each resource's own usage sequence, and coalescing has
-        # nothing left to remove.
+        # A barrier on one buffer cannot stand in for one on another, so the
+        # required set is one entry per state change on each resource's own usage
+        # sequence, written out by hand.
         #
         # Two chains of three stages over disjoint buffers, interleaved. Per
         # chain, with `b[k]` the buffer stage k reads:
@@ -669,22 +634,9 @@ else
         emitted(pl) = Set((pp.pass.name, t.resource, t.from, t.to, Set(t.waits))
                           for pp in pl.passes for t in pp.pre)
 
-        # The per-resource walk itself, with no coalescing on top, is the oracle's
-        # own check: if this disagrees the hand derivation above is wrong, not the
-        # elision.
-        raw = Base.invokelatest(build_interleaved, dev, 1 << 10, chains, stages;
-                                alias = false, coalesce = false)
-        @test emitted(raw.plan) == required
-
         got = emitted(s.plan)
-        # Too few. Coalescing drops five of the ten, among them chain 2's RAW on
-        # its own `b[2]` — written at `c2 s1`, read at `c2 s2`, nothing touching
-        # that buffer in between. It is dropped because a barrier emitted for
-        # chain 1's buffers is global and happens to stand in the way. That is
-        # not a local barrier set; scope the barriers and it is a race. Same
-        # shape as the showcase losing `sun cull`'s barrier.
+        # A missing entry is a race; an extra one serialises for nothing.
         @test issubset(required, got)
-        # Too many. Nothing spurious is emitted today, and must not start being.
         @test issubset(got, required)
     end
 
@@ -699,9 +651,7 @@ else
     function fuzzcases(dev, seeds; kw...)
         rs = [check(dev, s; kw...) for s in seeds]
         (wrong = count(r -> !r.correct, rs),
-         disagreements = count(r -> !r.agree, rs),
-         emitted_total = sum(r -> r.emitted, rs),
-         uncoalesced_total = sum(r -> r.uncoalesced, rs))
+         emitted_total = sum(r -> r.emitted, rs))
     end
 
     @testset "the local hazard set holds over a corpus, not one topology" begin
@@ -725,32 +675,20 @@ else
         # atomic partition itself rather than reading it off the compiler. Both
         # sides are keyed by `(parent, span)`, so agreeing on ids is not what
         # makes them agree.
-        walk_is_local = 0; spurious = 0; missing_total = 0; required_total = 0
-        cases = 0
+        spurious = 0; missing_total = 0; required_total = 0
         for sl in (0.0, 0.5), s in seeds
-            mk(co) = usage_graph(dev, MersenneTwister(s),
-                                 [M.Buffer(dev, fill(Float32(i), 256)) for i in 1:nbufs],
-                                 npasses; coalesce = co, slicing = sl)
-            raw = mk(false)
-            oracle = local_hazards(raw.g, raw.plan)
-            # The compiler's uncoalesced walk must BE the local set. If this
-            # fails the oracle and the walk disagree and neither number below
-            # means anything, so it is checked first and per case.
-            normalized(raw.g, raw.plan) == oracle && (walk_is_local += 1)
-            tight = mk(true)
-            got = normalized(tight.g, tight.plan)
+            u = usage_graph(dev, MersenneTwister(s),
+                            [M.Buffer(dev, fill(Float32(i), 256)) for i in 1:nbufs],
+                            npasses; slicing = sl)
+            oracle = local_hazards(u.g, u.plan)
+            got = normalized(u.g, u.plan)
             required_total += length(oracle)
             missing_total += length(setdiff(oracle, got))
             spurious += length(setdiff(got, oracle))
-            cases += 1
         end
-        @test walk_is_local == cases
-        # Too many: never emit a barrier the hazard set does not call for.
-        @test spurious == 0
-        # Too few: every local hazard must have its own barrier. Coalescing used
-        # to drop about a fifth of them at this size and a third at thirty passes,
-        # each justified only by the emitted barrier being global.
+        # A missing entry is a race; an extra one serialises for nothing.
         @test missing_total == 0
+        @test spurious == 0
         @test required_total > 0
     end
 
@@ -765,17 +703,7 @@ else
         #   - comparing every transient is meaningless once they are aliased
         include(joinpath(@__DIR__, "..", "bench", "fuzz.jl"))
         r = Base.invokelatest(fuzzcases, M.Device(TESTBACKEND), 1:20)
-        @test r.disagreements == 0
-        # Against the same graphs compiled with coalescing off, which is the
-        # question, and NOT `possible_total`, which is `passes - 1`: a plan is
-        # replayed, so the first pass needs a barrier against the previous frame
-        # and the real ceiling is one higher. That comparison holds only by a
-        # margin of one, and narrowing a stage mask — which reduces how much a
-        # covering barrier subsumes — was enough to cross it.
-        # Equal, not fewer: a scoped barrier cannot subsume another resource's, so
-        # the emitted set is the per-resource hazard set and compiling with
-        # coalescing off changes nothing. It was `<` while barriers were global.
-        @test r.emitted_total == r.uncoalesced_total
+        @test r.wrong == 0
         @test r.emitted_total > 0
     end
 
@@ -910,7 +838,6 @@ else
         for pol in (M.Overlap(), M.Compact())
             r = Base.invokelatest(fuzzcases, dev, 1:12; passes = 12, policy = pol)
             @test r.wrong == 0
-            @test r.disagreements == 0
         end
     end
 

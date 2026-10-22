@@ -530,7 +530,7 @@ function refit!(pl::Plan)
     moved || return false
     # The recording names the old placement; `run!` re-records before submitting.
     invalidate!(pl)
-    c = compile!(Compile(pl.graph; pl.alias, pl.coalesce, pl.policy))
+    c = compile!(Compile(pl.graph; pl.alias, pl.policy))
     # Costs are keyed by pass: the recompile may reorder passes.
     cost = IdDict{Any,Float64}(pp.pass => pl.passcost[i] for (i, pp) in enumerate(pl.passes))
     pl.transitions, pl.passes, pl.pipelines = c.transitions, c.passes, c.pipelines
@@ -911,8 +911,8 @@ rootresource(v::BufferRange) = rootresource(v.parent)
 
 rootresource(a::Attr) = rootresource(a.resource)
 
-Compile(g::Graph; alias = true, coalesce = true, policy = Overlap()) =
-    Compile(g, alias, coalesce, policy, Analysis(), Transition[],
+Compile(g::Graph; alias = true, policy = Overlap()) =
+    Compile(g, alias, policy, Analysis(), Transition[],
             IdDict{Pass,Vector{Transition}}(), PassPlan[], Set{Any}())
 
 # Compilation hooks beyond the generic `Compilation` field accessors: usages,
@@ -1068,18 +1068,18 @@ function checkextents(pl::Plan)
 end
 
 """
-    Plan(graph; alias = true, coalesce = true, profile = false, policy = Overlap(),
+    Plan(graph; alias = true, profile = false, policy = Overlap(),
          budget = submissionbudget(device))
 
 Compile `graph` into a plan and register it as a tenant of its arenas. Backend
 specifics come through [`makeprofiler`](@ref) and [`makeargmemory`](@ref).
 `budget` is the estimated GPU seconds per submission the recording is cut to.
 """
-Plan(g::Graph; coalesce::Bool = true, alias::Bool = true,
+Plan(g::Graph; alias::Bool = true,
             profile::Bool = false, policy::Policy = Overlap(),
             budget::Real = submissionbudget(g.dev)) =
     # Before the compile: adds the update pass and its `CopyDst` usages.
-    let hw = hostwritten!(g), c = compile!(Compile(g; alias, coalesce, policy))
+    let hw = hostwritten!(g), c = compile!(Compile(g; alias, policy))
         let a = analysis(c)
             # With timestamps and a finite budget, profile even unasked: the plan
             # measures itself once to partition its recording (`partitionranges`).
@@ -1087,7 +1087,7 @@ Plan(g::Graph; coalesce::Bool = true, alias::Bool = true,
                    makeprofiler(g.dev, c.passes, true) : nothing
             pl = Plan(g, c.transitions, c.passes, c.pipelines, a.regions, a.arenas,
                           a.offsets, a.parts, a.peak, a.naive, prof,
-                          alias, coalesce, policy,
+                          alias, policy,
                           makeargmemory(g.dev, c.passes), nothing,
                           Float64(budget), profile, fill(NaN, length(c.passes)),
                           UnitRange{Int}[], loopspans([pp.pass for pp in c.passes]),

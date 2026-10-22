@@ -439,7 +439,6 @@ mutable struct Plan{D,H<:Tuple}
     naive::Int
     profiler::Union{Nothing,Profiler}
     alias::Bool                         # kept, so a recompile means what the first one did
-    coalesce::Bool
     policy::Policy
     # `nothing` when the backend passes arguments directly (see `makeargmemory`).
     args::Union{Nothing,ArgMemory}      # laid out at compile, written at record!
@@ -496,7 +495,6 @@ later ones, so a phase can run alone.
 mutable struct Compile{D} <: Compilation
     graph::Graph{D}
     alias::Bool
-    coalesce::Bool
     policy::Policy
     analysis::Analysis
     transitions::Vector{Transition}            # Barriers
