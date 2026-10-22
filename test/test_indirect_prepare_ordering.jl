@@ -1,31 +1,6 @@
-# An eager launch over a `DeviceRange` is ordered after whatever wrote its count.
-#
-#     kernel(args...; ndrange = DeviceRange(count))
-#
-# `count` is an element count in device memory, written by an earlier launch, and
-# the host never reads it. On Vulkan the launch is an indirect dispatch: a prepare
-# kernel turns the count into workgroup counts, and the dispatch reads them with
-# the command processor a moment later in the same command buffer. Nothing derives
-# that dependency — nothing declared what either touches — so the barrier between
-# them is emitted unconditionally, with `INDIRECT_COMMAND_READ` in its destination
-# access mask. A backend whose launch takes its grid on the host reads the count
-# instead, which waits for the launch that wrote it (`DeviceRange`'s `max` is the
-# way to launch without waiting).
-#
-# Conditional, the barrier cost what this file pins. A `concurrent_dispatch_group`
-# asserted by hand that the dispatches inside it were independent and elided the
-# barriers between them, which dropped exactly this one. With a deep GPU pipeline
-# the race was usually won (latent); with an empty queue — right after a
-# mid-pipeline flush — the indirect dispatch read stale group counts and silently
-# ran zero workgroups. Surfaced through Hikari's volpath bounce loop (2026-06-10):
-# `vp_shade_typed!` runs 12 prepare+indirect pairs, and adding an early-exit
-# synchronize made the race lose reliably and dropped ~15% of shadow_bumpgold's
-# energy.
-#
-# The chains below reproduced the race deterministically before the fix (final
-# count 0 instead of 65536): each round copies a queue through a middle queue, so
-# the second launch's dispatch immediately follows its own prepare.
-
+# Each DeviceRange launch must observe its prepare kernel’s workgroup counts.
+# Chained queue copies and fan-out exercise the dependency on an otherwise idle
+# channel; submission ordering publishes queue payloads between kernels.
 using Test, Mantle, KernelAbstractions
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
@@ -42,7 +17,8 @@ Adapt.adapt_structure(to, q::TestQueue) =
     TestQueue(Adapt.adapt(to, q.items), Adapt.adapt(to, q.size))
 
 @inline function queue_push!(q::TestQueue, item::Int32)
-    idx = Atomix.@atomic q.size[1] += Int32(1)
+    # Reserve a slot; the following dispatch observes payloads after its barrier.
+    idx = Atomix.@atomic :monotonic q.size[1] += Int32(1)
     if idx <= length(q.items)
         @inbounds q.items[idx] = item
     end

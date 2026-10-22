@@ -552,6 +552,8 @@ if _VULKAN_OK
     include(joinpath(@__DIR__, "vulkan", "test_host_upload.jl"))
     check_host_upload(Mantle.vk_context())
     check_store_submission(Mantle.vk_context())
+    include(joinpath(@__DIR__, "vulkan", "test_accel_barriers.jl"))
+    check_accel_barriers(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_tlas_mutation.jl"))
     check_tlas_mutation_allocations(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_video_sessions.jl"))

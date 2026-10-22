@@ -575,7 +575,7 @@ const BACKEND_VOCABULARY = (
     # argument_usage is listed once above.
     :profiled!, :collect!,
     :emitkernel!, :emitpreparebarrier!, :workgroupsize, :indirectslot, :writegroups!, :slotgrid,
-    :storebytes!,
+    :storebytes!, :orderstore!,
     :recordsplans, :recordable, :runscalls, :librarygemm, :native_gemm_available,
     :native_conv2d_dispatch!,
     :native_gemm_dispatch!, :native_batched_gemm_dispatch!,

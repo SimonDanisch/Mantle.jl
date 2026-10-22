@@ -932,19 +932,8 @@ dispatch or a ray-tracing launch.
                                   extra_dst_access::VK.AccessFlag)
     dst_access = VkAccessFlags(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT) |
                  VkAccessFlags(extra_dst_access)
-    barrier_ref = Ref(VkMemoryBarrier(VK_STRUCTURE_TYPE_MEMORY_BARRIER, C_NULL,
-                                      VkAccessFlags(VK_ACCESS_SHADER_WRITE_BIT), dst_access))
-    GC.@preserve barrier_ref begin
-        ccall(e.ctx.cmd_pipeline_barrier_fptr, Cvoid,
-              (Ptr{Nothing}, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags,
-               UInt32, Ptr{VkMemoryBarrier}, UInt32, Ptr{Nothing}, UInt32, Ptr{Nothing}),
-              e.cmd.vks,
-              VkPipelineStageFlags(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT),
-              VkPipelineStageFlags(dst_stage), VkDependencyFlags(0),
-              UInt32(1), barrier_ref,
-              UInt32(0), C_NULL,
-              UInt32(0), C_NULL)
-    end
+    memorybarrier!(e.cmd,e.ctx,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,dst_stage,
+                   VK_ACCESS_SHADER_WRITE_BIT,dst_access)
     return nothing
 end
 

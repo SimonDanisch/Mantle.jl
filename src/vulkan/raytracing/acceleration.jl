@@ -14,41 +14,24 @@ Destroyed automatically via finalizer when GC'd (unless device was lost).
 """
 mutable struct LavaBLAS
     accel::VK.AccelerationStructureKHR
-    # AS backing storage. The only "last_write" we care about lives here:
-    # when the GPU traces rays, it reads this buffer. Cross-queue sync and
-    # timeline-gated destruction fall out of LavaArray's existing machinery.
+    # Core tracks AS last use and destruction through its backing storage.
     storage::LavaArray{UInt8, 1}
     address::UInt64  # AS device address (for HWTLAS instances)
-    # Vertex/index buffers the driver may internally retain VAs to.  Kept
-    # alive as long as the BLAS is alive.  Each entry is a LavaArray whose
-    # own `last_write` tracks in-flight usage, so their VkManagedBuffers
-    # are also timeline-gated when the BLAS is finalized.
+    # Input arrays retained by this legacy owner; refits reuse their addresses.
     preserves::Vector{LavaArray}
 
-    # ── Refit support (MODE_UPDATE_KHR), only populated when built with
-    # `allow_update=true`.
-    #
-    # Opt-in per BLAS and NOT the default, because ALLOW_UPDATE makes the driver
-    # build a lower-quality BVH: every static scene would pay traversal
-    # performance for a capability it never uses, which would move the pbrt and
-    # crown benchmark numbers. A deforming mesh promotes itself by rebuilding
-    # once with this set, then refits from then on.
+    # Refit support is opt-in; update-enabled builds may trade traversal quality.
     allow_update::Bool
     # Scratch for MODE_UPDATE_KHR, queried at build time. Smaller than build
     # scratch; 0 means this BLAS is not refit-capable.
     update_scratch_size::UInt64
-    # The geometry a refit re-issues. Vertices are rewritten in place, so the
-    # buffer and its device address survive and the driver's retained VAs stay
-    # valid. Topology cannot change: `MODE_UPDATE_KHR` keeps the tree and only
-    # refits bounds, so triangle count and index buffer are fixed at build.
+    # Retained triangle geometry for in-place refits; topology stays fixed.
     vertex_arr::Union{Nothing, LavaArray{UInt8, 1}}
     index_addr::UInt64
     n_triangles::UInt32
     max_vertex::UInt32
     geo_flags::UInt32
-    # The boxes a refittable procedural BLAS re-reads: written in place on the
-    # device (by a kernel, say) and refit from there (see `refit_blas!`), so the
-    # address the driver retained stays valid. `nothing` for triangles.
+    # Retained procedural boxes, or nothing for triangle geometry.
     aabbs::Union{Nothing, LavaArray{AABB, 1}}
 end
 
@@ -78,13 +61,7 @@ mutable struct LavaTLAS
     allow_update::Bool
     update_scratch_size::UInt64
     instance_buf::Union{Nothing, LavaArray}   # pinned across refits when set
-    # Per-HWTLAS RT descriptor sets, keyed by descriptor-set-layout Vulkan handle
-    # (UInt64).  Lazily populated by `get_rt_descriptor_set` and destroyed in
-    # `destroy_now!` so each VkAccelerationStructureKHR / descriptor set pair
-    # has a lifetime tied to *this* LavaTLAS object — no global cache, no
-    # objectid-keyed reuse-after-free.  Each entry holds (DescriptorPool,
-    # DescriptorSet) where the pool exclusively owns the set so destroying
-    # the pool destroys the set.
+    # Layout-handle → descriptor pool/set. Destroy each pool before its AS.
     desc_sets::Dict{UInt64, Tuple{VK.DescriptorPool, VK.DescriptorSet}}
 end
 
@@ -169,16 +146,11 @@ function syncbuf!(owner::Closed, t::LavaTLAS)
 end
 syncbuf!(owner::Closed, b::LavaBLAS) = syncbuf!(owner, b.storage)
 
-"""
-    VulkanAccelBuildContext
+"""VulkanAccelBuildContext
 
-Explicit context for acceleration structure builds. Owns a command buffer,
-fence, and preserves list. All `build_blas`/`build_tlas` calls take this
-as a required parameter. Created by `build_accel!()` which manages the lifecycle.
+AccelBuildContext over a Vulkan submit channel. Core holds/stamps named
+resources; preserves keeps scratch and temporary host objects until completion.
 """
-# `AccelBuildContext` is Mantle's — see `graph/queue.jl`'s neighbour in
-# `raytracing/accel.jl`. Both its fields are portable now that `BatchQueue` is
-# shared, so there was nothing backend-specific left in it.
 const VulkanAccelBuildContext = AccelBuildContext{SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}}
 
 # Derived accessors so call sites stay readable.
@@ -187,22 +159,21 @@ const VulkanAccelBuildContext = AccelBuildContext{SubmitChannel{VulkanQueue{VkCo
 @inline as_device(ctx::VulkanAccelBuildContext)  = vkdevice(ctx.bq)
 @inline as_vkctx(ctx::VulkanAccelBuildContext)   = ctxof(ctx.bq)
 
-"""
-    build_blas(ctx::VulkanAccelBuildContext, vertices, indices; opaque, allow_update) -> LavaBLAS
+# Build inputs participate in core's cross-channel waits and retirement holds.
+@inline holdbuild!(ctx::VulkanAccelBuildContext,x) = (hold!(ctx.into,x); nothing)
+@inline function holdbuild!(ctx::VulkanAccelBuildContext,as::Union{LavaBLAS,LavaTLAS})
+    hold!(ctx.into,as)
+    for input in as.preserves
+        hold!(ctx.into,input)
+    end
+    return nothing
+end
 
-Build a bottom-level acceleration structure. Records into `ctx`'s command
-buffer, so it must be called inside `build_accel!()`.
+"""build_blas(ctx, vertices, indices; opaque, allow_update) -> LavaBLAS
 
-Given `LavaArray`s this builds from buffers that are ALREADY on the device.
-
-The `Vector` method below uploads its arguments and then uses nothing but their
-addresses — which is all an acceleration-structure build ever reads. So geometry
-a kernel just wrote goes straight in: no readback, no re-upload, and the
-triangles never exist on the host at all. That is what lets one device function
-feed both a mesh shader and a BLAS.
-
-Both buffers must carry `AS_INPUT_USAGE`, or the driver refuses to read them as
-build input.
+Record triangle geometry inside build_accel!. LavaArray inputs are read in
+place and require AS_INPUT_USAGE; Vector inputs are uploaded first. Core tracks
+input dependencies and retains resources through the submission.
 """
 function build_blas(ctx::VulkanAccelBuildContext,
                     vertices::LavaArray{NTuple{3,Float32},1},
@@ -263,14 +234,11 @@ function build_blas_from_addresses(ctx::VulkanAccelBuildContext, vertex_arr, ind
                                       bq, extra_usage=AS_SCRATCH_USAGE, scratch=true)
     scratch_addr = bda_address(scratch_arr)
 
-    # Build inputs (vertex + index) must outlive the BLAS -- the driver may
-    # retain VAs into them.  Kept as LavaArrays so their own last_write
-    # tracks in-flight access and their vk_free! is timeline-gated.
+    # This owner retains its input arrays alongside storage.
     blas_preserves = LavaArray[vertex_arr, index_arr]
-    # Scratch is submit-lifetime only -- pushed into ctx.preserves so build_accel!'s
-    # fence-wait (or the ctx-scoped drain) keeps it alive until the submit
-    # completes, then its own finalizer frees it.
+    # Release scratch explicitly after the build submission completes.
     push!(ctx.preserves, scratch_arr)
+    holdbuild!(ctx,scratch_arr)
 
     build_as_on_gpu(ctx, accel, scratch_addr, geom;
         as_type=UInt32(1), build_flags,
@@ -288,6 +256,7 @@ function build_blas_from_addresses(ctx::VulkanAccelBuildContext, vertex_arr, ind
                     allow_update ? vertex_arr : nothing,
                     index_addr, n_triangles, max_vertex, geo_flags, nothing)
     finalizer(unsafe_free!, blas)
+    holdbuild!(ctx,blas)
     return blas
 end
 
@@ -339,6 +308,7 @@ function refit_blas!(ctx::VulkanAccelBuildContext, blas::LavaBLAS,
                                       bq, extra_usage=AS_SCRATCH_USAGE, scratch=true)
     scratch_addr = bda_address(scratch_arr)
     push!(ctx.preserves, scratch_arr)
+    holdbuild!(ctx,scratch_arr)
 
     geom = TrianglesGeometry(;
         vertex_format=UInt32(VK.FORMAT_R32G32B32_SFLOAT),
@@ -351,6 +321,7 @@ function refit_blas!(ctx::VulkanAccelBuildContext, blas::LavaBLAS,
 
     # The vertex rewrite above is a transfer write the AS build has to see, and a
     # previous build/refit of this same AS has to have finished.
+    holdbuild!(ctx,blas)
     asbuildbarrier!(ctx)
 
     build_as_on_gpu(ctx, blas.accel, scratch_addr, geom;
@@ -427,6 +398,7 @@ function build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::LavaArray{AABB,1};
                                        bq, extra_usage=AS_SCRATCH_USAGE, scratch=true)
     scratch_addr = bda_address(scratch_arr)
     push!(ctx.preserves, scratch_arr)
+    holdbuild!(ctx,scratch_arr)
 
     # The boxes a kernel wrote before this build must be visible to it.
     asbuildbarrier!(ctx)
@@ -446,6 +418,7 @@ function build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::LavaArray{AABB,1};
                     nothing, UInt64(0), UInt32(0), UInt32(0), geo_flags,
                     allow_update ? aabbs : nothing)
     finalizer(unsafe_free!, blas)
+    holdbuild!(ctx,blas)
     return blas
 end
 
@@ -459,22 +432,25 @@ Make what kernels, copies and earlier builds wrote visible to the next
 acceleration-structure build or refit in `ctx`.
 """
 function asbuildbarrier!(ctx::VulkanAccelBuildContext)
-    barrier = VK.MemoryBarrier(
-        C_NULL,
-        VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
-        VK.ACCESS_SHADER_WRITE_BIT |
-        VK.ACCESS_TRANSFER_WRITE_BIT,
-        VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
-        VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
-    )
-    VK.cmd_pipeline_barrier(
-        buildcmd(ctx), [barrier], [], [];
-        src_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
-                       VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                       VK.PIPELINE_STAGE_TRANSFER_BIT,
-        dst_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-    )
+    memorybarrier!(buildcmd(ctx),ctxof(ctx.bq),
+                   VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                   VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK.PIPELINE_STAGE_TRANSFER_BIT,
+                   VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                   VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
+                   VK.ACCESS_SHADER_WRITE_BIT | VK.ACCESS_TRANSFER_WRITE_BIT,
+                   VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                   VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR)
     return ctx
+end
+
+"Serialize builds that reuse one scratch allocation."
+@inline function asscratchbarrier!(ctx::VulkanAccelBuildContext)
+    access = VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+             VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR
+    memorybarrier!(buildcmd(ctx),ctxof(ctx.bq),
+                   VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                   VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,access,access)
+    return nothing
 end
 
 """
@@ -502,9 +478,11 @@ function refit_blas!(ctx::VulkanAccelBuildContext, blas::LavaBLAS, aabbs::LavaAr
     scratch_arr = LavaArray{UInt8,1}(undef, (max(Int(blas.update_scratch_size), 16),);
                                       bq = ctx.bq, extra_usage=AS_SCRATCH_USAGE, scratch=true)
     push!(ctx.preserves, scratch_arr)
+    holdbuild!(ctx,scratch_arr)
     geom = AABBsGeometry(; aabb_addr = bda_address(own), aabb_stride = UInt64(sizeof(AABB)))
     build_flags = UInt32(VK.BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR) |
                   UInt32(VK.BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR)
+    holdbuild!(ctx,blas)
     asbuildbarrier!(ctx)
     build_as_on_gpu(ctx, blas.accel, bda_address(scratch_arr), geom;
         as_type=UInt32(1), build_flags,
@@ -569,6 +547,7 @@ function build_tlas(ctx::VulkanAccelBuildContext, blas_list::Vector{LavaBLAS};
     # Scratch is submit-lifetime — ctx.preserves + fence wait handles it.
     tlas_preserves = LavaArray[inst_arr]
     push!(ctx.preserves, scratch_arr)
+    holdbuild!(ctx,scratch_arr)
 
     build_as_on_gpu(ctx, accel, scratch_addr;
         as_type=UInt32(0), build_flags,
@@ -581,6 +560,7 @@ function build_tlas(ctx::VulkanAccelBuildContext, blas_list::Vector{LavaBLAS};
                     allow_update, sizes.update_scratch_size, nothing,
                     Dict{UInt64, Tuple{VK.DescriptorPool, VK.DescriptorSet}}())
     finalizer(unsafe_free!, tlas)
+    holdbuild!(ctx,tlas)
     return tlas
 end
 
@@ -636,6 +616,7 @@ function build_tlas(ctx::VulkanAccelBuildContext, instance_buf::LavaArray{Vulkan
     # instance_buf must outlive the HWTLAS -- pin it on the HWTLAS itself for refit too.
     tlas_preserves = LavaArray[instance_buf]
     push!(ctx.preserves, scratch_arr)
+    holdbuild!(ctx,scratch_arr)
 
     build_as_on_gpu(ctx, accel, scratch_addr;
         as_type=UInt32(0), build_flags,
@@ -652,6 +633,7 @@ function build_tlas(ctx::VulkanAccelBuildContext, instance_buf::LavaArray{Vulkan
                     allow_update, sizes.update_scratch_size, instance_buf,
                     Dict{UInt64, Tuple{VK.DescriptorPool, VK.DescriptorSet}}())
     finalizer(unsafe_free!, tlas)
+    holdbuild!(ctx,tlas)
     return tlas
 end
 
@@ -693,6 +675,7 @@ function refit_tlas!(ctx::VulkanAccelBuildContext, tlas::LavaTLAS,
                                       bq, extra_usage=AS_SCRATCH_USAGE, scratch=true)
     scratch_addr = bda_address(scratch_arr)
     push!(ctx.preserves, scratch_arr)
+    holdbuild!(ctx,scratch_arr)
 
     # Re-pack the geometry buffer (instance addr unchanged but spec requires it
     # in the BuildGeometryInfo for UPDATE too).
@@ -705,25 +688,9 @@ function refit_tlas!(ctx::VulkanAccelBuildContext, tlas::LavaTLAS,
     fptr = VK.function_pointer(dev, "vkCmdBuildAccelerationStructuresKHR")
     cmd = buildcmd(ctx)
 
-    # Pre-barrier: cover both prior AS builds AND prior compute/transfer writes
-    # to instance_buf. The latter is the per-frame hot path where a compute
-    # kernel writes instance records and refit reads them; without this,
-    # compute writes are not guaranteed visible to the AS-build read.
-    pre_barrier = VK.MemoryBarrier(
-        C_NULL,
-        VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
-        VK.ACCESS_SHADER_WRITE_BIT |
-        VK.ACCESS_TRANSFER_WRITE_BIT,
-        VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
-        VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
-    )
-    VK.cmd_pipeline_barrier(
-        cmd, [pre_barrier], [], [];
-        src_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
-                       VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                       VK.PIPELINE_STAGE_TRANSFER_BIT,
-        dst_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-    )
+    holdbuild!(ctx,tlas)
+    holdbuild!(ctx,instance_buf)
+    asbuildbarrier!(ctx)
 
     GC.@preserve geo_buf bgi_buf c_range begin
         geo_ptr = pointer(geo_buf)
@@ -1043,62 +1010,32 @@ end
 
 # ── AS Build ──
 
-"""
-    build_accel!(f, bq)
+"""build_accel!(f, bq)
 
-Build acceleration structures in a single GPU submission. The callback
-receives an `VulkanAccelBuildContext` that must be passed to `build_blas`/`build_tlas`.
-
-# Example
-```julia
-blases, tlas = build_accel!(bq) do ctx
-    bs = [build_blas(ctx, verts, idxs) for (verts, idxs) in meshes]
-    tlas = build_tlas(ctx, bs)
-    return (bs, tlas)
-end
-```
-
-BLAS device addresses are available immediately after `build_blas` returns
-(even before the GPU build executes), so `build_tlas` can reference them.
+Record builds in one submission on bq, wait for completion and release scratch.
+The callback receives a VulkanAccelBuildContext. BLAS addresses are available
+while recording so later commands can build a TLAS from them. Resource holds,
+last-use stamps and cross-channel waits belong to core's submission engine.
 """
 function build_accel!(f, bq::SubmitChannel{<:VulkanQueue})
-    # The builds go into a one-shot of their own, on the timeline like every
-    # other submission and not through a command buffer and fence of their own.
-    # The one-shot opens with the global barrier, so the vertex, index and
-    # instance buffers prior
-    # dispatches wrote are visible to the build without the flush that stood
-    # here.
+    # The head barrier covers prior work; named inputs add cross-channel waits.
     preserves = Any[]
     result = Ref{Any}(nothing)
     tok = oneshot!(bq; tag = :accel) do e
         result[] = f(AccelBuildContext(bq, e, preserves))
         # Final barrier: make all AS writes visible to RT shader reads
-        post_barrier = VK.MemoryBarrier(
-            C_NULL,
-            VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
-            VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
-            VK.ACCESS_SHADER_READ_BIT,
-        )
-        VK.cmd_pipeline_barrier(
-            e.cmd, [post_barrier], [], [];
-            src_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-            dst_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
-                           VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-        )
+        memorybarrier!(e.cmd,e.ctx,
+                       VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                       VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                       VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                       VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+                       VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK.ACCESS_SHADER_READ_BIT)
     end
-    # The build is complete once the token this returns has passed, on `bq`'s
-    # timeline, which is the caller's queue and need not be the device's primary
-    # one.
+    # Completion and hold release use the caller’s channel.
     waitfor!(bq, tok)
+    drain!(bq)
 
-    # Inputs that must outlive the GPU submit (vertex/index for BLAS, instance
-    # buffer for HWTLAS) are owned by LavaBLAS/LavaTLAS via their preserves.
-    # Scratch buffers in `preserves` are submit-scoped and have been through
-    # the wait above, so eagerly release them here via the DataRef refcount
-    # path (LavaArray itself has no finalizer; lifetime is the DataRef's sole
-    # responsibility after the Phase 3 refactor). Without this explicit
-    # release, each build_accel! leaks ~hundreds of MB of scratch per call —
-    # multi-frame renders (dolphin HQ video) hit VRAM OOM.
+    # Retained geometry stays with its AS; completed scratch is released immediately.
     for p in preserves
         if p isa LavaArray
             unsafe_free!(p)
@@ -1158,17 +1095,12 @@ function build_as_on_gpu_impl(ctx::VulkanAccelBuildContext, accel::VK.Accelerati
     fptr = VK.function_pointer(as_device(ctx), "vkCmdBuildAccelerationStructuresKHR")
 
     # Synchronize prior AS builds before this build command.
-    pre_barrier = VK.MemoryBarrier(
-        C_NULL,
-        VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
-        VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
-        VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
-    )
-    VK.cmd_pipeline_barrier(
-        cmd, [pre_barrier], [], [];
-        src_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-        dst_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-    )
+    memorybarrier!(cmd,ctxof(ctx.bq),
+                   VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                   VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                   VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+                   VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                   VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR)
 
     GC.@preserve geo_buf bgi_buf c_range begin
         geo_ptr = pointer(geo_buf)
@@ -1320,6 +1252,8 @@ function build_blas_pooled(all_vertices::Vector{Vector{NTuple{3,Float32}}},
 
     GC.@preserve input_buf input_mem scratch_arr as_pool_arr begin
         build_accel!(bq) do as_ctx
+            holdbuild!(as_ctx,scratch_arr)
+            holdbuild!(as_ctx,as_pool_arr)
             for i in 1:n_blas
                 n_tris = UInt32(length(all_indices[i]) ÷ 3)
                 max_vertex = UInt32(length(all_vertices[i]) - 1)
@@ -1332,20 +1266,7 @@ function build_blas_pooled(all_vertices::Vector{Vector{NTuple{3,Float32}}},
                     as_type=UInt32(1), build_flags,
                     geo_flags, primitive_count=n_tris)
                 # Barrier between builds: shared scratch buffer must be drained before reuse.
-                if i < n_blas
-                    scratch_barrier = VK.MemoryBarrier(
-                        C_NULL,
-                        VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
-                        VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
-                        VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
-                        VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
-                    )
-                    VK.cmd_pipeline_barrier(
-                        buildcmd(as_ctx), [scratch_barrier], [], [];
-                        src_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                        dst_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                    )
-                end
+                i < n_blas && asscratchbarrier!(as_ctx)
             end
         end
     end
@@ -1401,32 +1322,20 @@ function build_blas_from_primitives(bq::SubmitChannel{<:VulkanQueue}, primitives
     end
 end
 
-"""
-    build_hw_accel_from_tlas(tlas; ctx, bq = ctx.default_bq)
-        -> (hw_tlas, triangle_data, blas_offsets, per_instance_tri_offsets)
+# Raycore's BLAS records contain borrowed device views; retain/use their owning arrays.
+build_hw_accel_from_tlas(tlas::Raycore.TLAS;kw...) =
+    build_hw_accel_from_tlas((instances=tlas.instances,blas_array=tlas.blas_storage);kw...)
 
-Build hardware acceleration structures from a Raycore-compatible HWTLAS.
+"""build_hw_accel_from_tlas(tlas; ctx, bq = ctx.default_bq)
 
-Uses pooled memory allocation: all vertex/index data goes into a single
-HOST_VISIBLE buffer, all BLAS AS storage into a single DEVICE_LOCAL buffer,
-and one scratch buffer is reused across all builds. This reduces ~3000+
-individual Vulkan allocations to ~6 regardless of mesh count.
+Legacy host-mediated import into pooled native BLAS/TLAS storage. Compatible
+sources provide owning blas_array[i].primitives arrays and instance descriptors
+with 1-based blas_index, canonical row-major affine transform, ID, mask and flags.
+Raycore.TLAS supplies its separate owning blas_storage arrays.
 
-The HWTLAS must have:
-- `.blas_array`: indexable collection of BLAS objects, each with `.primitives`
-- `.instances`: array of instance descriptors with `.blas_index` (1-based),
-  `.transform` (4×4 matrix, local-to-world)
-
-Returns:
-- `hw_tlas::LavaTLAS` — Vulkan top-level acceleration structure
-- `triangle_data::Vector` — CPU vector of all primitives (caller uploads to GPU)
-- `blas_offsets::Vector{UInt32}` — per-BLAS offset into triangle_data (0-based)
-
-After a ray trace, look up the hit triangle:
-```
-tri = triangle_data[blas_offsets[instance_custom_index + 1] + primitive_id + 1]
-```
-where `instance_custom_index` = BLAS index (0-based) set by this function.
+Returns native TLAS, flat CPU primitives, BLAS offsets and per-instance offsets.
+Look up a hit through per_instance_tri_offsets[instance_id+1] + primitive_id + 1;
+instance_custom_index retains the instance’s custom ID.
 """
 function build_hw_accel_from_tlas(tlas;
                                   ctx::VkContext,
@@ -1579,6 +1488,8 @@ function build_hw_accel_from_tlas(tlas;
     # Batch all BLAS + HWTLAS builds into a single GPU submission
     hw_tlas = GC.@preserve input_buf input_mem scratch_arr as_pool_arr begin
         build_accel!(bq) do as_ctx
+            holdbuild!(as_ctx,scratch_arr)
+            holdbuild!(as_ctx,as_pool_arr)
             for i in 1:n_blas
                 n_tris = UInt32(length(all_indices[i]) ÷ 3)
                 max_vertex = UInt32(length(all_vertices[i]) - 1)
@@ -1592,20 +1503,7 @@ function build_hw_accel_from_tlas(tlas;
                     as_type=UInt32(1), build_flags,
                     geo_flags, primitive_count=n_tris)
                 # Barrier between builds: shared scratch buffer must be drained before reuse.
-                if i < n_blas
-                    scratch_barrier = VK.MemoryBarrier(
-                        C_NULL,
-                        VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
-                        VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
-                        VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
-                        VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
-                    )
-                    VK.cmd_pipeline_barrier(
-                        buildcmd(as_ctx), [scratch_barrier], [], [];
-                        src_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                        dst_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                    )
-                end
+                i < n_blas && asscratchbarrier!(as_ctx)
             end
 
             # Build instance list for HWTLAS.
@@ -1622,16 +1520,18 @@ function build_hw_accel_from_tlas(tlas;
             hw_blas_refs = Vector{LavaBLAS}(undef, n_instances)
             transforms = Vector{NTuple{12,Float32}}(undef, n_instances)
             custom_indices = Vector{UInt32}(undef, n_instances)
+            masks = Vector{UInt8}(undef,n_instances)
 
             for i in 1:n_instances
                 inst = instances[i]
                 blas_idx = Int(inst.blas_index)
                 hw_blas_refs[i] = hw_blas_list[blas_idx]
-                transforms[i] = mat4_to_vk_transform(inst.transform)
+                transforms[i] = Tuple(inst.transform)
                 custom_indices[i] = inst.instance_id
+                masks[i] = inst.flags & Raycore.INSTANCE_HIDDEN == 0 ? UInt8(inst.mask & 0xff) : 0x00
             end
 
-            return build_tlas(as_ctx, hw_blas_refs; transforms, custom_indices)
+            return build_tlas(as_ctx, hw_blas_refs; transforms, custom_indices, masks)
         end
     end
 

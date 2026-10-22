@@ -6,25 +6,10 @@
 # Use Raycore's RTRay and RTHitResult (same memory layout, single definition)
 using Raycore: RTRay, RTHitResult
 
-"""
-    HardwareAccel{TriVec <: AbstractVector}
+"""HardwareAccel{TriVec}
 
-Hardware-accelerated ray tracing context. Built from a Raycore-compatible HWTLAS.
-Parametrised on the concrete triangle-vector type (e.g.
-`Vector{Raycore.Triangle{UInt32}}`) so field accesses stay type-stable.
-
-# Fields
-- `tlas::LavaTLAS` — Vulkan top-level acceleration structure
-- `triangle_data::TriVec` — CPU vector of all primitives (for lookup after trace)
-- `blas_offsets::Vector{UInt32}` — Per-BLAS offset into triangle_data
-- `rt_pipeline::RayTracingPipeline` — Pre-compiled raygen+closesthit+miss
-
-# Usage
-```julia
-hw = HardwareAccel(raycore_tlas)
-results = LavaArray{RTHitResult}(n_rays)
-trace_closest_hits!(results, rays, hw)
-```
+Legacy Raycore import/RT context: native TLAS, CPU primitive lookup tables,
+portable shader templates and the submit channel used for tracing.
 """
 mutable struct HardwareAccel{TriVec <: AbstractVector}
     tlas::LavaTLAS
@@ -44,39 +29,25 @@ mutable struct HardwareAccel{TriVec <: AbstractVector}
     bq::SubmitChannel{<:VulkanQueue}
 end
 
-"""
-    HardwareAccel(tlas; ctx, bq = ctx.default_bq) -> HardwareAccel
+"""HardwareAccel(tlas; ctx, bq = ctx.default_bq)
 
-Build a HardwareAccel from a Raycore-compatible HWTLAS.
-The HWTLAS must have `.blas_array` and `.instances` fields.
-
-`bq` defaults to the submit channel whose ctx built the HWTLAS (the CPU-side HWTLAS
-object is used to find the ctx via the HW build path), so ray tracing runs
-on the same device the AS was allocated against.
+Import a Raycore.TLAS or compatible owning BLAS/instance source into pooled
+native storage on bq. Canonical row-major transforms, custom IDs, masks and
+visibility are preserved. Raycore.TLAS uses its owning blas_storage arrays.
 """
 function HardwareAccel(tlas;
                        ctx::VkContext,
                        bq::SubmitChannel{<:VulkanQueue}=ctx.default_bq)
-    hw_tlas, tri_data, offsets, per_inst_offsets = build_hw_accel_from_tlas(tlas; ctx)
+    hw_tlas, tri_data, offsets, per_inst_offsets = build_hw_accel_from_tlas(tlas; ctx, bq)
     HardwareAccel(hw_tlas, tri_data, offsets, per_inst_offsets; bq)
 end
 
-"""
-    HardwareAccel(hw_tlas::LavaTLAS, triangle_data, blas_offsets, per_instance_tri_offsets;
-                  bq=<derived from hw_tlas>) -> HardwareAccel
+"""HardwareAccel(hw_tlas, triangle_data, blas_offsets, per_instance_tri_offsets; bq)
 
-Build a HardwareAccel from a pre-built Vulkan HWTLAS + triangle data + offsets.
-Default `bq` is taken from `hw_tlas.storage.buf[].ctx.default_bq` so we never
-mismatch the AS against a queue on a different device.
-
-A fresh `RayTracingPipeline` (and its SBT buffer) is built per HardwareAccel.
-Callers that want to avoid the per-frame SBT allocation during mesh-swap
-rebuilds should reuse the previous HardwareAccel via the Raycore-side
-`build_hw_tlas(...; accel_prev=hwtlas.hw_accel)` plumbing: that updates the
-geometry-dependent fields (`tlas`, `triangle_data`, `blas_offsets`,
-`per_instance_tri_offsets`) in place and keeps the pipeline alive. In the
-Raycore/RayMakie flow this happens automatically on every `sync!(hwtlas)` —
-one pipeline per VulkanTLAS, lifetime tied to the VulkanTLAS.
+Wrap prebuilt native storage and CPU lookup tables. The default channel belongs
+to hw_tlas. Creates portable RT shader templates; native programs are prepared
+on the tracing device. Mesh-swap callers may retain these templates while
+replacing geometry and offset fields.
 """
 function HardwareAccel(hw_tlas::LavaTLAS, triangle_data::TriVec, blas_offsets,
                        per_instance_tri_offsets::AbstractVector{UInt32};

@@ -240,3 +240,9 @@ GPUArrays algorithms from Vulkan. Paired bytes, wrapped/dimension cases and
 drained allocations pass; a fresh process fetches the pinned published dependency
 and passes native checks. The aggregate implementation decrease includes the
 small helper added in GPUArrays.
+
+[Shared AS dependencies/ownership](consolidation-as-barriers.md) deletes repeated
+barrier emission and fixes missing build-input submission tracking. Pooled imports
+now use owning arrays and preserve transforms, masks, visibility and channels.
+206 regression and 86 pooled assertions pass on AMD/NVIDIA; a fresh process repeats
+the pooled checks. Warm AS barrier emission drops from 1,152 Julia bytes to zero.
