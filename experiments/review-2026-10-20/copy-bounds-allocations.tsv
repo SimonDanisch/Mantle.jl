@@ -1,0 +1,9 @@
+device	unified	source	source_bytes	before_host_bytes	after_host_bytes
+AMD Radeon RX 7900 XTX (RADV NAVI31)	false	array	262144	592	592
+AMD Radeon RX 7900 XTX (RADV NAVI31)	false	words	262144	624	624
+AMD Radeon RX 7900 XTX (RADV NAVI31)	true	array	262144	32	32
+AMD Radeon RX 7900 XTX (RADV NAVI31)	true	words	262144	64	64
+NVIDIA RTX 4000 Ada Generation	false	array	262144	592	592
+NVIDIA RTX 4000 Ada Generation	false	words	262144	624	624
+NVIDIA RTX 4000 Ada Generation	true	array	262144	32	32
+NVIDIA RTX 4000 Ada Generation	true	words	262144	64	64

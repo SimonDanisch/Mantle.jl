@@ -15,6 +15,34 @@ end
     return nothing
 end
 
+"""Validate nonempty linear copies and normalize indices/count to Int."""
+@inline function copybounds(dest, doffs::Integer, src, soffs::Integer, n::Integer)
+    return copybounds(dest,doffs,n),copybounds(src,soffs,n),Int(n)
+end
+@inline function copybounds(array, start::Integer, n::Integer)
+    n >= 0 || throw(ArgumentError("copy length must be non-negative"))
+    (1 <= start <= length(array) && n <= length(array)-start+1) ||
+        throw(BoundsError(array,start:(big(start)+n-1)))
+    return Int(start)
+end
+
+"Whether a host array's logical order is one contiguous, CPU-addressable span."
+function dense_host_storage(data)
+    data isa StridedArray || return false
+    root=data
+    while Base.parent(root)!==root
+        root=Base.parent(root)
+    end
+    root isa Array || return false
+    step=1
+    for d in 1:ndims(data)
+        size(data,d)>1 && Base.stride(data,d)!=step && return false
+        step*=size(data,d)
+    end
+    return true
+end
+
+
 """DeviceArray{T,N}(region, dims)
 
 A typed, non-owning view of a pool region. The pool owns its memory; retire the

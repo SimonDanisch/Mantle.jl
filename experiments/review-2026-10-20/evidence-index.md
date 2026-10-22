@@ -266,3 +266,8 @@ All 115 sources parse and definition trees are unchanged. The cleanup removes
 overflow and negative-offset escapes. Core owns checked shape/span policy; native
 refusal, valid views, pool behavior and warm replay pass. The type-union reflection
 fixture is repaired without weakening the core/backend boundary guard.
+
+The [copy-range follow-up](consolidation-extents.md#copy-range-follow-up) fixes
+reproduced writes outside logical views. Typed uploads own one pointer-copy path;
+paired measurements preserve warm host allocation after repairing boxing in the
+first shared checker. Native lifetime, cross-queue and replay checks pass.

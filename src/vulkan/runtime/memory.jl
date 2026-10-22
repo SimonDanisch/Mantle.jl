@@ -1093,19 +1093,12 @@ The caller must preserve host_ptr storage through this call."""
 function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
                      host_ptr::Ptr{UInt8}, nbytes::Integer; offset::Integer=0)
     nbytes == 0 && return
+    checkspan(managed.size,offset,nbytes)
     @assert direction === :upload || direction === :download  "direction must be :upload or :download"
-    # A guard against a host transfer inside a launch capture was here, deleted
-    # 2026-09-15: it could not be replayed, because the host moves the bytes and
-    # no command in the buffer does. A declared graph states a host write as an
-    # update pass (`Update`, `hostwritten!`), which IS in the plan, so there is no
-    # longer a way to ask for the unreplayable thing.
     buf_offset = pool_offset(managed) + Int(offset)
 
-    # BAR fast-path: host-visible mapped memory — direct memcpy, no staging.
-    # Not for a large DOWNLOAD: BAR memory is write-combined, so the host reads
-    # it uncached — 71 ms for a 25 MB 1080p RGB Float32 frame on Strix Halo,
-    # against 1.2 ms through HIP. A copy into the host-cached `Readback` kind
-    # below costs one submission, which only a few-word read cannot repay.
+    # Mapped uploads and small downloads memcpy directly. Large BAR reads use
+    # host-cached Readback memory to avoid uncached host reads.
     if managed.mapped_ptr != Ptr{UInt8}(0) &&
        (direction === :upload || nbytes <= BAR_DIRECT_READ_BYTES)
         # `last_write` is stamped at submit, and every writer is submitted the
@@ -1119,13 +1112,8 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
         return
     end
 
-    # Device-local: through a `Unified` region and one copy, in a one-shot of
-    # its own. Holding `managed` is what orders the copy behind whatever other
-    # channel wrote it — core derives the wait from the stamp at submit.
-    #
-    # A download is recorded on the channel that last named the buffer, so the
-    # copy piggy-backs on the producer's timeline and the host waits once
-    # instead of twice. `stampof` is which channel that was.
+    # Core stamps order transfers against other channels. Downloads use the
+    # last live producer channel to avoid a second timeline wait.
     bq = if direction === :upload
         (managed.ctx::VkContext).default_bq
     else
@@ -1135,10 +1123,7 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
     end
     # `Mantle.offset`, qualified: this function's `offset` keyword shadows it.
     if direction === :upload
-        # The staging bytes belong to the one-shot: written before it is
-        # submitted, given back by the sweep once the copy has passed. Nothing
-        # waits — the next reader of `managed` on this queue is ordered behind
-        # the copy, and a host reader waits on `last_write`.
+        # The upload one-shot owns scratch until its copy completes.
         oneshot!(bq; tag = :upload) do e
             # Staged in host memory and moved by the copy engine; see `scratch!`.
             r = scratch!(e.owner, nbytes, Readback())
@@ -1148,12 +1133,8 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
                              src_off = pool_offset(mb) + Mantle.offset(r), dst_off = buf_offset)
         end
     else
-        # The caller's region: acquired here, read after the copy has passed,
-        # and released here — not scratch of the one-shot, which the sweep
-        # could hand on the moment the wait returned. From the `Readback` kind,
-        # which is host-CACHED memory: this staged through `Unified` for a
-        # while, and reading BAR memory back is a 29 MB/s memcpy — 330 ms for
-        # one 1368x1026 RGBA{Float32} frame, measured on both drivers here.
+        # The download caller owns cached Readback storage through completion and
+        # host read; one-shot scratch could be reclaimed before that read.
         dev = lavadevice(managed.ctx::VkContext)
         r = acquire!(pool(dev), dev, Readback(), nothing, max(Int(nbytes), 16);
                      align = ARG_ALIGN, blocksize = READBACK_BLOCK_SIZE)
@@ -1184,29 +1165,21 @@ end
 const HostArrayView = SubArray{T,N,P} where {T,N,P<:Array}
 const HostReinterpretArray{T} = Base.ReinterpretArray{T,N,S,A} where {N,S,A<:Union{Array,HostArrayView}}
 
-"Whether a host array's logical order is one contiguous, CPU-addressable span."
-function dense_host_storage(data)
-    data isa StridedArray || return false
-    root=data
-    while Base.parent(root)!==root
-        root=Base.parent(root)
-    end
-    root isa Array || return false
-    step=1
-    for d in 1:ndims(data)
-        size(data,d)>1 && Base.stride(data,d)!=step && return false
-        step*=size(data,d)
-    end
-    return true
-end
 
 """Upload plain-bit host values. Contiguous host views transfer directly; other
 layouts materialize in logical order. The transfer owns any GPU copy lifetime."""
-function upload_typed!(dst::VkManagedBuffer, data::AbstractArray{T}; offset::Int=0) where T
+upload_typed!(dst::VkManagedBuffer, data::AbstractArray; offset::Int=0) =
+    upload_typed!(dst,data,1,length(data);offset)
+
+function upload_typed!(dst::VkManagedBuffer, data::AbstractArray{T},
+                       first::Integer, n::Integer; offset::Int=0) where {T}
     isbitstype(T) || throw(ArgumentError("upload_typed! requires an isbits element type, got $T"))
-    src = dense_host_storage(data) ? data : collect(data)
-    GC.@preserve src copy_buffer!(:upload, dst, Ptr{UInt8}(pointer(src)),
-                                  length(src) * sizeof(T); offset)
+    n == 0 && return nothing
+    first = copybounds(data,first,n)
+    n = Int(n)
+    data isa Array || dense_host_storage(data) ||
+        return upload_typed!(dst,collect(data),first,n;offset)
+    GC.@preserve data copy_buffer!(:upload,dst,Ptr{UInt8}(pointer(data,first)),n*sizeof(T);offset)
 end
 
 """Download data from a device-local buffer into a typed array."""

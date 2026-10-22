@@ -4,7 +4,7 @@ function check_host_upload(ctx)
     @testset "typed uploads preserve shape order, bits and offsets" begin
         bq = ctx.default_bq
         dense = reshape(Float32.(1:6),2,3)
-        sources = (dense, view(Float32.(1:12),2:2:12), PermutedDimsArray(dense,(2,1)),
+        sources = (fill(9f0),Float32[],dense, view(Float32.(1:12),2:2:12), PermutedDimsArray(dense,(2,1)),
                    reshape(UInt8.(1:6),3,2), Float16.(dense), ComplexF32.(dense),
                    reinterpret(Float32,UInt32[0,0x80000000,0x7fc01234,0x7f800000]),
                    BitArray([true,false,true]),SVector(7f0,8f0))
@@ -26,6 +26,9 @@ function check_host_upload(ctx)
         Mantle.upload_typed!(parent.buf[],reshape(Float32[9,8],1,2);
                              offset=parent.offset+10sizeof(Float32))
         expected[11:12] = Float32[9,8]
+        @test Array(parent) == expected
+        Mantle.upload_typed!(parent.buf[],Float32[0,9,8,0],UInt32(2),UInt64(2);offset=parent.offset)
+        expected[1:2] = Float32[9,8]
         @test Array(parent) == expected
         bytes = collect(reinterpret(UInt8,Float32[7,6]))
         Mantle.upload!(parent.buf[],bytes;offset=parent.offset)
@@ -119,6 +122,71 @@ function check_extent_refusal(ctx)
         @test_throws ArgumentError Mantle.trydevicearray(dev,UInt8,(-1,-1))
         @test Mantle.submissions(dev) == before
         @test Mantle.reserved(Mantle.pool(dev)) == reserved
+        @test isempty(Mantle.validationmessages!(dev))
+    end
+end
+
+function check_copy_bounds(ctx)
+    dev = Mantle.lavadevice(ctx)
+    @testset "copy offsets respect logical views before native transfer" begin
+        source = UInt32[7,8,9]
+        bytes = collect(reinterpret(UInt8,source))
+        words = reinterpret(UInt32,bytes)
+        matrixwords = reinterpret(UInt32,reshape(bytes,4,3))
+        spacedbytes = zeros(UInt8,2length(bytes)); spacedbytes[1:2:end] = bytes
+        spacedwords = reinterpret(UInt32,view(spacedbytes,1:2:length(spacedbytes)))
+        srcparent = Mantle.LavaArray(UInt32[10,20,30,40,50];bq=dev.bq)
+        srcview = GPUArrays.derive(UInt32,srcparent,(3,),1)
+        invalid = ((0,1,1),(4,1,1),(1,0,1),(1,4,1),(1,1,4),
+                   (typemax(Int),1,2),(1,1,typemax(Int)))
+        try
+            for unified in (false,true)
+                original = UInt32[101,102,103,104,105]
+                parent = Mantle.LavaArray(original;bq=dev.bq,unified)
+                dest = GPUArrays.derive(UInt32,parent,(3,),1)
+                try
+                    for src in (source,words,matrixwords,spacedwords,srcview)
+                        before = Mantle.submissions(dev)
+                        for (doff,soff,n) in invalid
+                            @test_throws BoundsError copyto!(dest,doff,src,soff,n)
+                        end
+                        @test_throws ArgumentError copyto!(dest,1,src,1,-1)
+                        @test copyto!(dest,typemax(Int),src,typemax(Int),0) === dest
+                        @test Mantle.submissions(dev) == before
+                        @test Array(parent) == original
+                        @test copyto!(dest,Int32(2),src,UInt32(1),Int16(2)) === dest
+                        expected = copy(original); expected[3:4] = Array(src)[1:2]
+                        @test Array(parent) == expected
+                        copyto!(parent,original)
+                    end
+                    before = Mantle.submissions(dev)
+                    GC.@preserve source begin
+                        pointer = Ptr{UInt8}(Base.pointer(source))
+                        for direction in (:upload,:download), (off,n) in ((-1,4),(typemax(Int),4),(0,-1))
+                            @test_throws ArgumentError Mantle.copy_buffer!(direction,parent.buf[],pointer,n;offset=off)
+                        end
+                    end
+                    @test Mantle.submissions(dev) == before
+                    @test Array(parent) == original
+                finally
+                    Mantle.unsafe_free!(dest); Mantle.unsafe_free!(parent)
+                end
+            end
+            host = fill(UInt32(99),3)
+            before = Mantle.submissions(dev)
+            for (doff,soff,n) in invalid
+                @test_throws BoundsError copyto!(host,doff,srcview,soff,n)
+            end
+            @test_throws ArgumentError copyto!(host,1,srcview,1,-1)
+            @test copyto!(host,typemax(Int),srcview,typemax(Int),0) === host
+            @test Mantle.submissions(dev) == before
+            @test host == fill(UInt32(99),3)
+            @test copyto!(host,Int32(1),srcview,UInt32(2),Int16(2)) === host
+            @test host == UInt32[30,40,99]
+        finally
+            Mantle.unsafe_free!(srcview); Mantle.unsafe_free!(srcparent)
+        end
+        Mantle.waitidle(dev); Mantle.drain!(dev.bq)
         @test isempty(Mantle.validationmessages!(dev))
     end
 end

@@ -553,6 +553,7 @@ if _VULKAN_OK
     include(joinpath(@__DIR__, "vulkan", "test_host_upload.jl"))
     check_host_upload(Mantle.vk_context())
     check_extent_refusal(Mantle.vk_context())
+    check_copy_bounds(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_recording_trim.jl"))
     check_recording_trim(Mantle.defaultbackend())
     check_store_submission(Mantle.vk_context())

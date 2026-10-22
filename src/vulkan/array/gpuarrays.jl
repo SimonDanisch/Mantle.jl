@@ -453,100 +453,60 @@ end
 
 # Host copies pass pointers/byte counts directly; GC.@preserve protects host storage.
 # copy_buffer! owns native mapping/staging and queue synchronization.
-function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
-                      src::Array{T}, soffs::Integer, n::Integer) where T
+Base.copyto!(dest::LavaArray{T}, doffs::Integer,
+             src::Array{T}, soffs::Integer, n::Integer) where {T} =
+    copyhost!(dest,doffs,src,soffs,n)
+
+function copyhost!(dest::LavaArray{T}, doffs::Integer,
+                   src::AbstractArray{T}, soffs::Integer, n::Integer) where {T}
     n == 0 && return dest
-    # One copy in a one-shot of its own; holding `dest.buf[]` is what makes core
-    # wait for a prior writer on another channel.
-    GC.@preserve src copy_buffer!(:upload, dest.buf[],
-                                  Ptr{UInt8}(pointer(src, soffs)), n * sizeof(T);
-                                  offset = dest.offset + (Int(doffs) - 1) * sizeof(T))
+    doffs,soffs,n = copybounds(dest,doffs,src,soffs,n)
+    GC.@preserve dest upload_typed!(dest.buf[],src,soffs,n;offset=dest.offset+(doffs-1)*sizeof(T))
     return dest
 end
 
 function Base.copyto!(dest::Array{T}, doffs::Integer,
                       src::LavaArray{T}, soffs::Integer, n::Integer) where T
     n == 0 && return dest
+    doffs,soffs,n = copybounds(dest,doffs,src,soffs,n)
     # The copy is recorded on whichever channel last named `src.buf[]`, so the
     # host waits on one timeline instead of two.
-    GC.@preserve dest copy_buffer!(:download, src.buf[],
+    GC.@preserve dest src copy_buffer!(:download, src.buf[],
                                    Ptr{UInt8}(pointer(dest, doffs)), n * sizeof(T);
                                    offset = src.offset + (Int(soffs) - 1) * sizeof(T))
     return dest
 end
 
-# Native file readers can expose typed words over a decoded byte buffer. Keep
-# that buffer as the host owner instead of collecting a second multi-GB array.
-function Base.copyto!(dest::LavaArray{T},doffs::Integer,
-                     src::HostReinterpretArray{T},soffs::Integer,n::Integer) where T
-    n==0 && return dest
-    n>0 || throw(ArgumentError("copy length must be non-negative"))
-    checkbounds(src,soffs:soffs+n-1)
-    checkbounds(dest,doffs:doffs+n-1)
-    dense_host_storage(src) || return copyto!(dest,doffs,collect(src),soffs,n)
-    GC.@preserve src copy_buffer!(:upload,dest.buf[],Ptr{UInt8}(pointer(src,soffs)),n*sizeof(T);
-        offset=dest.offset+(Int(doffs)-1)*sizeof(T))
-    return dest
-end
+Base.copyto!(dest::LavaArray{T},doffs::Integer,
+             src::HostReinterpretArray{T},soffs::Integer,n::Integer) where {T} =
+    copyhost!(dest,doffs,src,soffs,n)
 Base.copyto!(dest::LavaArray{T},src::HostReinterpretArray{T}) where T =
     copyto!(dest,firstindex(dest),src,firstindex(src),length(src))
 
 function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
                       src::LavaArray{T}, soffs::Integer, n::Integer) where T
     n == 0 && return dest
-    # Two devices: there is no path between their memories, and a buffer from
-    # one named in a command on the other is a handle the driver takes as a
-    # fault. Staged through the host instead, synchronously; a caller that wants
-    # the transfer off the critical path keeps the data on one device.
+    doffs,soffs,n = copybounds(dest,doffs,src,soffs,n)
+    # Cross-device copies currently use a synchronous host transfer.
     if (src.buf[].ctx::VkContext) !== (dest.buf[].ctx::VkContext)
         staging = Vector{T}(undef, n)
         copyto!(staging, 1, src, soffs, n)
         copyto!(dest, doffs, staging, 1, n)
         return dest
     end
-    # The kernel detour for a copy inside a recording was here, deleted
-    # 2026-09-15 with the capture path. `cmd_copy_buffer!` is a transfer command
-    # rather than a dispatch, so a capture could not see it and the copy had to be
-    # done as `d2dcopy_kernel!` instead. A graph that wants a copy declares that
-    # kernel itself; this function is the ad hoc `copyto!` again, and
-    # `vkCmdCopyBuffer` is the better instruction for it.
-    # Direct GPU→GPU copy via vkCmdCopyBuffer (no CPU staging roundtrip).
+    # Same-device copies use the native transfer command.
     src_offset = pool_offset(src.buf[]) + src.offset + (Int(soffs) - 1) * sizeof(T)
     dst_offset = pool_offset(dest.buf[]) + dest.offset + (Int(doffs) - 1) * sizeof(T)
     nbytes = n * sizeof(T)
     bq = (dest.buf[].ctx::VkContext).default_bq
-    # Hold the ARRAYS, not the `VkManagedBuffer`s that `cmd_copy_buffer!` sees.
-    #
-    # It holds what it is given, and it is given `src.buf[]` — a buffer, which
-    # the submission then makes REACHABLE. Reachability is not what decides
-    # whether the memory is still ours: the `DataRef` refcount is, and the
-    # array's finalizer releases that. So for
-    #
-    #     copyto!(dst, Adapt.adapt(backend, host_array))
-    #
-    # — no reference to the source survives the call — the GC collects the
-    # source, its ref releases, the pooled block goes back, and the recorded
-    # `vkCmdCopyBuffer` names memory the pool has handed onward.
-    #
-    # Holding the array is the level that keeps the refcount up, which is why
-    # both are held here as well as inside the copy. Every kernel argument
-    # already gets this lifetime through the launch's holdleaves!; only the copy
-    # path was holding a level too low.
-    # The `openrecording()` consult was here, deleted 2026-09-15 with `batched!`
-    # for the same reason as the one in `ka_backend.jl`: which command buffer a
-    # copy landed in came from task-global state rather than from an argument. A
-    # graph that wants this copy declares `d2dcopy_kernel!`; outside one it is a
-    # command buffer and a submit, which is what an ad hoc `copyto!` is.
+    # Retain DataRef-owning arrays until completion, as well as native buffers.
     oneshot!(bq; tag = :copy) do e
         hold!(e, src)
         hold!(e, dest)
         cmd_copy_buffer!(e, src.buf[], dest.buf[], nbytes;
                          src_off=src_offset, dst_off=dst_offset)
     end
-    # No wait: this is device→device, so nothing on the host needs the result,
-    # and the next closed buffer on this queue opens with the barrier that
-    # orders it behind the copy. A flush here would drain the whole GPU on
-    # every `copy(::LavaArray)`.
+    # Return without a host wait; core orders later resource users.
     return dest
 end
 

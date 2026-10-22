@@ -354,7 +354,8 @@ KernelInterface's capability tables.
 
 Core owns dimension and byte-span validation before allocation, placement or
 wrapping: reject negative dimensions and checked-product overflow, and test
-subranges without overflowing offset + length. Native verbs retain their
+subranges without overflowing offset + length. Copies check logical array ranges
+as well as backing byte spans before host access or enqueue. Native verbs retain their
 API-specific alignment/usage requirements rather than copying this policy.
 
 Scalar numeric support is `scalars::Tuple` of supported scalar types;
