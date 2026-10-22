@@ -882,12 +882,8 @@ function flush_stall_report(bq::SubmitChannel{<:VulkanQueue}, target::UInt64)
                 ", next_timeline = ", driver(bq).next_timeline,
                 ", outstanding = ", length(bq.outstanding))
     for (i, o) in enumerate(bq.outstanding)
-        b = o.payload
-        waits = [v for (_, v, _) in b.wait_semaphores]
-        done = readable && b.signal_value <= cur
-        println(io, "  submission $i: signals ", b.signal_value,
-                    ", waits on ", isempty(waits) ? "nothing" : string(waits),
-                    done ? "  [already signalled]" : "")
+        println(io, "  submission $i (", something(o.tag, "untagged"), "): signals ", o.token,
+                    readable && o.token <= cur ? "  [already signalled]" : "")
     end
     if readable && all(o -> o.token <= cur, bq.outstanding) && target > cur
         println(io, "  >> every in-flight submission is already signalled and the target is not: ",

@@ -557,6 +557,8 @@ if _VULKAN_OK
     check_copy_bounds(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_gemm_workspace.jl"))
     check_workspace_retirement(Mantle.vk_context())
+    include(joinpath(@__DIR__, "vulkan", "test_flush_report.jl"))
+    check_flush_report(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_recording_trim.jl"))
     check_recording_trim(Mantle.defaultbackend())
     check_store_submission(Mantle.vk_context())
