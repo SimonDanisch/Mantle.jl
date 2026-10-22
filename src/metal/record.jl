@@ -852,19 +852,9 @@ end
 # core lands them in each run's submission (`emitupdates!`).
 Mantle.emitupdate!(::MetalRecorder, ::Mantle.Plan, ::Mantle.PassPlan) = nothing
 
-"""
-Time a recorded pass on the host only: the cost of recording it. Apple GPUs sample
-counters only at stage boundaries and a replay is one command buffer for all
-passes, so there is no per-pass GPU time (`NaN` in `timings`).
-"""
-function Mantle.profiled!(f, pl::Mantle.Plan, ::MetalRecorder, i::Integer)
-    prof = pl.profiler
-    prof === nothing && return f()
-    t0 = time_ns()
-    r = f()
-    Mantle.sample!(prof.host_ns[i], Float64(time_ns() - t0))
-    return r
-end
+# Apple GPUs sample counters only at stage boundaries and a replay is one command
+# buffer for all passes, so a recorded pass has no GPU time of its own.
+Mantle.passend!(::Mantle.Plan, ::MetalRecorder, ::Integer, _) = NaN
 
 """
 Open a segment for this pass's predicate unless it continues the current one. Any

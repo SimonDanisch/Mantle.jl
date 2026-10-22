@@ -690,7 +690,7 @@ end
 """
 Nanoseconds of GPU time for everything committed since the last call; `0.0` if
 nothing was. Flushes and waits. Buffers that never ran contribute nothing.
-Recorded passes do not call this (`profiled!`).
+Recorded passes report no GPU time (`passend!`).
 """
 function Mantle.gpupasstime!(d::MetalDevice)
     bq = batchqueue(d)

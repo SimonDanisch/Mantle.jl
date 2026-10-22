@@ -741,7 +741,7 @@ replacements and profile variants; prefixrecords and eagerrecords count temporar
 change-prefix/eager encoding separately. Performance reports include all three,
 so zero plan re-records cannot conceal per-frame prefix work. There is no duplicate
 Plan rerecord counter. Plan.compiles retains its graph-wide compile count as already
-specified. The former Profiler/profiled!/gpupasstime!/collect!/timestamps surfaces
+specified. The former Profiler/passbegin!/passend!/gpupasstime!/collect!/timestamps surfaces
 converge on Graph(profile=true), timings(g) and the shared diagnostics, not a
 second recording/profiling subsystem.
 

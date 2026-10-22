@@ -312,18 +312,31 @@ function syncbackend end
 """
     profiled!(f, plan, emitter, i)
 
-Emit pass i and sample its host/GPU cost when profiling. Timestamp backends may override.
+Emit pass `i` through `f()` and, when the plan profiles, sample its host recording
+time and its GPU time between [`passbegin!`](@ref) and [`passend!`](@ref).
 """
 function profiled!(f, pl::Plan, e, i::Integer)
     prof = pl.profiler
     prof === nothing && return f()
+    begun = passbegin!(pl, e, i)
     t0 = time_ns()
     r = f()
-    g = gpupasstime!(pl.graph.dev)
     sample!(prof.host_ns[i], Float64(time_ns() - t0))
+    g = passend!(pl, e, i, begun)
     isnan(g) || sample!(prof.gpu_ns[i], g)
     return r
 end
+
+"""
+    passbegin!(plan, emitter, i) -> begun
+    passend!(plan, emitter, i, begun) -> Float64
+
+Open and close the GPU measurement of pass `i`. `passend!` returns its GPU
+nanoseconds, or `NaN` when they are read after the run (timestamp queries) or
+unknown. The default asks the device ([`gpupasstime!`](@ref)).
+"""
+passbegin!(::Plan, e, ::Integer) = nothing
+passend!(pl::Plan, e, ::Integer, begun) = gpupasstime!(pl.graph.dev)
 
 """
     storebytes!(emitter, store, offset, ptr, nbytes)
@@ -547,12 +560,12 @@ const BACKEND_VOCABULARY = (
     # Also read from backend-specific compiled dispatches.
     :argsize, :devicesized, :indirectindex,
     # Core defines a default for each; a backend overrides it.
-    :retire!, :blocksize, :copy_target!, :gpupasstime!,
+    :retire!, :blocksize, :copy_target!, :gpupasstime!, :passbegin!, :passend!,
     # the walk's primitives
     :openrecording, :closerecording!, :emithead!, :emitloophead!, :emitbarriers!,
     :withpredicate,
     :emitupdate!, :emitdispatch!, :emitcopy!, :beginrender!, :emitdraw!, :endrender!,
-    :profiled!, :collect!,
+    :collect!,
     :emitkernel!, :emitpreparebarrier!, :workgroupsize, :indirectslot, :writegroups!, :slotgrid,
     :storebytes!, :orderstore!,
     :recordsplans, :recordable, :runscalls, :librarygemm, :native_gemm_available,

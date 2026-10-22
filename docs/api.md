@@ -871,12 +871,12 @@ of today's names.
 | `openrecording` | goes |
 | `openrun` | goes |
 | `passbarriers` | goes: barriers! is core's |
+| `passbegin!`, `passend!` | Graph(profile=true), timings(g), shared diagnostics (execution-contracts.md §10) |
 | `passed` | verb: `passed(ch, value)`; core's `passed(::Token)` calls it |
 | `passedas` | goes: argument layout is core's (bindings!) |
 | `patchable` | goes with the pushed patch mechanism |
 | `pool` | core: `pool(dev)` |
 | `present_frame!` | goes: present is the separately retired `presentnative!` operation in run! |
-| `profiled!` | Graph(profile=true), timings(g), shared diagnostics (execution-contracts.md §10) |
 | `Profiler` | Graph(profile=true), timings(g), shared diagnostics (execution-contracts.md §10) |
 | `rawalloc` | verb |
 | `rawfree` | verb (its separate AS path goes) |

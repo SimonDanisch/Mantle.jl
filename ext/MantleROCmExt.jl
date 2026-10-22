@@ -459,23 +459,16 @@ walk to bracket with timing events.
 """
 Mantle.recordable(::ROCmDevice, pl::Mantle.Plan) = Mantle.recordable(pl) && !pl.profile
 
-"""
-Bracket one pass of a profiled run with timing HIP events on the device stream
-and wait, so `gpu_ns` is the pass's own GPU span. The wait serialises the run.
-"""
-function Mantle.profiled!(f, pl::Mantle.Plan{ROCmDevice}, e::Mantle.Immediate, i::Integer)
-    prof = pl.profiler
-    prof === nothing && return f()
-    d = pl.graph.dev
-    adopt!(d)
-    start = AMDGPU.HIP.HIPEvent(d.stream; timing = true)
-    t0 = time_ns()
-    r = f()
-    Mantle.sample!(prof.host_ns[i], Float64(time_ns() - t0))
-    stop = AMDGPU.HIP.HIPEvent(d.stream; timing = true)
+# Timing HIP events around each pass on the device stream; waiting on the stop
+# event serialises a profiled run.
+function Mantle.passbegin!(pl::Mantle.Plan{ROCmDevice}, ::Mantle.Immediate, ::Integer)
+    adopt!(pl.graph.dev)
+    return AMDGPU.HIP.HIPEvent(pl.graph.dev.stream; timing = true)
+end
+function Mantle.passend!(pl::Mantle.Plan{ROCmDevice}, ::Mantle.Immediate, ::Integer, start)
+    stop = AMDGPU.HIP.HIPEvent(pl.graph.dev.stream; timing = true)
     AMDGPU.HIP.hipEventSynchronize(stop)
-    Mantle.sample!(prof.gpu_ns[i], AMDGPU.HIP.elapsed(start, stop) * 1e9)
-    return r
+    return AMDGPU.HIP.elapsed(start, stop) * 1e9
 end
 
 """

@@ -824,25 +824,15 @@ function collect!(prof::Profiler, dev::LavaDevice)
 end
 
 
-"""
-    profiled!(f, plan, e, i)
-
-Bracket pass `i` with timestamps and time its recording on the host. Both
-timestamps are `BOTTOM_OF_PIPE`, so the interval is the pass's own barrier and
-work; a `TOP_OF_PIPE` start would bill each pass its predecessor's time. The
-query pool is reset at the head of the frame's recording (`emithead!`).
-"""
-function profiled!(f, pl::Plan, e::Emitter, i::Integer)
-    prof = pl.profiler
-    prof === nothing && return f()
-    VK.cmd_write_timestamp(e.cmd, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                                    prof.pool, UInt32(2i - 2))
-    t0 = time_ns()
-    r = f()
-    sample!(prof.host_ns[i], Float64(time_ns() - t0))
-    VK.cmd_write_timestamp(e.cmd, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                                    prof.pool, UInt32(2i - 1))
-    r
+# Both timestamps are `BOTTOM_OF_PIPE`, so the interval is the pass's own barrier
+# and work; a `TOP_OF_PIPE` start would bill each pass its predecessor's time. The
+# query pool is reset at the head of the recording (`emithead!`) and read after
+# the run (`collect!`).
+passbegin!(pl::Plan, e::Emitter, i::Integer) =
+    VK.cmd_write_timestamp(e.cmd, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pl.profiler.pool, UInt32(2i - 2))
+function passend!(pl::Plan, e::Emitter, i::Integer, _)
+    VK.cmd_write_timestamp(e.cmd, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pl.profiler.pool, UInt32(2i - 1))
+    return NaN
 end
 
 """
