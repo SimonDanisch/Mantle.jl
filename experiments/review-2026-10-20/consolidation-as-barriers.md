@@ -54,3 +54,27 @@ both in the existing session and a fresh process with synchronization validation
 All 115 source files parse. Source falls 49,457 → 49,264 physical and
 22,717 → 22,592 implementation lines: 125 code lines deleted, with no algorithm
 moved elsewhere.
+
+## Shared geometry/build encoding and direct inputs
+
+Against `f62b33d`, host TLAS construction delegates to the device-record builder;
+refits share native build-command encoding. Typed instance geometry replaces the
+remaining Symbol/keyword branches. The pooled importer uses core trianglevertices;
+its duplicate expansion and unused primitive-list bookkeeping are deleted.
+
+Build/refit uploads consume original host arrays. GPU vertex inputs retain a byte
+view of the same allocation: the old updateable-build path reproduced a compiler
+failure by trying to convert vertex triples into UInt8 values. No new fallback.
+
+432 native/host regression assertions pass, including offset canaries, moved
+ray-hit distances, fixed topology, million-instance refits, lifetime, mesh updates
+and tracing. Fresh loading repeats 104 build/refit assertions on AMD/NVIDIA.
+The [paired probe](as-input-probe.jl) passes 30 native-byte and six allocation/
+readback/validation checks. For 589,824 bytes of vertices, warm full refit calls
+allocate 599,224 → 9,328 Julia bytes on each GPU ([results](as-input-allocations.tsv));
+native allocation and throughput are not measured.
+
+All 115 source files parse. This batch removes 352 physical and 140
+implementation lines against its baseline; concurrent pool-cleanup changes are
+excluded. Prose cleanup preserves definition trees. No algorithm moves into
+another repository.

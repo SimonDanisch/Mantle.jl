@@ -250,3 +250,8 @@ the pooled checks. Warm AS barrier emission drops from 1,152 Julia bytes to zero
 The [unused AS builder follow-up](consolidation-as-barriers.md#unused-builder-deletion)
 deletes 125 implementation lines with no production callers. The live pooled
 importer and ordinary build API pass the same 86 checks, including fresh loading.
+
+[Shared AS build/input encoding](consolidation-as-barriers.md#shared-geometrybuild-encoding-and-direct-inputs)
+deletes another 140 implementation lines. Native bytes, offset inputs, moved hits,
+refit stress, lifetime and fresh loading pass. Full warm refit host allocation
+falls 599,224 → 9,328 bytes for a 589,824-byte input on each qualified GPU.

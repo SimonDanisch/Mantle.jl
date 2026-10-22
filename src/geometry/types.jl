@@ -1,8 +1,4 @@
-# Geometry-type vocabulary for acceleration-structure builds.
-#
-# Replaces the older `geometry_type::Symbol` keyword on pack_geometry!,
-# query_as_build_sizes, and build_as_on_gpu with proper Julia types.
-# Methods dispatch on the concrete subtype.
+# Geometry descriptors select native packing and size queries by dispatch.
 
 abstract type GeometryType end
 

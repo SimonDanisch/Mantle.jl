@@ -1,4 +1,4 @@
-using Test, Mantle, Raycore, GeometryBasics, LinearAlgebra
+using Test, Mantle, Raycore, GeometryBasics, LinearAlgebra, GPUArrays
 
 function check_accel_barriers(ctx)
     dev = Mantle.lavadevice(ctx)
@@ -70,6 +70,52 @@ function check_accel_barriers(ctx)
             Mantle.release_batch_queue!(ch)
         end
         Mantle.drain!(dev.bq)
+        @test isempty(Mantle.validationmessages!(dev))
+    end
+    @testset "host and offset GPU vertices support in-place BLAS refits" begin
+        vertices = [(0f0,0f0,0f0),(1f0,0f0,0f0),(0f0,1f0,0f0)]
+        moved = [(x,y,2f0) for (x,y,_) in vertices]
+        rays = Mantle.LavaArray([Raycore.RTRay(0.25f0,0.25f0,-1f0,0f0,0f0,0f0,1f0,10f0)];bq=dev.bq)
+        out = Mantle.LavaArray{Raycore.RTHitResult}(undef,(1,);bq=dev.bq)
+        try
+            for gpu_input in (false,true)
+                vb = Mantle.LavaArray(vcat([(9f0,9f0,9f0)],vertices,[(8f0,8f0,8f0)]);
+                                     bq=dev.bq,extra_usage=Mantle.AS_INPUT_USAGE)
+                ib = Mantle.LavaArray(UInt32[99,0,1,2,99];bq=dev.bq,extra_usage=Mantle.AS_INPUT_USAGE)
+                vs = GPUArrays.derive(NTuple{3,Float32},vb,(3,),1)
+                ids = GPUArrays.derive(UInt32,ib,(3,),1)
+                blas = Mantle.build_accel!(dev.bq) do build
+                    gpu_input ? Mantle.build_blas(build,vs,ids;allow_update=true) :
+                                Mantle.build_blas(build,vertices,UInt32[0,1,2];allow_update=true)
+                end
+                tlas = Mantle.build_accel!(dev.bq) do build
+                    Mantle.build_tlas(build,[blas];allow_update=true)
+                end
+                accel = Mantle.HardwareAccel(tlas,Float32[],UInt32[0],UInt32[0];bq=dev.bq)
+                try
+                    Mantle.trace_closest_hits!(out,rays,accel,1)
+                    @test only(Array(out)).t ≈ 1f0
+                    Mantle.build_accel!(dev.bq) do build
+                        Mantle.refit_blas!(build,blas,moved)
+                        Mantle.refit_tlas!(build,tlas,tlas.instance_buf,1)
+                    end
+                    Mantle.trace_closest_hits!(out,rays,accel,1)
+                    @test only(Array(out)).t ≈ 3f0
+                    if gpu_input
+                        @test Mantle.bda_address(blas.vertex_arr) == Mantle.bda_address(vs)
+                        @test Array(vb) == vcat([(9f0,9f0,9f0)],moved,[(8f0,8f0,8f0)])
+                    end
+                    @test_throws ArgumentError Mantle.build_accel!(dev.bq) do build
+                        Mantle.refit_blas!(build,blas,vcat(moved,moved))
+                    end
+                finally
+                    foreach(Mantle.unsafe_free!,(tlas,blas,vs,ids,vb,ib))
+                end
+            end
+        finally
+            Mantle.unsafe_free!(rays); Mantle.unsafe_free!(out)
+        end
+        Mantle.waitidle(dev); Mantle.drain!(dev.bq)
         @test isempty(Mantle.validationmessages!(dev))
     end
 end
