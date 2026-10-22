@@ -120,14 +120,32 @@ const AnyLavaArray{T} = Union{LavaArray{T},
 # slower for `D .= A .+ B` into a 3-D destination. Each thread handles `U`
 # elements `WG` apart, so every iteration reads one contiguous run per workgroup
 # and keeps more loads in flight; a larger workgroup does not help.
-function lava_broadcast_flat!(dest, bc, n, ::Val{U}, ::Val{WG}) where {U, WG}
+
+# How thread index `I` addresses the destination and the source: linearly, or as
+# the Cartesian index within the extents `sz` (one decomposition when both use it).
+struct LinearPair end
+struct MixedPair{S}
+    sz::S
+end
+struct CartesianPair{S}
+    sz::S
+end
+@inline indexpair(::LinearPair, I) = (I, I)
+@inline indexpair(p::MixedPair, I) = (I, CartesianIndex(cart32(UInt32(I) - UInt32(1), p.sz)))
+@inline function indexpair(p::CartesianPair, I)
+    J = CartesianIndex(cart32(UInt32(I) - UInt32(1), p.sz))
+    return (J, J)
+end
+
+function lava_broadcast_flat!(dest, bc, pair, n, ::Val{U}, ::Val{WG}) where {U, WG}
     l = KI.get_local_id().x
     g = KI.get_group_id().x
     base = (g - 1) * (WG * U) + l
     @inbounds for u in 0:(U - 1)
         I = base + u * WG
         if I <= n
-            dest[I] = bc[I]
+            d, s = indexpair(pair, I)
+            dest[d] = bc[s]
         end
     end
     return nothing
@@ -148,36 +166,6 @@ bound every access by `n`. Each distinct `U` compiles its own kernel.
         u >>= 1
     end
     return wg, Val(u), wg * cld(n, wg * u)
-end
-
-function lava_broadcast_flat_cartesian!(dest, bc, sz, n,
-                                                          ::Val{U}, ::Val{WG}) where {U, WG}
-    l = KI.get_local_id().x
-    g = KI.get_group_id().x
-    base = (g - 1) * (WG * U) + l
-    @inbounds for u in 0:(U - 1)
-        I = base + u * WG
-        if I <= n
-            J = CartesianIndex(cart32(UInt32(I) - UInt32(1), sz))
-            dest[J] = bc[J]
-        end
-    end
-    return nothing
-end
-
-"""Linear-indexed `dest`, Cartesian-indexed `bc`: only the source pays the decomposition."""
-function lava_broadcast_flat_mixed!(dest, bc, sz, n,
-                                                      ::Val{U}, ::Val{WG}) where {U, WG}
-    l = KI.get_local_id().x
-    g = KI.get_group_id().x
-    base = (g - 1) * (WG * U) + l
-    @inbounds for u in 0:(U - 1)
-        I = base + u * WG
-        if I <= n
-            dest[I] = bc[CartesianIndex(cart32(UInt32(I) - UInt32(1), sz))]
-        end
-    end
-    return nothing
 end
 
 # `dest .= PermutedDimsArray(a, perm)` on the mixed kernel is bound by access
@@ -245,30 +233,27 @@ function GPUArrays._copyto!(dest::AnyLavaArray, bc::Broadcast.Broadcasted;
         probe_broadcast!(:flat, dest, bc)
         flat = Broadcast.instantiate(flat1(bc))
         d1 = reshape(dest, n)
-        KI.Kernel(backend, lava_broadcast_flat!)(d1, Broadcast.preprocess(d1, flat), n, u, Val(wg);
-                                      ndrange = nd, workgroupsize = wg)
+        launchbroadcast!(backend, d1, Broadcast.preprocess(d1, flat), LinearPair(), n, u, wg, nd)
         return dest
     end
-    linear = ndims(dest) == 1
     bc = Broadcast.preprocess(dest, bc)
-    # Extents as magic numbers, built on the host per launch, so `cart32`
-    # multiplies instead of dividing.
-    sz = broadcastextents(size(dest); fastdiv)
-    if linear
+    # One launch per branch, so each sees a concrete pair. Extents are magic
+    # numbers built on the host, so `cart32` multiplies instead of dividing.
+    if ndims(dest) == 1
         probe_broadcast!(:linear1d, dest, bc)
-        KI.Kernel(backend, lava_broadcast_flat!)(dest, bc, n, u, Val(wg);
-                                      ndrange = nd, workgroupsize = wg)
+        launchbroadcast!(backend, dest, bc, LinearPair(), n, u, wg, nd)
     elseif IndexStyle(dest) === IndexLinear()
         probe_broadcast!(:mixed, dest, bc)
-        KI.Kernel(backend, lava_broadcast_flat_mixed!)(dest, bc, sz, n, u, Val(wg);
-                                            ndrange = nd, workgroupsize = wg)
+        launchbroadcast!(backend, dest, bc, MixedPair(broadcastextents(size(dest); fastdiv)), n, u, wg, nd)
     else
         probe_broadcast!(:cartesian, dest, bc)
-        KI.Kernel(backend, lava_broadcast_flat_cartesian!)(dest, bc, sz, n, u, Val(wg);
-                                                ndrange = nd, workgroupsize = wg)
+        launchbroadcast!(backend, dest, bc, CartesianPair(broadcastextents(size(dest); fastdiv)), n, u, wg, nd)
     end
     return dest
 end
+
+@inline launchbroadcast!(backend, dest, bc, pair, n, u, wg, nd) =
+    KI.Kernel(backend, lava_broadcast_flat!)(dest, bc, pair, n, u, Val(wg); ndrange = nd, workgroupsize = wg)
 
 # GPUArrays' `repeat` covers `AnyGPUArray`, one wrapper layer deep; two layers
 # fall back to Base's scalar-indexing `repeat`. Densify first.

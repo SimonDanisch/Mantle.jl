@@ -2,8 +2,8 @@
 #
 # Lava overrides that method to launch over a flat range and, when every operand
 # already has the destination's shape, to flatten the expression tree as well
-# (see `array/gpuarrays.jl` — worth 6x on elementwise bandwidth). Three kernels
-# come out of that decision, and the cases below are one per kernel plus the two
+# (see `array/gpuarrays.jl` — worth 6x on elementwise bandwidth). One kernel runs
+# with three index mappings, and the cases below are one per mapping plus the two
 # wrapper shapes that pick the awkward ones.
 #
 # These exist because narrowing the linear->Cartesian `divrem` to `Int32` — a
@@ -25,13 +25,15 @@ const KA = KernelAbstractions
 
     # flat kernel: every operand the destination's shape
     same = KA.allocate(be, Float32, 7, 5, 3)
-    same .= A .* A .+ 1f0
+    # The broadcast returns its destination on every path.
+    @test (same .= A .* A .+ 1f0) === same
     KA.synchronize(be)
     @test Array(same) ≈ host .^ 2 .+ 1
+    @test Array(A .+ 1f0) ≈ host .+ 1
 
     # extruded operand: dest dense, one argument broadcast along a dim
     mixed = KA.allocate(be, Float32, 7, 5, 3)
-    mixed .= A .+ B .* 2f0
+    @test (mixed .= A .+ B .* 2f0) === mixed
     KA.synchronize(be)
     @test Array(mixed) ≈ host .+ hostb .* 2
 
