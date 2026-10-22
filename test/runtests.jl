@@ -559,6 +559,8 @@ if _VULKAN_OK
     check_workspace_retirement(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_flush_report.jl"))
     check_flush_report(Mantle.vk_context())
+    include(joinpath(@__DIR__, "vulkan", "test_live_buffers.jl"))
+    check_live_buffers(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_recording_trim.jl"))
     check_recording_trim(Mantle.defaultbackend())
     check_store_submission(Mantle.vk_context())

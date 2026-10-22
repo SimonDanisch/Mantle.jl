@@ -2,8 +2,6 @@
 
 GPUArraysCore.allowscalar(false)
 
-GPUArraysCore.allowscalar(false)
-
 
 """
     gpu_memory_usage() -> NamedTuple

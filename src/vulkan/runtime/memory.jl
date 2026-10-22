@@ -197,7 +197,7 @@ function format_oom_error(ctx::VkContext, fail::AllocFailure)
     else
         println(io, "  Vulkan returned $(fail.code) from $(fail.op) for $(fail.nbytes) bytes ($(req_mb) MiB).")
     end
-    println(io, "  Lava tracked state: $(live_mb) MiB live across $(length(mempolicy(ctx).live_buffers)) buffers.")
+    println(io, "  Lava tracked state: $(live_mb) MiB live across $(live_buffer_count(ctx)) buffers.")
     if fail.mem_type_idx >= 0
         mem_props = ctx.memory_properties
         mt = mem_props.memory_types[fail.mem_type_idx + 1]
@@ -384,7 +384,7 @@ function try_vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
 
     result = VkManagedBuffer(buf, memory, address, mapped_ptr, Int(nbytes), nothing, Stamp{UInt64}(), BUF_STATE_ALIVE, ctx)
     let p = mempolicy(ctx)
-        push!(p.live_buffers, result)
+        @lock p.livelock push!(p.live_buffers, result)
         Threads.atomic_add!(p.live_bytes, nbytes)
     end
     if (ctxof(bq)).diag.alloc_debug
@@ -413,7 +413,6 @@ function vk_free!(buf::VkManagedBuffer)
         destroy_buffer!(buf)
         return
     end
-    delete!(mempolicy(c).live_buffers, buf)
     # Parked on the default channel; `reclaim!` reads the stamp on the owning
     # thread and forwards the buffer to the channel that last named it.
     retire!(c.default_bq, buf)
@@ -466,9 +465,12 @@ function destroy_buffer!(buf::VkManagedBuffer)
         end
     end
 
+    ctx = buf.ctx::VkContext
+    let p = mempolicy(ctx)
+        @lock p.livelock delete!(p.live_buffers, buf)
+    end
     # A lost device, which includes every device at exit
     # (`mark_all_devices_lost!`), gets no Vulkan calls: only poison the handle.
-    ctx = buf.ctx::VkContext
     if device_lost(ctx)
         buf.mapped_ptr = Ptr{UInt8}(0)
         buf.address = BDA_POISON
@@ -532,9 +534,9 @@ through. Run before submit when `ctx.diag.presubmit_scan` is set.
 function scan_slabs_for_unknown_bdas(bq)
     bq === nothing && return NamedTuple[]
     ctx = ctxof(bq)
-    live = Set{UInt64}()
-    for buf in mempolicy(ctx).live_buffers
-        push!(live, buf.address)
+    # Freed but not yet destroyed buffers count as unknown: packing one is a use after free.
+    live = let p = mempolicy(ctx)
+        @lock p.livelock Set{UInt64}(b.address for b in p.live_buffers if (@atomic b.state) == BUF_STATE_ALIVE)
     end
     # Unified blocks count too: a by-value argument's slot points into the
     # argument block itself (`base + inline_offset`).
@@ -590,7 +592,7 @@ more and takes the dedicated path (`bda_alignment_for`).
 const POOL_ALIGN = 256
 
 MemoryPolicy() = MemoryPolicy(false, false, true, MemoryStats(),
-                              Threads.Atomic{Int}(0), Set{VkManagedBuffer}())
+                              Threads.Atomic{Int}(0), Set{VkManagedBuffer}(), ReentrantLock())
 
 """
     lavadevice(ctx) -> LavaDevice
@@ -637,7 +639,8 @@ they cost nothing beyond their block.
 """
 gpu_live_bytes(ctx::VkContext = vk_context()) =
     reserved(spans(ctx)) + mempolicy(ctx).live_bytes[]
-live_buffer_count(ctx::VkContext = vk_context()) = length(mempolicy(ctx).live_buffers)
+live_buffer_count(ctx::VkContext = vk_context()) =
+    (p = mempolicy(ctx); @lock p.livelock length(p.live_buffers))
 
 """
     destroy_pool!(ctx)

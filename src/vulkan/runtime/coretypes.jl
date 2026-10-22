@@ -76,7 +76,11 @@ mutable struct MemoryPolicy
     # `gpu_live_bytes` adds both. Atomic because `destroy_buffer!` can run off
     # the allocating thread.
     live_bytes::Threads.Atomic{Int}
+    # Dedicated buffers from allocation until destruction. Channels of one device
+    # can be owned by different threads, so every access holds `livelock`;
+    # finalizers never touch it.
     live_buffers::Set{VkManagedBuffer}
+    livelock::ReentrantLock
 end
 
 # A compiled kernel and this device's pipeline for it (`DeviceCaches.linked`).
