@@ -1,5 +1,8 @@
 # Audit: src/vulkan/graphics and src/vulkan/raytracing against docs/api.md
 
+Historical snapshot: counts, locations and deletion hypotheses below predate
+consolidation. Follow [current ownership and deletion gates](consolidation-order.md).
+
 Historical inventory. Implemented consolidations are tracked in
 [consolidation-order.md](consolidation-order.md); locations/counts below belong
 to this audit snapshot. Absence of consumer call sites alone does not prove dead code.

@@ -1,5 +1,8 @@
 # Audit: `src/metal/` against `docs/api.md` and `docs/recording-plan.md`
 
+Historical snapshot: counts, locations and deletion hypotheses below predate
+consolidation. Follow [current ownership and deletion gates](consolidation-order.md).
+
 Scope: every line of the 17 files under `src/metal/` (8,649 lines), compared
 against `src/vulkan/graph.jl`, `src/vulkan/runtime/*.jl`,
 `src/vulkan/graphics/*.jl`, `src/vulkan/raytracing/*.jl`,

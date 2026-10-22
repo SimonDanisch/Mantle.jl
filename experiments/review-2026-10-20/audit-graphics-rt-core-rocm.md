@@ -1,5 +1,8 @@
 # Audit: src/graphics, src/raytracing, ext/MantleROCmExt.jl
 
+Historical snapshot: counts, locations and deletion hypotheses below predate
+consolidation. Follow [current ownership and deletion gates](consolidation-order.md).
+
 Scope: every line of `src/graphics/*.jl` (1,986 lines), `src/raytracing/*.jl`
 (781 lines) and `ext/MantleROCmExt.jl` (1,478 lines); 4,245 lines in all.
 Compared against `src/vulkan/graphics/*.jl`, `src/vulkan/raytracing/*.jl`,

@@ -1,5 +1,8 @@
 # Audit: src/Mantle.jl, src/phases.jl, src/memory/, src/sync/, src/runtime/
 
+Historical snapshot: counts, locations and deletion hypotheses below predate
+consolidation. Follow [current ownership and deletion gates](consolidation-order.md).
+
 Scope: 19 files, 5978 lines, every line read. Comparison files read in part for
 the duplication table: `src/vulkan/runtime/memory.jl`, `src/vulkan/runtime/device.jl`,
 `src/vulkan/graph.jl`, `src/metal/memory.jl`, `src/metal/device.jl`,

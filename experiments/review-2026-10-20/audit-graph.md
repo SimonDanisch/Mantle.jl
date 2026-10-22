@@ -1,5 +1,8 @@
 # Audit: `src/graph/` against `docs/api.md` and `docs/recording-plan.md`
 
+Historical snapshot: counts, locations and deletion hypotheses below predate
+consolidation. Follow [current ownership and deletion gates](consolidation-order.md).
+
 Scope: every line of `src/graph/` (9 files, 7 810 lines), compared against
 `src/vulkan/graph.jl`, `src/metal/record.jl`, `src/runtime/*.jl`,
 `src/memory/*.jl`, `src/sync/*.jl`, `src/vulkan/runtime/coretypes.jl`,

@@ -1,5 +1,8 @@
 # Audit: `src/array/` and `src/geometry/`
 
+Historical snapshot: counts, locations and deletion hypotheses below predate
+consolidation. Follow [current ownership and deletion gates](consolidation-order.md).
+
 Scope: every line of `src/array/{gemm,fft,gemv,gemm_cm2,gemm_tensile,indexing,launch}.jl`
 and `src/geometry/{epa,gjk,narrow_phase,transform,convex_shape,types}.jl` (6716 lines),
 plus `src/vulkan/array/gemm.jl` (211) as the GEMM entry point they serve. Paths are

@@ -1,5 +1,8 @@
 # Audit: `src/vulkan/runtime/` against `docs/api.md`
 
+Historical snapshot: counts, locations and deletion hypotheses below predate
+consolidation. Follow [current ownership and deletion gates](consolidation-order.md).
+
 Scope: the 16 files under `src/vulkan/runtime/`, 10 063 lines, every line read.
 Target: `docs/api.md` section 4 (device-type verbs, lines 241-358) and Appendix A
 (lines 571-769). Line numbers below are of the files on branch `sd/lava-refactor`
