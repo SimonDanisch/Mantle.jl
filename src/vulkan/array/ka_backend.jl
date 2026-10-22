@@ -437,18 +437,11 @@ function pad_to_3d(ctx::VkContext, t::NTuple{1,<:Integer})
     max_x, max_y, _ = ctx.max_wg_dims
     n <= max_x && return (n, 1, 1)
     x = find_split_factor(n, max_x)
-    y = cld(n, x)
-    if x * y == n && y <= max_y
-        return (x, y, 1)
-    end
-    if y > max_y
-        xy = x * min(y, max_y)
-        z = cld(n, xy)
-        return (x, min(y, max_y), z)
-    end
-    # Over-dispatch: unsafe for kernels without bounds checks.
-    @warn "pad_to_3d: over-dispatching $n as ($x, $y, 1) = $(x*y) workgroups" maxlog=1
-    return (x, y, 1)
+    y = min(cld(n, x), max_y)
+    z = cld(n, x * y)
+    # Unsafe for kernels that index by workgroup id without bounds checks.
+    x * y * z == n || @warn "pad_to_3d: over-dispatching $n as ($x, $y, $z) = $(x*y*z) workgroups" maxlog=1
+    return (x, y, z)
 end
 function pad_to_3d(ctx::VkContext, t::NTuple{2,<:Integer})
     x, y = Int(t[1]), Int(t[2])
