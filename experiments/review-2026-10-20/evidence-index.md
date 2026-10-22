@@ -271,3 +271,9 @@ The [copy-range follow-up](consolidation-extents.md#copy-range-follow-up) fixes
 reproduced writes outside logical views. Typed uploads own one pointer-copy path;
 paired measurements preserve warm host allocation after repairing boxing in the
 first shared checker. Native lifetime, cross-queue and replay checks pass.
+
+[Independent split workspace](consolidation-scratch.md) deletes Vulkan's shared
+partial cache and retained growth history. Frozen old code reproduces corruption
+between interleaved programs; owned defaults, recording retention and region
+retirement pass. Recorded replay allocates zero; eager preparation has an explicit
+measured cost rather than a claimed speedup.

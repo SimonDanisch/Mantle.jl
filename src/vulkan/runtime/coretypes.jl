@@ -586,11 +586,6 @@ mutable struct DeviceCaches
     # defect the memory pool had: the second device is handed the first's buffer.
     # Both were already keyed by context, which is the surrogate a field replaces.
     reduce_scratch::Any          # one unified cell for `vk_reduce_sum`
-    gemm_split_scratch::Any      # split-K partials; grows, never shrinks
-    # Grown-past scratch, retained rather than dropped: dispatches already
-    # recorded point into the old buffer and its finalizer would pull it out
-    # from under them.
-    gemm_split_retired::Vector{Any}
     # What each kernel signature does to its arguments — see `Mantle.AccessCache`.
     # Keyed by signature and not by device, like the pipeline caches above, and a
     # field for the same reason: the answers are derived through THIS device's
@@ -607,4 +602,4 @@ DeviceCaches() = DeviceCaches(
     CompilationCache{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}(),
     Dict{UInt64,Tuple{UInt,UInt64}}(),
     nothing, 0, 1.0, Any[],
-    IdDict{DataType,Vector{Any}}(), nothing, nothing, Any[], AccessCache())
+    IdDict{DataType,Vector{Any}}(), nothing, AccessCache())

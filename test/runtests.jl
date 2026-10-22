@@ -555,6 +555,8 @@ if _VULKAN_OK
     check_bounded_staging(Mantle.vk_context())
     check_extent_refusal(Mantle.vk_context())
     check_copy_bounds(Mantle.vk_context())
+    include(joinpath(@__DIR__, "vulkan", "test_gemm_workspace.jl"))
+    check_workspace_retirement(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_recording_trim.jl"))
     check_recording_trim(Mantle.defaultbackend())
     check_store_submission(Mantle.vk_context())
@@ -724,6 +726,7 @@ foreachbackend(joinpath(@__DIR__, "test_recording_lifecycle.jl"))
 # The point of all of the above: `run!` of a recorded plan, with
 # nothing pending, allocates zero bytes.
 foreachbackend(joinpath(@__DIR__, "test_run_allocates_nothing.jl"))
+foreachbackend(joinpath(@__DIR__, "test_gemm_workspaces.jl"))
 # And where a `DeviceRange`'s workgroup counts live: in the plan, laid out at
 # compile beside its arguments, rather than in a slab ring the queue rewinds.
 # The path is spelled out because `VULKAN_TESTS` is not bound until further down.

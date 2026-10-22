@@ -1,18 +1,5 @@
-# What a library routine IS for a given shape, separately from running it.
-#
-# Mantle's array library (GEMM, GEMV, FFT) picks a kernel and a tiling from the
-# operands, and it has to do that in two contexts: an immediate call submits the
-# launches now, and a graph DECLARES them as passes. Those two must not be able
-# to choose differently, so the choice is a function that returns launches and
-# has no side effects, and the two contexts are two consumers of it.
-#
-# That shape was written three times in `vulkan/array/gemm.jl` before it was
-# written once here -- `coopmat_gemm_launches`/`coopmat_gemm!`/
-# `coopmat_gemm_dispatch!` and the scalar trio -- and each copy repeated the
-# `group == 0` sentinel and the `kern(backend)` / `kern(backend, group)` split.
-#
-# Portable, and in `src/array/` rather than under a backend, because `gemv.jl`
-# needs it and that file is one every backend loads.
+# Array routines select kernels and allocate independent default workspace here.
+# Eager submission and graph declaration consume the same launch descriptions.
 
 """
 One kernel launch, chosen but not yet submitted.
@@ -41,10 +28,8 @@ ArrayLaunch(kern, args, ndrange) = ArrayLaunch(kern, args, ndrange, 0)
 
 Submit now, in order.
 
-`Base.invokelatest` because some of these kernels are `@eval`-generated on
-demand (see `gemv_ncontig_kernel`), so the constructor can be newer than the
-method calling it. It costs a dynamic dispatch per launch against a kernel that
-runs for tens of microseconds.
+Use invokelatest for consumers that still generate kernels at runtime
+(DNNKernels flash kernels); core GEMM/GEMV/FFT callables are already typed.
 """
 function runlaunches!(backend, launches)
     for l in launches
@@ -69,22 +54,8 @@ function runlaunches!(backend, launches)
     return nothing
 end
 
-"""
-    kilaunch!(backend, f, args...; ndrange, workgroupsize = nothing)
-
-Launch the plain `KernelInterface` function `f` now, on the device behind the
-KernelAbstractions `backend` the arrays report.
-
-KernelInterface's launch protocol, as `KI.@kernel` spells it: convert the
-arguments, compile for their types, call what `kernel_function` returns. The
-backend it compiles for is the device's `kibackend`, which is not always the one
-the arrays report: on ROCm they are two types, and only the second has a call
-method. `KI.Kernel(backend, f)(args...)` works only where the backend compiles on
-call (Lava) and is a `MethodError` on ROCm; `runlaunches!` did that until
-2026-09-26, and `gemv!`, `fft!`, `rfft`, the mixed-radix FFT and `stft` did it
-after, which is how Whisper's log-mel failed on ROCm. Anything portable in this
-directory launches through here.
-"""
+"""Launch a plain KernelInterface function through the device's retained kikernel,
+passing original arguments so native emitters can retain their owners."""
 function kilaunch!(backend, f, args...; ndrange, workgroupsize = nothing)
     k = kikernel(f, todevice(backend), args)
     if workgroupsize === nothing

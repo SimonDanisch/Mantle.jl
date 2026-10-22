@@ -1003,18 +1003,11 @@ function splitk_reduce_kernel!(C, Cp, ::Val{S}, n) where {S}
     return nothing
 end
 
-"""    splitscratch(C, M, N, splitk)
-
-Allocate fp32 partial planes on C's device. Backends may retain and grow scratch
-until native users retire; Vulkan uses its device cache. Callers with explicit
-workspace pass partials instead."""
+"""Allocate independent fp32 partial planes on C's device. Explicit partials
+let a caller provide its own workspace; recorded programs retain their default."""
 splitscratch(C, M::Int, N::Int, splitk::Int) =
     splitscratch(KernelAbstractions.get_backend(C), C, M, N, splitk)
 
-# Backends whose allocator tracks submitted array arguments can hand the launch
-# an ordinary temporary.  The launch tuple owns it through submission; the
-# backend owns retirement after that. Vulkan retains scratch in its device cache
-# until queued users retire.
 function splitscratch(backend, C, M::Int, N::Int, splitk::Int)
     return KernelAbstractions.allocate(backend, Float32, M, N, splitk)
 end

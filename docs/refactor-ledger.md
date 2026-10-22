@@ -246,8 +246,8 @@ Every comment and docstring checked against the code and the plan (plan,
 | P2.D1 | delete `vk_alloc` | 20 hits, 9 files | open | |
 | P2.D2 | delete `MemoryPolicy` | 11 hits, 3 files | open | |
 | P2.D3 | delete `reclaim!(::SubmitChannel)` only; `reclaim!(p::Pool, dev)` (`memory/pool.jl:765`) is the pool's release step | 87 hits of `reclaim!` (all methods), 18 files | open | |
-| P2.D4 | delete `gemm_split_scratch` | 5 hits, 3 files | open | |
-| P2.D5 | delete `gemm_split_retired` | 2 hits, 2 files | open | |
+| P2.D4 | delete `gemm_split_scratch` | 5 hits, 3 files | done | core-owned independent partials; overlapping programs/replay qualified |
+| P2.D5 | delete `gemm_split_retired` | 2 hits, 2 files | done | no retained growth history; native region retirement qualified |
 | P2.D6 | delete `reduce_scratch` | 9 hits, 4 files | open | |
 | P2.D7 | delete `remap!` | 15 hits, 7 files | open | |
 | P2.D8 | delete `remappable` | 9 hits, 5 files | open | |

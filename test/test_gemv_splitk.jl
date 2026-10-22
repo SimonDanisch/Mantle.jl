@@ -75,7 +75,8 @@ const KA = KernelAbstractions
             # partial sum scaled by alpha and then added S times is alpha*S.
             C2 = KA.allocate(back, Float32, M, 1); fill!(C2, 1f0)
             mul!(C2, W, x, 2f0, 3f0); KA.synchronize(back)
-            @test maximum(abs, Float64.(Array(C2)) .- (2 .* want .+ 3)) / scale < 1e-5
+            want2 = 2 .* want .+ 3
+            @test maximum(abs, Float64.(Array(C2)) .- want2) / maximum(abs, want2) < 1e-5
         end
     end
 end
