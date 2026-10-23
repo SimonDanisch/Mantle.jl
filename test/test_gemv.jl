@@ -132,7 +132,12 @@ end
             KA.synchronize(backend)
             want = gemvnref(hw, hx)
             withbias && (want .+= Float64.(hb))
-            relerr(Float64.(Array(C)), epi.(want))
+            # Relative to the sum of absolute products, which bounds a dot
+            # product's rounding error; the result itself can be near zero by
+            # chance (M = 1 exceeded 1e-5 in 2 of 300 random draws).
+            scale = maximum(abs.(Float64.(hw)) * abs.(Float64.(hx)))
+            withbias && (scale += maximum(abs, hb))
+            maximum(abs, Float64.(Array(C)) .- epi.(want)) / scale
         end
 
         @testset "the decoder's own shapes" begin
