@@ -137,3 +137,44 @@ Raycore.n_instances(t::BatchedTLAS) = ninstances(t.instances)
 Raycore.instance_buffer(t::BatchedTLAS, handle::Raycore.TLASHandle) =
     recordsof(t.instances, handle)
 Raycore.refit!(t::BatchedTLAS) = (t.transforms_dirty = true; Raycore.sync!(t))
+
+"""Build modes of [`build!`](@ref): an in-place update of the built structure, or a new one."""
+struct Refit end
+struct Rebuild end
+
+"""
+    canrefit(t::BatchedTLAS) -> Bool
+
+Whether the built structure can take an in-place refit for the current instances.
+"""
+function canrefit end
+
+"""
+    build!(t::BatchedTLAS, ::Refit)
+    build!(t::BatchedTLAS, ::Rebuild)
+
+Write the instances and refit the built structure in place, so an adapted form a
+plan holds sees the change; or build a new structure and its traversal arrays.
+The backend chooses how the writes are submitted and ordered before the build.
+"""
+function build! end
+
+"""
+    Raycore.sync!(t::BatchedTLAS) -> t
+
+Commit pending changes: nothing when clean, an in-place refit when only
+transforms changed and the built structure takes one, a rebuild otherwise.
+"""
+function Raycore.sync!(t::BatchedTLAS)
+    built = t.static_tlas !== nothing
+    built && !t.dirty && !t.transforms_dirty && return t
+    if built && !t.dirty && canrefit(t)
+        build!(t, Refit())
+    else
+        build!(t, Rebuild())
+        t.static_tlas = AdaptedAccel(t)
+    end
+    t.dirty = false
+    t.transforms_dirty = false
+    return t
+end

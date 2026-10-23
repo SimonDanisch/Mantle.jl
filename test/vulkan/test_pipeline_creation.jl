@@ -9,7 +9,7 @@ end
 novelconstant() = Int(time_ns() % 1_000_000) + 2
 
 function novelscale(ctx)
-    backend = Mantle.backend(Mantle.lavadevice(ctx))
+    backend = Mantle.backend(ctx)
     o = Mantle.LavaArray{Float32}(undef, (64,); bq = ctx.default_bq)
     fill!(o, 1f0)
     K = novelconstant()
@@ -28,7 +28,7 @@ function check_pipeline_creation(ctx)
     end
     others = filter(i -> i.name != ctx.device_name, Mantle.devices())
     isempty(others) && return
-    other = Mantle.Device(Mantle.VulkanAPI(); select = first(others).index).ctx
+    other = Mantle.Device(Mantle.VulkanAPI(); select = first(others).index)
     @testset "validation errors are checked on the calling device" begin
         push!(other.validation.messages, "synthetic validation error")
         @test_throws Mantle.LavaError novelscale(other)

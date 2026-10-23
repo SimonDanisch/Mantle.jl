@@ -21,7 +21,7 @@ function check_recording_trim(backend)
             @test Array(output)==fill(4f0,256)
             @test Mantle.recorded(plan)
             # An unrelated native-file upload leaves an empty large block.
-            scratch=Mantle.LavaArray(zeros(UInt32,20*1024*1024);bq=dev.bq)
+            scratch=Mantle.LavaArray(zeros(UInt32,20*1024*1024);bq=dev.default_bq)
             Mantle.waitidle(dev)
             Mantle.unsafe_free!(scratch)
             GC.gc()
@@ -38,7 +38,7 @@ function check_recording_trim(backend)
             @test Mantle.recorded(plan)
             @test Array(output)==fill(9f0,256)
             # A trim inside an open recording must not pop its hold frame.
-            Mantle.oneshot!(dev.bq) do _
+            Mantle.oneshot!(dev.default_bq) do _
                 @test Mantle.trim_gpu_pool!(;invalidate_recordings=true)==(0,0)
             end
             other=Mantle.allocate_batch_queue!(dev)

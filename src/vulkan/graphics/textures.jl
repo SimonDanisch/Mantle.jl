@@ -9,7 +9,7 @@ struct VulkanTexture2D{T} <: Texture2D{T}
     height::Int
     format::VK.Format
     levels::Int
-    ctx::VkContext
+    ctx::LavaDevice
 end
 
 # Lets a caller check that new data fits before uploading in place, which keeps a
@@ -24,10 +24,10 @@ struct VulkanSampler <: Sampler
     filter::Symbol
     wrap::Symbol
     anisotropy::Float32
-    ctx::VkContext
+    ctx::LavaDevice
 end
 
-function VulkanSampler(; ctx::VkContext, filter::Symbol=:linear, wrap::Symbol=:repeat, anisotropy::Real=0.0f0)
+function VulkanSampler(; ctx::LavaDevice, filter::Symbol=:linear, wrap::Symbol=:repeat, anisotropy::Real=0.0f0)
     dev = ctx.device
 
     vk_filter = filter == :nearest ? VK.FILTER_NEAREST :
@@ -66,7 +66,7 @@ A 2D texture from `data[x, y]`, which may already be on the device
 mip chain on the device at every upload, so a texture shown smaller than its size
 does not alias; off by default because it mixes neighbouring glyphs in an atlas.
 """
-function VulkanTexture2D(data::AbstractMatrix{T}; ctx::VkContext, filter=:linear, wrap=:repeat, mipmap::Bool=false) where T
+function VulkanTexture2D(data::AbstractMatrix{T}; ctx::LavaDevice, filter=:linear, wrap=:repeat, mipmap::Bool=false) where T
     # The first index is horizontal (as on Metal and in GLMakie): the upload copies
     # the column-major bytes as they are, so a Julia column is one image row.
     w, h = size(data)
@@ -84,7 +84,7 @@ function VulkanTexture2D(data::AbstractMatrix{T}; ctx::VkContext, filter=:linear
 end
 
 """Throw unless `format` supports the linear-filtered blits that make mip levels."""
-function checkmipmappable(ctx::VkContext, format::VK.Format)
+function checkmipmappable(ctx::LavaDevice, format::VK.Format)
     features = VK.get_physical_device_format_properties(ctx.physical_device, format).optimal_tiling_features
     needed = VK.FORMAT_FEATURE_BLIT_SRC_BIT | VK.FORMAT_FEATURE_BLIT_DST_BIT | VK.FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
     needed & features == needed ||

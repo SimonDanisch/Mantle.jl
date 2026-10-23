@@ -2,7 +2,7 @@
 # answer for the device the array lives on.
 #
 # `gemv.jl` and `fft.jl` left the Vulkan backend once their capability queries
-# stopped going through a `VkContext`:
+# stopped going through a `LavaDevice`:
 #
 #     workgroup_limit(vk_context(A))   ->   workgrouplimit(A)
 #     max_shared_memory(vk_context(A)) ->   sharedbudget(A)

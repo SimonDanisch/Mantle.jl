@@ -39,7 +39,7 @@ mutable struct VulkanWindow <: Window
     # sends neither), so `sync_swapchain!` compares against this.
     fb_size::Tuple{Int,Int}
     # Swapchain and surface belong to this device.
-    ctx::VkContext
+    ctx::LavaDevice
 end
 
 """
@@ -51,7 +51,7 @@ encodes them, `_UNORM` stores already gamma-encoded values as they are. Falls ba
 to the surface's first format when the requested one is not offered.
 """
 function VulkanWindow(width::Integer, height::Integer;
-                      ctx::VkContext,
+                      ctx::LavaDevice,
                       title::String="Lava", vsync::Bool=true,
                       color_format::Union{VK.Format,Type}=VK.FORMAT_B8G8R8A8_SRGB,
                       srgb::Bool=false)

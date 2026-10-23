@@ -70,6 +70,6 @@ function check_video_sessions(ctx)
                 @test_throws Mantle.LavaError Mantle.find_memory_type(ctx,mask,localbit)
             end
         end
-        @test isempty(Mantle.validationmessages!(Mantle.lavadevice(ctx)))
+        @test isempty(Mantle.validationmessages!(ctx))
     end
 end

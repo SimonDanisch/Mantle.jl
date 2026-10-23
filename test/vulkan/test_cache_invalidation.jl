@@ -30,7 +30,7 @@ function check_cache_invalidation(ctx, other=nothing)
         a = Mantle.LavaArray(Float32[0]; bq=ctx.default_bq)
         code, weak = submit_cache_probe(ctx, a)
         pipeline = nothing
-        dev = Mantle.lavadevice(ctx)
+        dev = ctx
         Mantle.resetkernelcompiles!(dev)
         Mantle.clear_kernel_cache!(ctx)
         GC.gc(true)

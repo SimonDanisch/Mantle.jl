@@ -50,7 +50,7 @@ else
 init_pipeline_thread!() = nothing
 end
 
-function create_compute_pipeline_large_stack(ctx::VkContext, device::Ptr{Cvoid},
+function create_compute_pipeline_large_stack(ctx::LavaDevice, device::Ptr{Cvoid},
                                                pipeline_cache::Ptr{Cvoid},
                                                create_info_ptr::Ptr{Cvoid},
                                                p_pipelines::Ptr{Cvoid})
@@ -107,7 +107,7 @@ refusal is counted in `ctx.diag`, `name` and the SPIR-V's hash are recorded, and
 the pipeline is created with `flags`, so the workload finishes and reports
 every miss.
 """
-function createpipeline(create, ctx::VkContext, flags::VK.PipelineCreateFlag, name, spirv::Vector{UInt8})
+function createpipeline(create, ctx::LavaDevice, flags::VK.PipelineCreateFlag, name, spirv::Vector{UInt8})
     d = ctx.diag
     if d.no_pipeline_compile
         pipeline, code = create(flags | NO_COMPILE_FLAGS)
@@ -133,7 +133,7 @@ A refusal does not throw: [`createpipeline`](@ref) records it and compiles.
     end
     vk_context().diag.pipeline_compiles_refused == 0    # nothing needed the driver's compiler
 """
-function no_pipeline_compilation(f; ctx::VkContext = vk_context())
+function no_pipeline_compilation(f; ctx::LavaDevice = vk_context())
     d = ctx.diag
     old = d.no_pipeline_compile
     clear_kernel_cache!(ctx)
@@ -152,7 +152,7 @@ const MAX_PIPELINE_CACHE_SIZE = Ref(1024)
 # The device's default subgroup width, not the min/max it can be pinned to.
 # Cached per device: it differs between GPUs (64 on RDNA 3.5), and another
 # device's value silently mistiles every kernel sized by it.
-function device_subgroup_size(ctx::VkContext)
+function device_subgroup_size(ctx::LavaDevice)
     # 0 means not yet queried.
     ctx.caches.subgroup_size != 0 && return ctx.caches.subgroup_size
     props = VK.get_physical_device_properties_2(ctx.physical_device,
@@ -166,7 +166,7 @@ end
 The device's `maxComputeWorkGroupSize`: workitems per workgroup along each axis,
 queried once. `workgroup_limit(ctx)` bounds their product.
 """
-function max_workgroup_dims(ctx::VkContext)
+function max_workgroup_dims(ctx::LavaDevice)
     d = ctx.caches.wg_size_dims
     d[1] != 0 && return d
     s = VK.get_physical_device_properties(ctx.physical_device).limits.max_compute_work_group_size
@@ -179,7 +179,7 @@ end
 The device's `VkPhysicalDeviceSubgroupSizeControlProperties`, queried once.
 `compute` says whether a compute pipeline may pin its own subgroup size.
 """
-function subgroup_size_control(ctx::VkContext)
+function subgroup_size_control(ctx::LavaDevice)
     c = ctx.caches.subgroup_control
     c === nothing || return c
     p = VK.get_physical_device_properties_2(
@@ -191,7 +191,7 @@ function subgroup_size_control(ctx::VkContext)
 end
 
 """Whether a compute pipeline on this device can be pinned to `n` lanes per subgroup."""
-function can_require_subgroup_size(ctx::VkContext, n::Integer)
+function can_require_subgroup_size(ctx::LavaDevice, n::Integer)
     c = subgroup_size_control(ctx)
     c.compute && c.min <= n <= c.max
 end
@@ -257,7 +257,7 @@ Get or create `ctx`'s compute pipeline for the SPIR-V, cached by content and
 layout. A cooperative-matrix module is pinned to `COOPMAT_SUBGROUP` lanes where
 the device's default differs and it allows pinning.
 """
-function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_name::String;
+function get_compute_pipeline(ctx::LavaDevice, spirv_bytes::Vector{UInt8}, entry_name::String;
                                push_constant_size::Integer=8,
                                needs_tlas_descriptor::Bool=false)
     cache_key = hash((spirv_content_hash(spirv_bytes), length(spirv_bytes),
@@ -363,11 +363,11 @@ end
 
 """Allocate a compute binding for tlas.accel. The caller must hold the pool through
 submission completion (or reusable-recording release); this path does not cache it."""
-alloc_compute_tlas_descriptor_set(ctx::VkContext, pipeline::LavaComputePipeline, tlas) =
+alloc_compute_tlas_descriptor_set(ctx::LavaDevice, pipeline::LavaComputePipeline, tlas) =
     alloc_tlas_descriptor_set(ctx, pipeline.descriptor_set_layout::VK.DescriptorSetLayout, tlas.accel)
 
 """Allocate and write a binding-0 acceleration-structure descriptor; caller owns pool/set lifetime."""
-function alloc_tlas_descriptor_set(ctx::VkContext, ds_layout::VK.DescriptorSetLayout, accel)
+function alloc_tlas_descriptor_set(ctx::LavaDevice, ds_layout::VK.DescriptorSetLayout, accel)
     dev = ctx.device
     desc_pool = VK.DescriptorPool(dev, UInt32(1), [
         VK.DescriptorPoolSize(
@@ -399,7 +399,7 @@ One compute pipeline through `ctx`'s pipeline cache. The result is
 `PIPELINE_COMPILE_REQUIRED`, with no usable pipeline, when `ci` forbids
 compilation and the cache misses.
 """
-function create_compute_pipeline(ctx::VkContext, ci::VK.ComputePipelineCreateInfo)
+function create_compute_pipeline(ctx::LavaDevice, ci::VK.ComputePipelineCreateInfo)
     dev = ctx.device
     if LARGE_STACK_PIPELINE
         # `.vks` holds the non-dispatchable handle's UInt64, passed as a pointer.

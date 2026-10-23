@@ -65,8 +65,8 @@ end
 The caller chooses argument storage and retains the returned pipeline/shader."""
 function compile_vulkan_draw(dev::LavaDevice, p, color_formats, depth_format,
                              vargs, fargs; bindings=nothing)
-    ctx = dev.ctx
-    ad = adaptor(dev.bq)
+    ctx = dev
+    ad = adaptor(dev.default_bq)
     vtt = typeof(devargs(ad, rawargs(vargs)))
     ftt = typeof(devargs(ad, rawargs(fargs)))
     vfn, vtt, ffn, ftt = resolve_shader_pair(p, vtt, ftt)
@@ -88,7 +88,7 @@ end
 function begin_render_pass!(dev::LavaDevice, targets, loads, depth, depth_load)
     isempty(targets) && throw(ArgumentError(
         "begin_render_pass!: a pass needs at least one colour attachment"))
-    bq = dev.bq
+    bq = dev.default_bq
     o = openoneshot(bq)
     e = Emitter(o, nothing)
     beginattachments!(e, targets, loads, depth, depth_load; transition = true)

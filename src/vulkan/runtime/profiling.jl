@@ -71,7 +71,7 @@ end
 
 Stats for one compiled and linked kernel on `ctx`.
 """
-function kernel_stats(ctx::VkContext, linked::LavaLinkedKernel)
+function kernel_stats(ctx::LavaDevice, linked::LavaLinkedKernel)
     c = linked.compiled
     spirv = spirv_op_stats(c.spirv_bytes)
     exec = pipeline_exec_stats(ctx, linked)
@@ -103,7 +103,7 @@ const TIMESTAMP_POOL_SIZE = Ref(MAX_DISPATCH_LOG * 2)
 
 Clear recorded timings and reset the slot counter; `with_dispatch_timing` calls it.
 """
-function reset_dispatch_timing!(ctx::VkContext = vk_context())
+function reset_dispatch_timing!(ctx::LavaDevice = vk_context())
     empty!(ctx.caches.recorded_dispatches)
     ctx.caches.timestamp_next_slot = 0
     return nothing
@@ -136,7 +136,7 @@ Read the recorded timestamps back, convert to ns and aggregate by kernel name,
 sorted by total time, largest first. `flush_first` waits for submitted work
 first; pass `false` only after synchronizing yourself.
 """
-function dispatch_timing_report(ctx::VkContext = vk_context(); flush_first::Bool=true)
+function dispatch_timing_report(ctx::LavaDevice = vk_context(); flush_first::Bool=true)
     pool = ctx.caches.timestamp_pool
     pool === nothing && return KernelTimingReport[]
     isempty(ctx.caches.recorded_dispatches) && return KernelTimingReport[]
@@ -193,7 +193,7 @@ for r in report
 end
 ```
 """
-function with_dispatch_timing(f, ctx::VkContext = vk_context())
+function with_dispatch_timing(f, ctx::LavaDevice = vk_context())
     d = ctx.diag
     prev_timing = d.dispatch_timing
     # `ka_launch!` names a dispatch only with logging on, and records need the name.
@@ -212,7 +212,7 @@ end
 
 # `ctx`'s timestamp query pool, created on first use. Takes the context, never
 # `vk_context()`: another device's pool on this command buffer is invalid.
-function ensure_timestamp_pool!(ctx::VkContext)
+function ensure_timestamp_pool!(ctx::LavaDevice)
     ctx.caches.timestamp_pool === nothing || return ctx.caches.timestamp_pool
     # ns per tick
     props = VK.get_physical_device_properties(ctx.physical_device)
@@ -224,7 +224,7 @@ function ensure_timestamp_pool!(ctx::VkContext)
 end
 
 # Reset the whole pool on `cb`; done before the first timed dispatch (slot 0).
-function reset_timestamp_pool_on_cb!(ctx::VkContext, cb::VK.CommandBuffer)
+function reset_timestamp_pool_on_cb!(ctx::LavaDevice, cb::VK.CommandBuffer)
     pool = ctx.caches.timestamp_pool
     pool === nothing && return
     VK.cmd_reset_query_pool(cb, pool, UInt32(0), UInt32(TIMESTAMP_POOL_SIZE[]))
@@ -233,7 +233,7 @@ end
 
 # Write the START timestamp before a dispatch. Returns the start slot, or -1
 # if timing is off or the pool is full.
-function maybe_write_dispatch_start_timestamp!(ctx::VkContext, cb::VK.CommandBuffer,
+function maybe_write_dispatch_start_timestamp!(ctx::LavaDevice, cb::VK.CommandBuffer,
                                                kernel_name::AbstractString;
                                                stage = VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT)
     ctx.diag.dispatch_timing || return -1
@@ -258,8 +258,8 @@ end
 # retire. Without it consecutive dispatches overlap and summed intervals exceed
 # wall time, and on NVIDIA an indirect dispatch reads 2-12 µs whatever its work.
 # This serialises dispatches while timing is on, so timed runs are slower.
-# `barrier_fptr` is the device's own (`VkContext.cmd_pipeline_barrier_fptr`).
-function maybe_write_dispatch_end_timestamp!(ctx::VkContext, cb::VK.CommandBuffer,
+# `barrier_fptr` is the device's own (`LavaDevice.cmd_pipeline_barrier_fptr`).
+function maybe_write_dispatch_end_timestamp!(ctx::LavaDevice, cb::VK.CommandBuffer,
                                              start_slot::Int,
                                              barrier_fptr::Ptr{Nothing} = C_NULL;
                                              stage = VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -289,7 +289,7 @@ const PIPELINE_EXEC_PROPERTIES_REQUESTED = Ref(false)
 """
     enable_pipeline_executable_properties!(enable::Bool=true)
 
-Request `VK_KHR_pipeline_executable_properties` for the next `VkContext`
+Request `VK_KHR_pipeline_executable_properties` for the next `LavaDevice`
 created; no effect on existing devices. Without it `pipeline_exec_stats` and
 `pipeline_exec_ir` return `nothing`.
 """
@@ -307,10 +307,10 @@ matching statistic exists; `raw_stats` holds every statistic as
 `(name, description, value)`. `nothing` without the extension or when the
 driver reports no executable.
 """
-pipeline_exec_stats(ctx::VkContext, linked::LavaLinkedKernel) = pipeline_exec_stats(ctx, linked.pipeline)
+pipeline_exec_stats(ctx::LavaDevice, linked::LavaLinkedKernel) = pipeline_exec_stats(ctx, linked.pipeline)
 
 # The KA launch path keeps only `LaunchPlan.pipeline`, hence this method.
-function pipeline_exec_stats(ctx::VkContext, pipeline::LavaComputePipeline)
+function pipeline_exec_stats(ctx::LavaDevice, pipeline::LavaComputePipeline)
     ctx.pipeline_exec_props_available || return nothing
     pipe = pipeline.pipeline
     # No try/catch: a device without the extension returned above, so a failure
@@ -372,11 +372,11 @@ The driver's text representations of a compute pipeline as
 `nothing` unless `enable_pipeline_executable_properties!()` preceded device
 creation.
 """
-pipeline_exec_ir(ctx::VkContext, linked::LavaLinkedKernel) = pipeline_exec_ir(ctx, linked.pipeline)
+pipeline_exec_ir(ctx::LavaDevice, linked::LavaLinkedKernel) = pipeline_exec_ir(ctx, linked.pipeline)
 
 # Raw `ccall`: Vulkan.jl's wrapper stops after the count call, returning sizes
 # with `pData = NULL`; the second call with a buffer per entry fills the text.
-function pipeline_exec_ir(ctx::VkContext, pipeline::LavaComputePipeline)
+function pipeline_exec_ir(ctx::LavaDevice, pipeline::LavaComputePipeline)
     ctx.pipeline_exec_props_available || return nothing
     C = VK.VkCore
     fptr = VK.function_pointer(ctx.device, "vkGetPipelineExecutableInternalRepresentationsKHR")

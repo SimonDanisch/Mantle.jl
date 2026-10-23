@@ -3,33 +3,31 @@
 # translation, and the render-pass verbs. The graph decides what is drawn and in
 # what order; this records it.
 
-const MTLm = Metal.MTL
-
 # One method per state value, not a `Dict`, so an unhandled value is a
 # `MethodError`, not a `KeyError` mid-frame.
 
-mtl_cull(::Mantle.NoCull)    = MTLm.MTLCullModeNone
-mtl_cull(::Mantle.CullBack)  = MTLm.MTLCullModeBack
-mtl_cull(::Mantle.CullFront) = MTLm.MTLCullModeFront
+mtl_cull(::Mantle.NoCull)    = MTL.MTLCullModeNone
+mtl_cull(::Mantle.CullBack)  = MTL.MTLCullModeBack
+mtl_cull(::Mantle.CullFront) = MTL.MTLCullModeFront
 
-mtl_primitive(::Mantle.TriangleList)  = MTLm.MTLPrimitiveTypeTriangle
-mtl_primitive(::Mantle.TriangleStrip) = MTLm.MTLPrimitiveTypeTriangleStrip
-mtl_primitive(::Mantle.LineList)      = MTLm.MTLPrimitiveTypeLine
-mtl_primitive(::Mantle.PointList)     = MTLm.MTLPrimitiveTypePoint
+mtl_primitive(::Mantle.TriangleList)  = MTL.MTLPrimitiveTypeTriangle
+mtl_primitive(::Mantle.TriangleStrip) = MTL.MTLPrimitiveTypeTriangleStrip
+mtl_primitive(::Mantle.LineList)      = MTL.MTLPrimitiveTypeLine
+mtl_primitive(::Mantle.PointList)     = MTL.MTLPrimitiveTypePoint
 
 mtl_depth_compare(mode::Mantle.DepthMode) = getproperty(
-    (less = MTLm.MTLCompareFunctionLess, lessequal = MTLm.MTLCompareFunctionLessEqual,
-     greater = MTLm.MTLCompareFunctionGreater, always = MTLm.MTLCompareFunctionAlways),
+    (less = MTL.MTLCompareFunctionLess, lessequal = MTL.MTLCompareFunctionLessEqual,
+     greater = MTL.MTLCompareFunctionGreater, always = MTL.MTLCompareFunctionAlways),
     something(Mantle.depthtest(mode), :always))
 
 """Configure one colour attachment's blending from the portable `BlendMode`."""
 function apply_blend!(att, mode::Mantle.BlendMode)
-    Mantle.writescolor(mode) || (att.writeMask = MTLm.MTLColorWriteMaskNone)
+    Mantle.writescolor(mode) || (att.writeMask = MTL.MTLColorWriteMaskNone)
     f = Mantle.blendfactors(mode)
     att.blendingEnabled = f !== nothing
     f === nothing && return att
-    mtl = (one = MTLm.MTLBlendFactorOne, srcalpha = MTLm.MTLBlendFactorSourceAlpha,
-           oneminussrcalpha = MTLm.MTLBlendFactorOneMinusSourceAlpha)
+    mtl = (one = MTL.MTLBlendFactorOne, srcalpha = MTL.MTLBlendFactorSourceAlpha,
+           oneminussrcalpha = MTL.MTLBlendFactorOneMinusSourceAlpha)
     att.sourceRGBBlendFactor, att.destinationRGBBlendFactor,
         att.sourceAlphaBlendFactor, att.destinationAlphaBlendFactor = map(s -> getproperty(mtl, s), f)
     return att
@@ -40,7 +38,7 @@ function apply_attachments!(desc, color_formats, depth_format, blend)
         att = desc.colorAttachments[i]
         att.pixelFormat = fmt
         apply_blend!(att, Mantle.attachmentblend(blend, i,
-                     fmt in (MTLm.MTLPixelFormatR32Uint, MTLm.MTLPixelFormatRG32Uint)))
+                     fmt in (MTL.MTLPixelFormatR32Uint, MTL.MTLPixelFormatRG32Uint)))
     end
     depth_format === nothing || (desc.depthAttachmentPixelFormat = depth_format)
     return desc
@@ -48,15 +46,15 @@ end
 
 function depthstate(dev, depth, depth_format)
     (depth_format === nothing || depth isa Mantle.DepthOff) && return nothing
-    dd = MTLm.MTLDepthStencilDescriptor()
+    dd = MTL.MTLDepthStencilDescriptor()
     dd.depthCompareFunction = mtl_depth_compare(depth)
     dd.depthWriteEnabled = Mantle.depthwrites(depth)
-    return MTLm.MTLDepthStencilState(dev, dd)
+    return MTL.MTLDepthStencilState(dev, dd)
 end
 
 """A 2D texture on Metal. The element type is Mantle's spelling of the format."""
 struct MetalTexture2D{T} <: Mantle.Texture2D{T}
-    tex::MTLm.MTLTexture
+    tex::MTL.MTLTexture
     width::Int
     height::Int
     dev::MetalDevice
@@ -67,7 +65,7 @@ Mantle.mipmapped(t::MetalTexture2D) = t.tex.mipmapLevelCount > 1
 
 """A sampler on Metal."""
 struct MetalSampler <: Mantle.Sampler
-    state::MTLm.MTLSamplerState
+    state::MTL.MTLSamplerState
 end
 
 """
@@ -77,8 +75,8 @@ The pixel format of a sampled texture of `T`. Differs from `mtlformat` (render
 targets) only for scalar floats: `Float32` is `R32Float` here, not `Depth32Float`,
 which a sampler rejects.
 """
-mtlsampledformat(::Type{Float32}) = MTLm.MTLPixelFormatR32Float
-mtlsampledformat(::Type{Float16}) = MTLm.MTLPixelFormatR16Float
+mtlsampledformat(::Type{Float32}) = MTL.MTLPixelFormatR32Float
+mtlsampledformat(::Type{Float16}) = MTL.MTLPixelFormatR16Float
 mtlsampledformat(@nospecialize(T::Type)) = mtlformat(T)
 
 """
@@ -92,10 +90,10 @@ the Vulkan backend. `Shared` storage, not a buffer-backed linear texture.
 function Mantle.Texture2D(be::Metal.MetalBackend, data::AbstractMatrix{T}; mipmap::Bool = false) where {T}
     d = Device(be)
     w, h = size(data)          # first index is x, second is y
-    desc = MTLm.MTLTextureDescriptor(mtlsampledformat(T), w, h, mipmap)
-    desc.usage = MTLm.MTLTextureUsageShaderRead
-    desc.storageMode = MTLm.MTLStorageModeShared
-    t = MetalTexture2D{T}(MTLm.MTLTexture(d.dev, desc), w, h, d)
+    desc = MTL.MTLTextureDescriptor(mtlsampledformat(T), w, h, mipmap)
+    desc.usage = MTL.MTLTextureUsageShaderRead
+    desc.storageMode = MTL.MTLStorageModeShared
+    t = MetalTexture2D{T}(MTL.MTLTexture(d.dev, desc), w, h, d)
     Mantle.upload_texture_data!(t, data)
     return t
 end
@@ -112,7 +110,7 @@ function Mantle.copytexels!(t::MetalTexture2D{T}, data::AbstractMatrix{T}) where
     # `collect` for anything without a dense host pointer (views, adjoints).
     rows = data isa Matrix{T} ? data : collect(data)
     nbytes = length(rows) * sizeof(T)
-    staging = GC.@preserve rows MTLm.MTLBuffer(t.dev.dev, nbytes, pointer(rows);
+    staging = GC.@preserve rows MTL.MTLBuffer(t.dev.dev, nbytes, pointer(rows);
                                                storage = Metal.SharedStorage)
     blit_into_texture!(t, staging, 0)
     return t
@@ -130,18 +128,18 @@ function Mantle.copytexels!(t::MetalTexture2D{T}, data::Metal.MtlMatrix{T}) wher
 end
 
 """Copy a whole texture's worth of texels from `src` at byte `soff`, on the queue."""
-function blit_into_texture!(t::MetalTexture2D{T}, src::MTLm.MTLBuffer, soff::Integer) where {T}
+function blit_into_texture!(t::MetalTexture2D{T}, src::MTL.MTLBuffer, soff::Integer) where {T}
     w, h = size(t)
     # Behind the device's uncommitted batch: commit order is execution order.
     cb = framebuffer!(t.dev)
-    MTLm.MTLBlitCommandEncoder(cb) do enc
-        MTLm.append_copy!(enc, t.tex, MTLm.MTLOrigin(0, 0, 0), MTLm.MTLSize(w, h, 1),
+    MTL.MTLBlitCommandEncoder(cb) do enc
+        MTL.append_copy!(enc, t.tex, MTL.MTLOrigin(0, 0, 0), MTL.MTLSize(w, h, 1),
                           src, soff, w * sizeof(T), 0)
-        t.tex.mipmapLevelCount > 1 && MTLm.append_generate_mipmaps!(enc, t.tex)
+        t.tex.mipmapLevelCount > 1 && MTL.append_generate_mipmaps!(enc, t.tex)
     end
     # Waited for, so the caller may reuse its array on return.
     submitwait!(cb)
-    cb.status == MTLm.MTLCommandBufferStatusCompleted ||
+    cb.status == MTL.MTLCommandBufferStatusCompleted ||
         error("Metal texture upload failed: $(cb.status)")
     return nothing
 end
@@ -154,21 +152,21 @@ How a texture is sampled; the same keywords as the Vulkan backend.
 """
 function Mantle.Sampler(::Metal.MetalBackend; filter::Symbol = :linear,
                         wrap::Symbol = :repeat)
-    f = filter === :nearest ? MTLm.MTLSamplerMinMagFilterNearest :
-        filter === :linear  ? MTLm.MTLSamplerMinMagFilterLinear :
+    f = filter === :nearest ? MTL.MTLSamplerMinMagFilterNearest :
+        filter === :linear  ? MTL.MTLSamplerMinMagFilterLinear :
         error("unknown filter :$filter; expected :nearest or :linear")
-    a = wrap === :repeat        ? MTLm.MTLSamplerAddressModeRepeat :
-        wrap === :clamp        ? MTLm.MTLSamplerAddressModeClampToEdge :
-        wrap === :mirror       ? MTLm.MTLSamplerAddressModeMirrorRepeat :
+    a = wrap === :repeat        ? MTL.MTLSamplerAddressModeRepeat :
+        wrap === :clamp        ? MTL.MTLSamplerAddressModeClampToEdge :
+        wrap === :mirror       ? MTL.MTLSamplerAddressModeMirrorRepeat :
         error("unknown wrap :$wrap; expected :repeat, :clamp or :mirror")
-    desc = MTLm.MTLSamplerDescriptor()
+    desc = MTL.MTLSamplerDescriptor()
     desc.minFilter = f
     desc.magFilter = f
-    desc.mipFilter = MTLm.MTLSamplerMipFilterLinear
+    desc.mipFilter = MTL.MTLSamplerMipFilterLinear
     desc.sAddressMode = a
     desc.tAddressMode = a
     desc.normalizedCoordinates = true
-    return MetalSampler(MTLm.MTLSamplerState(Metal.device(), desc))
+    return MetalSampler(MTL.MTLSamplerState(Metal.device(), desc))
 end
 
 """
@@ -177,12 +175,12 @@ Not buffer-backed: rendering into a linear texture on an Apple GPU silently writ
 nothing, so readback uses `getBytes!`.
 """
 struct MetalFramebuffer <: Mantle.Framebuffer
-    color::MTLm.MTLTexture
-    depth::Union{Nothing,MTLm.MTLTexture}
+    color::MTL.MTLTexture
+    depth::Union{Nothing,MTL.MTLTexture}
     width::Int
     height::Int
-    color_format::MTLm.MTLPixelFormat
-    depth_format::MTLm.MTLPixelFormat
+    color_format::MTL.MTLPixelFormat
+    depth_format::MTL.MTLPixelFormat
     # Its passes commit on this device's queue, which a readback waits for.
     dev::MetalDevice
 end
@@ -197,21 +195,21 @@ function Mantle.Framebuffer(be::Metal.MetalBackend, width::Integer, height::Inte
                             depth::Bool = true, color_format = nothing)
     d = Device(be)
     dev = d.dev
-    cfmt = color_format === nothing ? MTLm.MTLPixelFormatBGRA8Unorm :
+    cfmt = color_format === nothing ? MTL.MTLPixelFormatBGRA8Unorm :
                                       mtlformat(color_format)
-    cdesc = MTLm.MTLTextureDescriptor(cfmt, width, height, false)
-    cdesc.usage = MTLm.MTLTextureUsageRenderTarget | MTLm.MTLTextureUsageShaderRead
-    cdesc.storageMode = MTLm.MTLStorageModeShared
-    ctex = MTLm.MTLTexture(dev, cdesc)
+    cdesc = MTL.MTLTextureDescriptor(cfmt, width, height, false)
+    cdesc.usage = MTL.MTLTextureUsageRenderTarget | MTL.MTLTextureUsageShaderRead
+    cdesc.storageMode = MTL.MTLStorageModeShared
+    ctex = MTL.MTLTexture(dev, cdesc)
 
-    dfmt = MTLm.MTLPixelFormatDepth32Float
+    dfmt = MTL.MTLPixelFormatDepth32Float
     dtex = nothing
     if depth
-        ddesc = MTLm.MTLTextureDescriptor(dfmt, width, height, false)
-        ddesc.usage = MTLm.MTLTextureUsageRenderTarget
+        ddesc = MTL.MTLTextureDescriptor(dfmt, width, height, false)
+        ddesc.usage = MTL.MTLTextureUsageRenderTarget
         # Private: depth is never read back.
-        ddesc.storageMode = MTLm.MTLStorageModePrivate
-        dtex = MTLm.MTLTexture(dev, ddesc)
+        ddesc.storageMode = MTL.MTLStorageModePrivate
+        dtex = MTL.MTLTexture(dev, ddesc)
     end
     return MetalFramebuffer(ctex, dtex, Int(width), Int(height), cfmt, dfmt, d)
 end
@@ -225,36 +223,36 @@ type, not `nameof(T)`, so foreign types named `RGBA` do not match.
 """
 function mtlformat(@nospecialize(T::Type); srgb::Bool = false)
     # Depth, as `vkformat`'s `D32_SFLOAT`; `R32Float` would be a colour target.
-    T === Float32 && return MTLm.MTLPixelFormatDepth32Float
-    T === UInt32 && return MTLm.MTLPixelFormatR32Uint
-    T <: StaticVector{2,UInt32} && return MTLm.MTLPixelFormatRG32Uint
+    T === Float32 && return MTL.MTLPixelFormatDepth32Float
+    T === UInt32 && return MTL.MTLPixelFormatR32Uint
+    T <: StaticVector{2,UInt32} && return MTL.MTLPixelFormatRG32Uint
     T <: Real && error("no Metal pixel format for the scalar $T")
-    T === BGRA{N0f8}    && return srgb ? MTLm.MTLPixelFormatBGRA8Unorm_sRGB :
-                                         MTLm.MTLPixelFormatBGRA8Unorm
-    T === RGBA{N0f8}    && return srgb ? MTLm.MTLPixelFormatRGBA8Unorm_sRGB :
-                                         MTLm.MTLPixelFormatRGBA8Unorm
+    T === BGRA{N0f8}    && return srgb ? MTL.MTLPixelFormatBGRA8Unorm_sRGB :
+                                         MTL.MTLPixelFormatBGRA8Unorm
+    T === RGBA{N0f8}    && return srgb ? MTL.MTLPixelFormatRGBA8Unorm_sRGB :
+                                         MTL.MTLPixelFormatRGBA8Unorm
     # Float formats have no sRGB variant; they hold linear values.
-    T === RGBA{Float16} && return MTLm.MTLPixelFormatRGBA16Float
-    T === RGBA{Float32} && return MTLm.MTLPixelFormatRGBA32Float
+    T === RGBA{Float16} && return MTL.MTLPixelFormatRGBA16Float
+    T === RGBA{Float32} && return MTL.MTLPixelFormatRGBA32Float
 
     # Tuple spellings, as portable shaders write them.
-    T === NTuple{4,Float32} && return MTLm.MTLPixelFormatRGBA32Float
-    T === NTuple{2,Float32} && return MTLm.MTLPixelFormatRG32Float
-    T === NTuple{4,Float16} && return MTLm.MTLPixelFormatRGBA16Float
-    T === NTuple{2,Float16} && return MTLm.MTLPixelFormatRG16Float
-    T === NTuple{4,UInt8}   && return srgb ? MTLm.MTLPixelFormatRGBA8Unorm_sRGB :
-                                             MTLm.MTLPixelFormatRGBA8Unorm
-    T === UInt8             && return MTLm.MTLPixelFormatR8Unorm
+    T === NTuple{4,Float32} && return MTL.MTLPixelFormatRGBA32Float
+    T === NTuple{2,Float32} && return MTL.MTLPixelFormatRG32Float
+    T === NTuple{4,Float16} && return MTL.MTLPixelFormatRGBA16Float
+    T === NTuple{2,Float16} && return MTL.MTLPixelFormatRG16Float
+    T === NTuple{4,UInt8}   && return srgb ? MTL.MTLPixelFormatRGBA8Unorm_sRGB :
+                                             MTL.MTLPixelFormatRGBA8Unorm
+    T === UInt8             && return MTL.MTLPixelFormatR8Unorm
     # No three-channel formats exist on Metal; callers pad to four.
     error("no Metal pixel format for $T — extend `mtlformat` in metal/graphics.jl")
 end
 
 """A compiled Metal render pipeline, plus the state a draw still has to set."""
 struct MetalCompiledGraphicsPipeline <: Mantle.CompiledGraphicsPipeline
-    state::MTLm.MTLRenderPipelineState
-    depth_state::Union{Nothing,MTLm.MTLDepthStencilState}
-    primitive::MTLm.MTLPrimitiveType
-    cull::MTLm.MTLCullMode
+    state::MTL.MTLRenderPipelineState
+    depth_state::Union{Nothing,MTL.MTLDepthStencilState}
+    primitive::MTL.MTLPrimitiveType
+    cull::MTL.MTLCullMode
     # False for depth-only pipelines; Metal rejects binding to a missing stage.
     has_fragment::Bool
     # An `MTLFunction` does not keep its library alive; releasing the library
@@ -281,8 +279,8 @@ stage_output_type(::Mantle.GraphicsPipeline, ::Val{:fragment}, ncolor::Int = 1) 
                NTuple{ncolor, NTuple{4,Float32}}}
 
 # Integer attachments carry exact IDs rather than float colour values.
-fragment_attachment_type(fmt) = fmt == MTLm.MTLPixelFormatR32Uint ? UInt32 :
-    fmt == MTLm.MTLPixelFormatRG32Uint ? NTuple{2,UInt32} : NTuple{4,Float32}
+fragment_attachment_type(fmt) = fmt == MTL.MTLPixelFormatR32Uint ? UInt32 :
+    fmt == MTL.MTLPixelFormatRG32Uint ? NTuple{2,UInt32} : NTuple{4,Float32}
 fragment_output_type(formats) = NamedTuple{
     ntuple(i -> Symbol(:color, i), length(formats)),
     Tuple{map(fragment_attachment_type, formats)...}}
@@ -487,8 +485,8 @@ the rest of the signature follows from the pipeline. Cached on the compiled
 stages, the formats and the pipeline state.
 """
 function compile_pipeline(d::MetalDevice, p::Mantle.GraphicsPipeline,
-                          color_formats::Vector{MTLm.MTLPixelFormat},
-                          depth_format::Union{Nothing,MTLm.MTLPixelFormat},
+                          color_formats::Vector{MTL.MTLPixelFormat},
+                          depth_format::Union{Nothing,MTL.MTLPixelFormat},
                           vert_bufs::Type, frag_bufs::Type)
     # Geometry pipelines normally go through `compile_draw`, which lowers them
     # onto a mesh pipeline (`metal/mesh.jl`); this compiles native stages only.
@@ -523,12 +521,12 @@ function compile_pipeline(d::MetalDevice, p::Mantle.GraphicsPipeline,
         vfun, vlib = vstage
         ffun, flib = fstage === nothing ? (nothing, nothing) : fstage
 
-        desc = MTLm.MTLRenderPipelineDescriptor()
+        desc = MTL.MTLRenderPipelineDescriptor()
         desc.vertexFunction = vfun
         ffun === nothing || (desc.fragmentFunction = ffun)
         # Attachments in pass order, matching `air.render_target <i>`.
         apply_attachments!(desc, color_formats, depth_format, p.blend)
-        state = MTLm.MTLRenderPipelineState(dev, desc)
+        state = MTL.MTLRenderPipelineState(dev, desc)
         dstate = depthstate(dev, p.depth, depth_format)
 
         compiled = MetalCompiledGraphicsPipeline(state, dstate, mtl_primitive(p.topology),
@@ -565,7 +563,7 @@ Compile one Julia shader into a Metal stage function, cached per `CodeInstance`.
 The caller must keep the library: an `MTLFunction` does not keep it alive, and a
 released library makes the pipeline draw nothing.
 """
-function compile_stage_function(dev::MTLm.MTLDevice, f, tt::Type, stage::Symbol, name::String)
+function compile_stage_function(dev::MTL.MTLDevice, f, tt::Type, stage::Symbol, name::String)
     # `always_inline`: textures and samplers are entry parameters
     # (`lower_texture_bindings!`), so every sampling call must be inlined into the
     # entry; the optimiser alone does not guarantee it.
@@ -577,8 +575,8 @@ function compile_stage_function(dev::MTLm.MTLDevice, f, tt::Type, stage::Symbol,
         compiled = get(stages.stages, key, nothing)
         compiled === nothing || return compiled
     end
-    lib = MTLm.MTLLibraryFromData(dev, Metal.compile_to_metallib(job).metallib)
-    compiled = (MTLm.MTLFunction(lib, name), lib)
+    lib = MTL.MTLLibraryFromData(dev, Metal.compile_to_metallib(job).metallib)
+    compiled = (MTL.MTLFunction(lib, name), lib)
     # Compiling the job made its `CodeInstance`, so this finds one.
     stages === nothing && (stages = Metal.GPUCompiler.cached_results(MetalStages, job))
     stages.stages[key] = compiled
@@ -601,35 +599,35 @@ A fresh command buffer on the device's queue, behind the compute Metal.jl has
 batched and not committed. Given a raw `MTLDevice`, uses the cached
 `Device(MetalAPI())`.
 """
-framebuffer!(::MTLm.MTLDevice) = framebuffer!(Device(MetalAPI()))
+framebuffer!(::MTL.MTLDevice) = framebuffer!(Device(MetalAPI()))
 
 function framebuffer!(d::MetalDevice)
     bq = batchqueue(d)
     Metal.has_open_batch(bq) && Metal.flush!(bq)
-    return MTLm.MTLCommandBuffer(bq.queue)
+    return MTL.MTLCommandBuffer(bq.queue)
 end
 
 """Commit a command buffer from `framebuffer!`; every caller ends with this or
 `submitwait!`. `Metal.submit_command_buffer` commits Metal.jl's open batch first
 and claims the bound arrays (`metal_buffer`) for this queue, so host reads of
 them wait for this buffer."""
-function commit!(cb::MTLm.MTLCommandBuffer)
-    Metal.submit_command_buffer(() -> MTLm.commit!(cb), cb, true)
+function commit!(cb::MTL.MTLCommandBuffer)
+    Metal.submit_command_buffer(() -> MTL.commit!(cb), cb, true)
     committed!(cb)
     return cb
 end
 
 """Commit and wait; required before reading bytes back."""
-function submitwait!(cb::MTLm.MTLCommandBuffer)
+function submitwait!(cb::MTL.MTLCommandBuffer)
     commit!(cb)
-    MTLm.wait_completed(cb)
+    MTL.wait_completed(cb)
     return nothing
 end
 
 # Per-pass GPU time from each command buffer's `GPUStartTime`/`GPUEndTime`
 # (seconds). Committed buffers are collected while profiling and drained by
 # `gpupasstime!`, which submits and waits at every pass boundary.
-const COMMITTED = MTLm.MTLCommandBuffer[]
+const COMMITTED = MTL.MTLCommandBuffer[]
 
 # Set by `makeprofiler`. Held command buffers are not recycled by Metal, so
 # collecting without a drain makes frame time grow with frame count.
@@ -668,12 +666,12 @@ function Mantle.gpupasstime!(d::MetalDevice)
     # Metal.jl's open batch counts too. Retained, because the batch releases its
     # borrowed reference when the flush commits it.
     open_cb = bq.backend.cmdbuf
-    open_cb === nothing || push!(COMMITTED, MTLm.retained(open_cb))
+    open_cb === nothing || push!(COMMITTED, MTL.retained(open_cb))
     Metal.flush!(bq)
     isempty(COMMITTED) && return 0.0
     total = 0.0
     for cb in COMMITTED
-        MTLm.wait_completed(cb)
+        MTL.wait_completed(cb)
         s, e = cb.GPUStartTime, cb.GPUEndTime
         (s > 0 && e > s) && (total += e - s)
     end
@@ -694,22 +692,21 @@ function Mantle.readback_framebuffer(fb::MetalFramebuffer)
     waitidle(fb.dev)
     # The colorant's layout matches the texel's, so bytes are read directly.
     px = Matrix{eltypeof(fb.color_format)}(undef, fb.width, fb.height)
-    GC.@preserve px MTLm.getBytes!(pointer(px), fb.color, fb.width * sizeof(eltype(px)),
-                                   MTLm.MTLRegion(MTLm.MTLOrigin(0, 0, 0),
-                                                  MTLm.MTLSize(fb.width, fb.height, 1)))
+    GC.@preserve px MTL.getBytes!(pointer(px), fb.color, fb.width * sizeof(eltype(px)),
+                                   MTL.MTLRegion(MTL.MTLOrigin(0, 0, 0),
+                                                  MTL.MTLSize(fb.width, fb.height, 1)))
     return px
 end
 
 supports_graphics(::Metal.MetalBackend) = true
-supports_graphics(::MetalDevice) = true
 
 # The render-pass verbs declared in `graphics/commands.jl`, driven by core's
 # `runrenderpass!`.
 
 """What `begin_render_pass!` returns and `record_draw!`/`end_render_pass!` take."""
 struct MetalPassHandle
-    cmdbuf::MTLm.MTLCommandBuffer
-    encoder::MTLm.MTLRenderCommandEncoder
+    cmdbuf::MTL.MTLCommandBuffer
+    encoder::MTL.MTLRenderCommandEncoder
 end
 
 # Draw arguments use the kernel-launch ABI: `mtlconvert` turns an `MtlArray`
@@ -724,7 +721,7 @@ A value that changes between frames must be a `GPURef` (`refuserefs`).
 mutable struct StageArgs
     source::Tuple      # the arguments last baked from
     device::Tuple      # what gets bound, byte for byte
-    buffers::Vector{MTLm.MTLBuffer}
+    buffers::Vector{MTL.MTLBuffer}
     # Reused staging for `setVertexBytes`, which takes a pointer; avoids a `Ref`
     # per argument per draw.
     scratch::Vector{UInt8}
@@ -737,7 +734,7 @@ argdevtype(a) = typeof(a)
 
 function StageArgs(args)
     t = Tuple(args)
-    bufs = MTLm.MTLBuffer[]
+    bufs = MTL.MTLBuffer[]
     for a in t
         b = metal_buffer(a)
         b === nothing || push!(bufs, b)
@@ -795,7 +792,7 @@ buffer_types(a::StageArgs) = Tuple{map(argdevtype, a.device)...}
 """The attachment formats as Metal pixel formats, through `mtlformat` so a pipeline
 matches the attachments it draws into."""
 mtlformats(color_formats, depth_format) =
-    (MTLm.MTLPixelFormat[mtlformat(T) for T in color_formats],
+    (MTL.MTLPixelFormat[mtlformat(T) for T in color_formats],
      depth_format === nothing ? nothing : mtlformat(depth_format))
 
 function Mantle.compile_draw(d::MetalDevice, p::Mantle.GraphicsPipeline,
@@ -815,34 +812,34 @@ rebakestages!(args, stages::StageArgs...) =
 `flip_clip` mirrors y, reversing every primitive's winding, and back-face culling
 would otherwise drop the front faces."""
 function setdrawstate!(enc, c)
-    MTLm.set_pipeline!(enc, c.state)
-    c.depth_state === nothing || MTLm.set_depth_stencil_state!(enc, c.depth_state)
-    MTLm.set_cull_mode!(enc, c.cull)
-    MTLm.set_front_facing_winding!(enc, MTLm.MTLWindingCounterClockwise)
+    MTL.set_pipeline!(enc, c.state)
+    c.depth_state === nothing || MTL.set_depth_stencil_state!(enc, c.depth_state)
+    MTL.set_cull_mode!(enc, c.cull)
+    MTL.set_front_facing_winding!(enc, MTL.MTLWindingCounterClockwise)
     return nothing
 end
 
 function Mantle.begin_render_pass!(d::MetalDevice, targets, loads, depth, depth_load)
-    rp = MTLm.MTLRenderPassDescriptor()
+    rp = MTL.MTLRenderPassDescriptor()
     for (i, t) in enumerate(targets)
         att = rp.colorAttachments[i]
         att.texture     = metal_texture(t)
         att.loadAction  = mtl_loadaction(loads[i])
-        att.storeAction = MTLm.MTLStoreActionStore
+        att.storeAction = MTL.MTLStoreActionStore
         cv = Mantle.clearvalue(loads[i])
-        cv === nothing || (att.clearColor = MTLm.MTLClearColor(cv[1], cv[2], cv[3], cv[4]))
+        cv === nothing || (att.clearColor = MTL.MTLClearColor(cv[1], cv[2], cv[3], cv[4]))
     end
     if depth !== nothing
         da = rp.depthAttachment
         da.texture     = metal_texture(depth)
         da.loadAction  = mtl_loadaction(depth_load)
-        da.storeAction = MTLm.MTLStoreActionStore
+        da.storeAction = MTL.MTLStoreActionStore
         dv = depth_load === nothing ? nothing : Mantle.depthclear(depth_load)
         dv === nothing || (da.clearDepth = Float64(dv))
     end
     # This pass's own command buffer; `end_render_pass!` commits it.
     cb  = framebuffer!(d.dev)
-    enc = MTLm.MTLRenderCommandEncoder(cb, rp)
+    enc = MTL.MTLRenderCommandEncoder(cb, rp)
     return MetalPassHandle(cb, enc)
 end
 
@@ -851,9 +848,9 @@ Bind one stage's baked arguments with `setBytes:` (a stage takes the
 `MtlDeviceArray` struct, not the data), after making every buffer behind them
 resident.
 """
-function bind_stage!(enc, a::StageArgs, setbytes!, stage::MTLm.MTLRenderStages)
+function bind_stage!(enc, a::StageArgs, setbytes!, stage::MTL.MTLRenderStages)
     for b in a.buffers
-        MTLm.use!(enc, b, MTLm.ReadUsage, stage)
+        MTL.use!(enc, b, MTL.ReadUsage, stage)
     end
     bindall!(setbytes!, enc, a.device, a.scratch)
     return nothing
@@ -887,10 +884,10 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledDraw, args, cou
     rebakestages!(args, d.vert, d.frag)
     c = d.pipeline
     setdrawstate!(h.encoder, c)
-    bind_stage!(h.encoder, d.vert, MTLm.set_vertex_bytes!, MTLm.MTLRenderStageVertex)
+    bind_stage!(h.encoder, d.vert, MTL.set_vertex_bytes!, MTL.MTLRenderStageVertex)
     # Metal rejects fragment bindings on a depth-only pipeline.
     c.has_fragment &&
-        bind_stage!(h.encoder, d.frag, MTLm.set_fragment_bytes!, MTLm.MTLRenderStageFragment)
+        bind_stage!(h.encoder, d.frag, MTL.set_fragment_bytes!, MTL.MTLRenderStageFragment)
     draw_with_count!(h.encoder, c, count, instances, indices)
     return nothing
 end
@@ -905,10 +902,10 @@ the vertex stage's `flip_clip`. The scissor is core's `scissorrect`, at least a
 pixel wide, since Metal refuses an empty one.
 """
 function Mantle.setviewport!(h::MetalPassHandle, x::Real, y::Real, w::Real, hgt::Real)
-    MTLm.set_viewport!(h.encoder,
-        MTLm.MTLViewport(Float64(x), Float64(y), Float64(w), Float64(hgt), 0.0, 1.0))
+    MTL.set_viewport!(h.encoder,
+        MTL.MTLViewport(Float64(x), Float64(y), Float64(w), Float64(hgt), 0.0, 1.0))
     sx, sy, sw, sh = Mantle.scissorrect(x, y, w, hgt)
-    MTLm.set_scissor!(h.encoder, MTLm.MTLScissorRect(UInt(sx), UInt(sy), UInt(max(1, sw)), UInt(max(1, sh))))
+    MTL.set_scissor!(h.encoder, MTL.MTLScissorRect(UInt(sx), UInt(sy), UInt(max(1, sw)), UInt(max(1, sh))))
     return nothing
 end
 
@@ -952,13 +949,13 @@ Mantle.target_format(fb::MetalFramebuffer) = fb.color_format
 # The inverse of `mtlformat` over a framebuffer's colour formats, for core's
 # `blittarget` and for `readback_framebuffer`.
 
-eltypeof(f::MTLm.MTLPixelFormat) = Mantle.eltypefor(mtlformat, f)
+eltypeof(f::MTL.MTLPixelFormat) = Mantle.eltypefor(mtlformat, f)
 
 """
 End the encoder and commit the pass's command buffer.
 """
 function Mantle.end_render_pass!(h::MetalPassHandle)
-    MTLm.endEncoding!(h.encoder)
+    MTL.endEncoding!(h.encoder)
     commit!(h.cmdbuf)
     return nothing
 end
@@ -973,11 +970,11 @@ resident explicitly: no shader names it.
 function draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Integer,
                           instances::Integer = 1, indices = nothing)
     if indices === nothing
-        MTLm.draw_primitives!(enc, c.primitive, 0, n, instances)
+        MTL.draw_primitives!(enc, c.primitive, 0, n, instances)
     else
-        ibuf = useindices!(enc, indices, MTLm.MTLRenderStageVertex)
-        MTLm.draw_indexed_primitives!(enc, c.primitive, n,
-                                      MTLm.MTLIndexTypeUInt32, ibuf,
+        ibuf = useindices!(enc, indices, MTL.MTLRenderStageVertex)
+        MTL.draw_indexed_primitives!(enc, c.primitive, n,
+                                      MTL.MTLIndexTypeUInt32, ibuf,
                                       byteoffset(indices), instances)
     end
     return nothing
@@ -989,7 +986,7 @@ function useindices!(enc, indices, stage)
     ibuf = metal_buffer(indices)
     ibuf === nothing && error("an indexed draw needs a device buffer of indices, got $(typeof(indices))")
     # `stage` is already an `MTLRenderStages`; wrapping it is a `MethodError`.
-    MTLm.use!(enc, ibuf, MTLm.ReadUsage, stage)
+    MTL.use!(enc, ibuf, MTL.ReadUsage, stage)
     return ibuf
 end
 
@@ -1003,32 +1000,32 @@ function draw_indirect_with!(enc, c::MetalCompiledGraphicsPipeline, n::Mantle.Co
     buf === nothing && error("a Commands draw needs a device buffer, got $(typeof(n.resource))")
     # Must be made resident although no shader names it: a non-resident indirect
     # buffer yields a garbage vertex count and a command buffer that never completes.
-    MTLm.use!(enc, buf, MTLm.ReadUsage,
-              MTLm.MTLRenderStages(MTLm.MTLRenderStageVertex |
-                                   MTLm.MTLRenderStageFragment))
+    MTL.use!(enc, buf, MTL.ReadUsage,
+              MTL.MTLRenderStages(MTL.MTLRenderStageVertex |
+                                   MTL.MTLRenderStageFragment))
     # At the resource's offset: transients are views into the arena.
-    MTLm.draw_primitives_indirect!(enc, c.primitive, buf, byteoffset(n.resource))
+    MTL.draw_primitives_indirect!(enc, c.primitive, buf, byteoffset(n.resource))
 end
 
 """The `MTLTexture` behind a render attachment."""
-metal_texture(t::MTLm.MTLTexture) = t
+metal_texture(t::MTL.MTLTexture) = t
 metal_texture(t::MetalTexture2D)  = t.tex
 metal_texture(t) = error("not something Metal can attach as a render target: $(typeof(t))")
 
 """The `MTLBuffer` behind a draw argument, or `nothing` if it is not one."""
-metal_buffer(x::MTLm.MTLBuffer) = x
+metal_buffer(x::MTL.MTLBuffer) = x
 # `unsafe_convert` also marks the array as used by this task's next submission, so
 # `commit!` claims it and a host read waits for the pass. For a view over a pool
 # region this is the block's buffer.
-metal_buffer(x::Metal.MtlArray) = Base.unsafe_convert(MTLm.MTLBuffer, x)
+metal_buffer(x::Metal.MtlArray) = Base.unsafe_convert(MTL.MTLBuffer, x)
 metal_buffer(@nospecialize(x))  = nothing
 
 # `Clear` is matched first: `discards` is also true for `Clear`, which would map
 # it to `DontCare`.
-mtl_loadaction(::Mantle.Clear)   = MTLm.MTLLoadActionClear
-mtl_loadaction(l::Mantle.LoadOp) = Mantle.discards(l) ? MTLm.MTLLoadActionDontCare :
-                                                        MTLm.MTLLoadActionLoad
-mtl_loadaction(::Nothing) = MTLm.MTLLoadActionDontCare
+mtl_loadaction(::Mantle.Clear)   = MTL.MTLLoadActionClear
+mtl_loadaction(l::Mantle.LoadOp) = Mantle.discards(l) ? MTL.MTLLoadActionDontCare :
+                                                        MTL.MTLLoadActionLoad
+mtl_loadaction(::Nothing) = MTL.MTLLoadActionDontCare
 
 # KernelInterface shader builtins as `@device_override`s in Metal's method table;
 # the host methods error and must stay.
@@ -1076,8 +1073,8 @@ The bound texture table on Metal: textures and samplers as lists, since Metal
 has no descriptor set; `use_bindings!` sets them on the encoder.
 """
 struct MetalTextureBindings <: Mantle.TextureBindings
-    textures::Vector{MTLm.MTLTexture}
-    samplers::Vector{MTLm.MTLSamplerState}
+    textures::Vector{MTL.MTLTexture}
+    samplers::Vector{MTL.MTLSamplerState}
 end
 
 Base.length(b::MetalTextureBindings) = length(b.textures)
@@ -1100,10 +1097,10 @@ function Mantle.use_bindings!(h::MetalPassHandle, _compiled,
                               b::MetalTextureBindings)
     enc = h.encoder
     for (i, tex) in enumerate(b.textures)
-        MTLm.set_fragment_texture!(enc, tex, i)
+        MTL.set_fragment_texture!(enc, tex, i)
     end
     for (i, st) in enumerate(b.samplers)
-        MTLm.set_fragment_sampler!(enc, st, i)
+        MTL.set_fragment_sampler!(enc, st, i)
     end
     return nothing
 end

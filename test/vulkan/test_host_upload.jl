@@ -3,7 +3,7 @@ using Test, Mantle, GPUArrays, StaticArrays
 function check_bounded_staging(ctx)
     @testset "large host uploads reuse bounded staging" begin
         bq=ctx.default_bq
-        dev=Mantle.lavadevice(ctx)
+        dev=ctx
         cap=Mantle.MAX_UPLOAD_STAGING_BYTES
         source=UInt32.(1:(2cap÷sizeof(UInt32)+7))
         gpu=Mantle.LavaArray{UInt32}(undef,(length(source)+6,);bq)
@@ -110,27 +110,27 @@ function check_host_upload(ctx)
         finally
             Mantle.unsafe_free!(gpu)
         end
-        Mantle.waitidle(Mantle.lavadevice(ctx)); Mantle.drain!(bq)
-        @test isempty(Mantle.validationmessages!(Mantle.lavadevice(ctx)))
+        Mantle.waitidle(ctx); Mantle.drain!(bq)
+        @test isempty(Mantle.validationmessages!(ctx))
     end
 end
 
 function check_store_submission(ctx)
     @testset "host stores stay in the caller's submission" begin
-        dev = Mantle.lavadevice(ctx)
+        dev = ctx
         for (off,n) in ((0,0),(4,16),(4,65536),(4,65540),(1,7))
             dst = Mantle.Buffer(dev,zeros(UInt8,n+8))
             src = fill(UInt8(0x73),n)
             try
                 before = Mantle.submissions(dev)
-                o = Mantle.oneshot(dev.bq) do e
+                o = Mantle.oneshot(dev.default_bq) do e
                     GC.@preserve src Mantle.storebytes!(e,dst.store,off,
                                                         Ptr{Cvoid}(pointer(src)),n)
                 end
                 @test Mantle.submissions(dev) == before
-                Mantle.release!(dev.bq,o)
+                Mantle.release!(dev.default_bq,o)
                 @test all(iszero,Array(dst)) # discarding the unsubmitted store writes nothing
-                Mantle.oneshot!(dev.bq) do e
+                Mantle.oneshot!(dev.default_bq) do e
                     GC.@preserve src Mantle.storebytes!(e,dst.store,off,
                                                         Ptr{Cvoid}(pointer(src)),n)
                 end
@@ -140,26 +140,26 @@ function check_store_submission(ctx)
                 Mantle.free!(dst)
             end
         end
-        Mantle.waitidle(dev); Mantle.drain!(dev.bq)
+        Mantle.waitidle(dev); Mantle.drain!(dev.default_bq)
         @test isempty(Mantle.validationmessages!(dev))
     end
 end
 
 function check_extent_refusal(ctx)
-    dev = Mantle.lavadevice(ctx)
+    dev = ctx
     be = Mantle.backend(dev)
     huge = 1 << (Sys.WORD_SIZE-2)
     @testset "invalid native shapes never submit or allocate" begin
         before = Mantle.submissions(dev)
         reserved = Mantle.reserved(Mantle.pool(dev))
         for (T,dims) in ((UInt8,(huge,4)),(Float64,(huge,)))
-            @test_throws OverflowError Mantle.LavaArray{T}(undef,dims;bq=dev.bq)
+            @test_throws OverflowError Mantle.LavaArray{T}(undef,dims;bq=dev.default_bq)
             @test_throws OverflowError Mantle.KA.allocate(be,T,dims)
             @test Mantle.trydevicearray(dev,T,dims) === nothing
         end
-        @test_throws ArgumentError Mantle.LavaArray{String}(undef,(0,);bq=dev.bq)
-        @test_throws ArgumentError Mantle.LavaArray{Base.RefValue{Int}}(undef,(1,);bq=dev.bq)
-        @test_throws ArgumentError Mantle.LavaArray{UInt8}(undef,(-1,-1);bq=dev.bq)
+        @test_throws ArgumentError Mantle.LavaArray{String}(undef,(0,);bq=dev.default_bq)
+        @test_throws ArgumentError Mantle.LavaArray{Base.RefValue{Int}}(undef,(1,);bq=dev.default_bq)
+        @test_throws ArgumentError Mantle.LavaArray{UInt8}(undef,(-1,-1);bq=dev.default_bq)
         @test_throws ArgumentError Mantle.KA.allocate(be,UInt8,(-1,-1))
         @test_throws ArgumentError Mantle.trydevicearray(dev,UInt8,(-1,-1))
         @test Mantle.submissions(dev) == before
@@ -169,7 +169,7 @@ function check_extent_refusal(ctx)
 end
 
 function check_copy_bounds(ctx)
-    dev = Mantle.lavadevice(ctx)
+    dev = ctx
     @testset "copy offsets respect logical views before native transfer" begin
         source = UInt32[7,8,9]
         bytes = collect(reinterpret(UInt8,source))
@@ -177,14 +177,14 @@ function check_copy_bounds(ctx)
         matrixwords = reinterpret(UInt32,reshape(bytes,4,3))
         spacedbytes = zeros(UInt8,2length(bytes)); spacedbytes[1:2:end] = bytes
         spacedwords = reinterpret(UInt32,view(spacedbytes,1:2:length(spacedbytes)))
-        srcparent = Mantle.LavaArray(UInt32[10,20,30,40,50];bq=dev.bq)
+        srcparent = Mantle.LavaArray(UInt32[10,20,30,40,50];bq=dev.default_bq)
         srcview = GPUArrays.derive(UInt32,srcparent,(3,),1)
         invalid = ((0,1,1),(4,1,1),(1,0,1),(1,4,1),(1,1,4),
                    (typemax(Int),1,2),(1,1,typemax(Int)))
         try
             for unified in (false,true)
                 original = UInt32[101,102,103,104,105]
-                parent = Mantle.LavaArray(original;bq=dev.bq,unified)
+                parent = Mantle.LavaArray(original;bq=dev.default_bq,unified)
                 dest = GPUArrays.derive(UInt32,parent,(3,),1)
                 try
                     for src in (source,words,matrixwords,spacedwords,srcview)
@@ -228,7 +228,7 @@ function check_copy_bounds(ctx)
         finally
             Mantle.unsafe_free!(srcview); Mantle.unsafe_free!(srcparent)
         end
-        Mantle.waitidle(dev); Mantle.drain!(dev.bq)
+        Mantle.waitidle(dev); Mantle.drain!(dev.default_bq)
         @test isempty(Mantle.validationmessages!(dev))
     end
 end

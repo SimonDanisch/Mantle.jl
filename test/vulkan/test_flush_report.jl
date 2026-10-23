@@ -11,7 +11,7 @@ function check_flush_report(ctx)
         report = Mantle.flush_stall_report(bq, target)
         @test occursin("(copy): signals $target", report)
         # A target past every signalled submission is a wait nothing will signal.
-        Mantle.flush!(bq, Mantle.lavadevice(ctx))
+        Mantle.flush!(bq, ctx)
         @test occursin("nothing will signal", Mantle.flush_stall_report(bq, target + UInt64(1)))
         Mantle.unsafe_free!(a); Mantle.unsafe_free!(b)
     end

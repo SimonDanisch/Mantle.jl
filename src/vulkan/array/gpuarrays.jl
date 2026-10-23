@@ -287,7 +287,7 @@ function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
     n == 0 && return dest
     doffs,soffs,n = copybounds(dest,doffs,src,soffs,n)
     # Cross-device copies go through host memory, synchronously.
-    if (src.buf[].ctx::VkContext) !== (dest.buf[].ctx::VkContext)
+    if (src.buf[].ctx::LavaDevice) !== (dest.buf[].ctx::LavaDevice)
         staging = Vector{T}(undef, n)
         copyto!(staging, 1, src, soffs, n)
         copyto!(dest, doffs, staging, 1, n)
@@ -296,7 +296,7 @@ function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
     src_offset = pool_offset(src.buf[]) + src.offset + (Int(soffs) - 1) * sizeof(T)
     dst_offset = pool_offset(dest.buf[]) + dest.offset + (Int(doffs) - 1) * sizeof(T)
     nbytes = n * sizeof(T)
-    bq = (dest.buf[].ctx::VkContext).default_bq
+    bq = (dest.buf[].ctx::LavaDevice).default_bq
     # Hold the arrays, not just their buffers, until the copy completes.
     oneshot!(bq; tag = :copy) do e
         hold!(e, src)
@@ -341,7 +341,7 @@ function Base.resize!(a::LavaArray{T,N}, new_dims::Dims{N}) where {T,N}
         return a
     end
 
-    ctx = buf.ctx::VkContext
+    ctx = buf.ctx::LavaDevice
     bq = ctx.default_bq
     new_buf = pool_alloc(bq, max(new_len * sizeof(T), 16))
     if old_len > 0 && new_len > 0

@@ -39,7 +39,7 @@ end
 function unsafe_free!(as::Union{LavaBLAS, LavaTLAS})
     # Explicit release and finalization may both request retirement.
     as.storage.buf.freed && return
-    ctx = (as.storage.buf[]::VkManagedBuffer).ctx::VkContext
+    ctx = (as.storage.buf[]::VkManagedBuffer).ctx::LavaDevice
     # A lost device signals nothing ever again, so nothing can be waited for and
     # the handles are dropped as they are.
     device_lost(ctx) && return destroy_now!(as)
@@ -86,7 +86,7 @@ syncbuf!(owner::Closed, b::LavaBLAS) = syncbuf!(owner, b.storage)
 
 """AccelBuildContext over a Vulkan submit channel. Core holds and stamps named
 resources; `preserves` keeps scratch and temporary host objects until completion."""
-const VulkanAccelBuildContext = AccelBuildContext{SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}}
+const VulkanAccelBuildContext = AccelBuildContext{SubmitChannel{VulkanQueue{LavaDevice},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}}
 
 @inline buildcmd(ctx::VulkanAccelBuildContext)   = ctx.into.cmd
 @inline as_device(ctx::VulkanAccelBuildContext)  = vkdevice(ctx.bq)
@@ -103,7 +103,7 @@ end
 
 """Make kernel, transfer and prior AS writes visible to a build/refit."""
 function asbuildbarrier!(ctx::VulkanAccelBuildContext)
-    memorybarrier!(buildcmd(ctx),ctxof(ctx.bq),
+    memorybarrier!(buildcmd(ctx),deviceof(ctx.bq),
                    VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
                    VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK.PIPELINE_STAGE_TRANSFER_BIT,
                    VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
@@ -242,7 +242,7 @@ Build procedural geometry from AS-readable device boxes; Vector inputs upload
 once. Requires ray-query support. The BLAS retains its boxes for refits."""
 function build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::LavaArray{AABB,1};
                          opaque::Bool=true, allow_update::Bool=false)
-    (ctxof(ctx.bq)).ray_query_available || error(
+    (deviceof(ctx.bq)).ray_query_available || error(
         "build_blas_aabb: this Vulkan device does not support " *
         "VK_KHR_ray_query. Procedural-AABB BLASes are only useful with " *
         "ray_query in this codebase. Build on a device that supports it.")
@@ -519,7 +519,7 @@ function build_as_on_gpu(ctx::VulkanAccelBuildContext, accel::VK.AccelerationStr
                          src_as::Union{Nothing, VK.AccelerationStructureKHR}=nothing)
     geo_buf = zeros(UInt8, C_SIZEOF_AS_GEOMETRY_KHR)
     pack_geometry!(geo_buf, 0, geom; geo_flags)
-    memorybarrier!(buildcmd(ctx),ctxof(ctx.bq),
+    memorybarrier!(buildcmd(ctx),deviceof(ctx.bq),
                    VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                    VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                    VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,

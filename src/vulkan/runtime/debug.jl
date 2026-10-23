@@ -24,7 +24,7 @@ layer attaches but does not instrument, and the probe write segfaults the
 process. Success and the throw both reset `ctx`'s device. `sync_val` and
 `best_practices` need no probe.
 """
-function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
+function verify_gpu_av(; timeout::Float64=30.0, ctx::LavaDevice = vk_context())
     if !ctx.gpu_assisted
         throw(LavaError("verify_gpu_av",
             "GPU-AV is not enabled (gpu_assisted=false)",
@@ -60,7 +60,7 @@ function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
     end
     if isempty(caught_msg)
         n = length(ctx.validation.messages)
-        reset_device!(lavadevice(ctx))
+        reset_device!(ctx)
         throw(LavaError("verify_gpu_av",
             "GPU-AV did not report a known out-of-bounds write within $(timeout)s " *
             "($(n) validation messages captured, none matching 'Out of bounds access').",
@@ -72,6 +72,6 @@ function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
     @info "Lava: GPU-AV verified working" sample=first(caught_msg, 240)
     # The fault leaves the batch queue errored. Reset the same physical device;
     # an unselected reset may pick another GPU.
-    reset_device!(lavadevice(ctx))
+    reset_device!(ctx)
     return true
 end

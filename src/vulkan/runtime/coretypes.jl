@@ -1,4 +1,4 @@
-# Types `VkContext` names, declared before it so the context holds its
+# Types `LavaDevice` names, declared before it so the context holds its
 # per-device state in concretely typed fields instead of module-level
 # dictionaries. Only types are hoisted; their methods stay with their behaviour.
 
@@ -37,7 +37,7 @@ mutable struct VkManagedBuffer
     stamp::Stamp{UInt64}
     # `BUF_STATE_*` (memory.jl), changed only by CAS so a double free is a no-op.
     @atomic state::UInt8
-    # Owning `VkContext`. `Any` because `VkContext` is declared in device.jl,
+    # Owning `LavaDevice`. `Any` because `LavaDevice` is declared in device.jl,
     # included after this file.
     ctx::Any
     # Position of this buffer in the owner `sync` list it last joined, so
@@ -60,8 +60,8 @@ MemoryStats() = MemoryStats(0, 0.0)
 """
 Per-device allocation policy, and accounting for buffers that own their memory.
 
-Not the allocator: memory comes from `Mantle.Pool`, one per `LavaDevice` and one
-`LavaDevice` per `VkContext` (`DEVICES`). Must stay per device: shared, it
+Not the allocator: memory comes from the device's `Mantle.Pool`. Must stay per
+device: shared, it
 divided two devices' usage by one heap, and a block served one device's
 allocation from another device's memory (reads of 0.0, or a segfault).
 """
@@ -71,7 +71,7 @@ mutable struct MemoryPolicy
     # Whether `maybe_collect` runs, and its cached heap size.
     eager_gc::Bool
     stats::MemoryStats
-    # Dedicated buffers only; pooled bytes are `reserved(spans(ctx))`, and
+    # Dedicated buffers only; pooled bytes are `reserved(pool(ctx))`, and
     # `gpu_live_bytes` adds both. Atomic because `destroy_buffer!` can run off
     # the allocating thread.
     live_bytes::Threads.Atomic{Int}
@@ -262,7 +262,7 @@ end
     CompiledRTPipeline
 
 Supertype of the backend's compiled ray-tracing pipeline, so `DeviceCaches` can
-name it: `LavaRTPipeline` holds a `VkContext`, which holds `DeviceCaches`. Not in
+name it: `LavaRTPipeline` holds a `LavaDevice`, which holds `DeviceCaches`. Not in
 core, which never names a compiled RT pipeline.
 """
 abstract type CompiledRTPipeline end
@@ -270,7 +270,7 @@ abstract type CompiledRTPipeline end
 """
     DeviceCaches
 
-Everything a `VkContext` caches. Fields rather than module-level globals: a
+Everything a `LavaDevice` caches. Fields rather than module-level globals: a
 cache of device-owned handles must die with its device, so a reset needs no
 clearing.
 """

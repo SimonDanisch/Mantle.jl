@@ -207,7 +207,7 @@ persistentarray(dev, ::Type{T}, dims::Dims) where {T} =
 
 """
 A resource's leaf is its region. The generic walker would follow `dev` into the
-`VkContext` and `Vulkan.Instance`, whose `destructor` captures the instance
+`LavaDevice` and `Vulkan.Instance`, whose `destructor` captures the instance
 back. A launch must keep alive the memory its commands name; the device
 outlives its resources.
 """

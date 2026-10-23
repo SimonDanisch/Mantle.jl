@@ -2,7 +2,7 @@ using Test, Mantle
 
 function check_pressure_collection(ctx)
     @testset "Vulkan heap pressure uses the pool collection budget" begin
-        pool = Mantle.spans(ctx)
+        pool = Mantle.pool(ctx)
         policy, native = pool.policy, Mantle.mempolicy(ctx)
         stats = native.stats
         saved = [getfield(policy, k) for k in fieldnames(Mantle.PoolPolicy)]

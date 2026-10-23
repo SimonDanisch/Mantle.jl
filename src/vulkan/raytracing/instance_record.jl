@@ -3,8 +3,8 @@
 #   bytes 48-51   instanceCustomIndex (low 24 bits) | mask (high 8)
 #   bytes 52-55   instanceShaderBindingTableRecordOffset (low 24) | flags (high 8)
 #   bytes 56-63   accelerationStructureReference (BLAS device address)
-# Only this backend sees one: `vkinstances_kernel!` (`hwtlas.jl`) writes them from
-# the portable `Raycore.InstanceRecord`s at every build and refit.
+# Only this backend sees one: core's `instances_kernel!` writes them through
+# `instancerecord` from the portable `Raycore.InstanceRecord`s at every build and refit.
 
 using StaticArrays: SMatrix
 

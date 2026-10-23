@@ -29,9 +29,10 @@ The Vulkan hardware TLAS, typed on the shading triangle `Tri` (usually
 
 `sync!` owns `hwtlas.static_tlas` and may replace it when a buffer is reallocated,
 so read it, or `Adapt.adapt(backend, hwtlas)`, per dispatch; a cached
-`AdaptedAccel` goes stale across mutations. `sync!` does not block: old structures
-go through `unsafe_free!`, which retires them once their last submission passes,
-safe because a trace holds every structure it reads. `Raycore.wait_for_gpu!(hwtlas)`
+`AdaptedAccel` goes stale across mutations. `sync!` waits for its own build
+(`build_accel!`); old structures go through `unsafe_free!`, which retires them
+once their last submission passes, safe because a trace holds every structure it
+reads. `Raycore.wait_for_gpu!(hwtlas)`
 waits on `hwtlas.bq`.
 """
 mutable struct VulkanTLAS{Tri} <: BatchedTLAS{Tri}
@@ -183,32 +184,17 @@ function reuse_or_alloc(prev, data::AbstractArray{T}, bq) where T
     return LavaArray(data; bq)
 end
 
-"""
-    vkinstances_kernel!(native, shading, records, offset, n, blas_address, sbt, keep)
-
-One batch's instances from the portable `records` into the two arrays a build
-reads: `shading[offset + i] = records[i]`, and `native[offset + i]` the driver
-record with its transform, its id (low 24 bits), its mask ANDed with `keep` (0 for
-a hidden batch, else `0xff`), the batch's SBT offset and the BLAS address.
-"""
-function vkinstances_kernel!(native, shading, records, offset::Int32, n::Int32,
-                             blas_address::UInt64, sbt::UInt32, keep::UInt32)
-    i = KI.get_global_id(Int32).x
-    i <= n || return nothing   # the launch is whole workgroups
-    @inbounds r = records[i]
-    j = offset + i
-    @inbounds shading[j] = r
-    @inbounds native[j] = VulkanInstanceRecord(r.transform,
-                                               (r.id & 0x00ffffff) | ((r.mask & keep) << 24),
-                                               sbt & 0x00ffffff, blas_address)
-    return nothing
-end
+# The driver record: transform, id (low 24 bits), mask ANDed with `keep`, and the
+# batch's geometry as `(BLAS address, SBT offset)`.
+@inline instancerecord(::Type{VulkanInstanceRecord}, r, (blas_address, sbt), keep::UInt32) =
+    VulkanInstanceRecord(r.transform, (r.id & 0x00ffffff) | ((r.mask & keep) << 24),
+                         sbt & 0x00ffffff, blas_address)
 
 """
     writeinstances!(hwtlas, native, shading)
 
 Write the queued transform updates into their batches' records, then every
-batch's instances into `native` and `shading` ([`vkinstances_kernel!`](@ref)),
+batch's instances into `native` and `shading` ([`instances_kernel!`](@ref)),
 in one submission on the TLAS's channel, which the build or refit after it is
 ordered behind. One submission, not one per batch: a scene is one batch per plot.
 """
@@ -228,8 +214,8 @@ function writeinstances!(hwtlas::VulkanTLAS, native::LavaArray{VulkanInstanceRec
         offset = 0
         for b in hwtlas.instances
             b.n == 0 && continue
-            emitkernel!(e, vkinstances_kernel!, native, shading, b.records,
-                        Int32(offset), Int32(b.n), b.blas.address, b.sbt_offset,
+            emitkernel!(e, instances_kernel!, native, shading, b.records,
+                        Int32(offset), Int32(b.n), (b.blas.address, b.sbt_offset),
                         b.hidden ? UInt32(0) : UInt32(0xff); ndrange = b.n)
             offset += b.n
         end
@@ -285,73 +271,42 @@ function rebuild_hw_tlas_from_batch!(hwtlas::VulkanTLAS{Tri}) where {Tri}
     return (hw_tlas, tri_gpu, off_gpu, native, shading, dropped_blases)
 end
 
-"""
-    Raycore.sync!(hwtlas::VulkanTLAS)
+canrefit(t::VulkanTLAS) = t.hw_tlas !== nothing && t.hw_tlas.update_scratch !== nothing
 
-Commit pending changes: a full rebuild after a topology change, an in-place refit
-after transform-only changes, nothing otherwise. Does not block; replaced
-structures are freed by core's deferred retirement.
-"""
-function Raycore.sync!(hwtlas::VulkanTLAS)
-    # True no-op when nothing changed and static_tlas is already built.
-    if !hwtlas.dirty && !hwtlas.transforms_dirty && hwtlas.static_tlas !== nothing
-        return hwtlas
+# MODE_UPDATE_KHR refit from what the records hold: queued updates or a caller's
+# kernel writes (`Raycore.refit!`). In place, so the adapted form a plan holds
+# reads the same arrays.
+function build!(t::VulkanTLAS, ::Refit)
+    native = t.combined_instance_buf::LavaArray{VulkanInstanceRecord, 1}
+    writeinstances!(t, native, t.combined_records::LavaArray{Raycore.InstanceRecord, 1})
+    build_accel!(t.bq) do ctx
+        refit_tlas!(ctx, t.hw_tlas, native, ninstances(t.instances))
     end
+    return t
+end
 
-    if hwtlas.dirty
-        # Topology change, or the first sync (constructed dirty). Queued
-        # transform updates are written as part of it (`writeinstances!`).
-        hw_tlas, tri_gpu, off_gpu, native, shading, dropped_blases =
-            rebuild_hw_tlas_from_batch!(hwtlas)
-
-        old_hw_tlas = hwtlas.hw_tlas
-        old_shading = hwtlas.combined_records
-        # Release `tri_gpu`/`off_gpu` only if the rebuild replaced them.
-        old_tri_gpu = hwtlas.tri_gpu === tri_gpu ? nothing : hwtlas.tri_gpu
-        old_off_gpu = hwtlas.off_gpu === off_gpu ? nothing : hwtlas.off_gpu
-
-        hwtlas.hw_tlas   = hw_tlas
-        hwtlas.tri_gpu   = tri_gpu
-        hwtlas.off_gpu   = off_gpu
-        hwtlas.combined_instance_buf = native
-        hwtlas.combined_records = shading
-        hwtlas.dirty            = false
-        hwtlas.transforms_dirty = false
-        hwtlas.static_tlas = AdaptedAccel(hwtlas)
-        # The old driver records go with `old_hw_tlas`, whose preserves own them.
-        old_hw_tlas === nothing || unsafe_free!(old_hw_tlas)
-        old_shading === nothing || unsafe_free!(old_shading)
-        old_tri_gpu === nothing || unsafe_free!(old_tri_gpu)
-        old_off_gpu === nothing || unsafe_free!(old_off_gpu)
-        for blas in dropped_blases
-            unsafe_free!(blas)
-        end
-        return hwtlas
-    end
-
-    # Transforms only: MODE_UPDATE_KHR refit from what the records hold, queued
-    # updates or a caller's kernel writes (`Raycore.refit!`).
-    if hwtlas.transforms_dirty
-        if hwtlas.hw_tlas === nothing || hwtlas.hw_tlas.update_scratch === nothing
-            # Rebuild if the last build cannot be refit; rebuilds always allow it.
-            hwtlas.dirty = true
-            return Raycore.sync!(hwtlas)
-        end
-        native = hwtlas.combined_instance_buf::LavaArray{VulkanInstanceRecord, 1}
-        # In place: the adapted form a plan holds reads this same array.
-        writeinstances!(hwtlas, native, hwtlas.combined_records::LavaArray{Raycore.InstanceRecord, 1})
-        build_accel!(hwtlas.bq) do ctx
-            refit_tlas!(ctx, hwtlas.hw_tlas, native, ninstances(hwtlas.instances))
-        end
-        hwtlas.transforms_dirty = false
-        # static_tlas wraps the same hw_tlas; create it if missing.
-        hwtlas.static_tlas === nothing && (hwtlas.static_tlas = AdaptedAccel(hwtlas))
-        return hwtlas
-    end
-
-    # Neither flag set and no static_tlas yet.
-    hwtlas.static_tlas = AdaptedAccel(hwtlas)
-    return hwtlas
+# A topology change or the first build. Queued transform updates are written as
+# part of it (`writeinstances!`). The build waits for itself (`build_accel!`);
+# replaced structures are freed by core's deferred retirement.
+function build!(t::VulkanTLAS, ::Rebuild)
+    hw_tlas, tri_gpu, off_gpu, native, shading, dropped_blases = rebuild_hw_tlas_from_batch!(t)
+    old_hw_tlas = t.hw_tlas
+    old_shading = t.combined_records
+    # Release `tri_gpu`/`off_gpu` only if the rebuild replaced them.
+    old_tri_gpu = t.tri_gpu === tri_gpu ? nothing : t.tri_gpu
+    old_off_gpu = t.off_gpu === off_gpu ? nothing : t.off_gpu
+    t.hw_tlas = hw_tlas
+    t.tri_gpu = tri_gpu
+    t.off_gpu = off_gpu
+    t.combined_instance_buf = native
+    t.combined_records = shading
+    # The old driver records go with `old_hw_tlas`, whose preserves own them.
+    old_hw_tlas === nothing || unsafe_free!(old_hw_tlas)
+    old_shading === nothing || unsafe_free!(old_shading)
+    old_tri_gpu === nothing || unsafe_free!(old_tri_gpu)
+    old_off_gpu === nothing || unsafe_free!(old_off_gpu)
+    foreach(unsafe_free!, dropped_blases)
+    return t
 end
 
 # Inline ray-query `closest_hit` / `any_hit` on `AdaptedAccel`. They return
@@ -443,7 +398,7 @@ one-shot allocates one per dispatch and holds its pool. Not a keyed cache:
 `Raycore.sync!` makes a new `LavaTLAS` per rebuild, so one would grow without
 bound or evict pools still in flight. Only `release!` frees.
 """
-function tlasset!(rec::Recording, ctx::VkContext, pipeline::LavaComputePipeline, tlas)
+function tlasset!(rec::Recording, ctx::LavaDevice, pipeline::LavaComputePipeline, tlas)
     layout = pipeline.descriptor_set_layout::VK.DescriptorSetLayout
     for (l, t, _, set) in rec.sets
         (l === layout && t === tlas) && return set
@@ -453,7 +408,7 @@ function tlasset!(rec::Recording, ctx::VkContext, pipeline::LavaComputePipeline,
     return desc_set
 end
 
-function tlasset!(o::OneShot, ctx::VkContext, pipeline::LavaComputePipeline, tlas)
+function tlasset!(o::OneShot, ctx::LavaDevice, pipeline::LavaComputePipeline, tlas)
     desc_pool, desc_set = alloc_compute_tlas_descriptor_set(ctx, pipeline, tlas)
     # The pool must outlive the submission that binds the set.
     hold!(o, desc_pool)

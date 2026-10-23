@@ -296,7 +296,7 @@ end
     # 2026-09-17 and all four are this same category. `device` and `gemv!` are
     # already here against KernelAbstractions and LinearAlgebra, so Metal is
     # just a third package spelling them; `flush!` is Mantle's submission
-    # vocabulary and `maybe_collect` its `VkContext` collector, both defined in
+    # vocabulary and `maybe_collect` its `LavaDevice` collector, both defined in
     # core and Vulkan files that have nothing to do with Metal. Nothing is
     # shadowed by accident: `src/metal/` says `Metal.flush!` and
     # `Metal.device()` qualified wherever it wants Metal's, and neither
@@ -330,7 +330,7 @@ end
     # `link_kernel` against Metal, reviewed 2026-10-15 with the merge of Metal.jl's
     # main (its `mtlfunction` / `link_kernel` split): Mantle's links a compiled Lava
     # kernel into a Vulkan pipeline (`src/vulkan/runtime/launch.jl`, on a
-    # `VkContext`), Metal.jl's links a method instance in its compiler. Neither is
+    # `LavaDevice`), Metal.jl's links a method instance in its compiler. Neither is
     # exported and `src/metal/` calls neither.
     #
     # `bind_buffer!`, `dispatch!`, `make_resident!` and `retire!` against Metal, reviewed

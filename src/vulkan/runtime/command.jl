@@ -19,7 +19,7 @@ dispatch logging is on.
 @noinline dispatch_log_string(args...) = string(args...)
 
 function log_dispatch!(bq::SubmitChannel{<:VulkanQueue}, info::String)
-    d = (ctxof(bq)).diag
+    d = (deviceof(bq)).diag
     d.dispatch_logging || return
     log = d.dispatch_log
     if length(log) >= MAX_DISPATCH_LOG
@@ -44,7 +44,7 @@ import Vulkan.VkCore: VkMemoryBarrier, VK_STRUCTURE_TYPE_MEMORY_BARRIER,
     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
     VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
     VK_PIPELINE_STAGE_TRANSFER_BIT, VkDependencyFlags
-# `vkCmdPipelineBarrier` is a per-device pointer, resolved in the `VkContext`
+# `vkCmdPipelineBarrier` is a per-device pointer, resolved in the `LavaDevice`
 # constructor.
 
 # VK.jl types `PIPELINE_STAGE_2_ALL_COMMANDS_BIT` as the sync1
@@ -109,7 +109,7 @@ the previous run is still pending.
 """
 function recording!(bq::SubmitChannel{<:VulkanQueue})
     ownthread(bq)
-    refuselost(ctxof(bq), "recording!")
+    refuselost(deviceof(bq), "recording!")
     # Same pool as a one-shot: core's `acquire!` sweeps, returns a reset buffer
     # and opens the hold frame this recording takes at `seal!`. The `OneShot`
     # shell is dropped here and rebuilt by `release!`.
@@ -150,7 +150,7 @@ is undefined behaviour.
 """
 function release!(rec::Recording)
     bq = queueof(rec)
-    dev = lavadevice(ctxof(bq))
+    dev = deviceof(bq)
     let tok = rec.token
         tok == 0 || waitfor!(bq, tok)
     end
@@ -213,7 +213,7 @@ end
 
 """Emit an allocation-free global memory barrier with the given stage and access
 masks."""
-@inline function memorybarrier!(cmd::VK.CommandBuffer, ctx::VkContext,
+@inline function memorybarrier!(cmd::VK.CommandBuffer, ctx::LavaDevice,
                                srcstage, dststage, srcaccess, dstaccess)
     barrier_ref = Ref(VkMemoryBarrier(VK_STRUCTURE_TYPE_MEMORY_BARRIER, C_NULL,
                                       VkAccessFlags(srcaccess), VkAccessFlags(dstaccess)))
@@ -228,7 +228,7 @@ masks."""
     return nothing
 end
 
-@inline function headbarrier!(cmd::VK.CommandBuffer, ctx::VkContext)
+@inline function headbarrier!(cmd::VK.CommandBuffer, ctx::LavaDevice)
     both = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT
     memorybarrier!(cmd,ctx,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,both,both)
     return nothing
@@ -261,7 +261,7 @@ end
 several calls (a run's front one-shot, a windowed frame) and seals it itself."""
 function openoneshot(bq::SubmitChannel{<:VulkanQueue})
     ownthread(bq)
-    ctx = ctxof(bq)
+    ctx = deviceof(bq)
     refuselost(ctx, "oneshot")
     # `acquire!` drains, then returns a reset buffer with a hold frame open.
     return begin!(acquire!(bq), BEGIN_INFO_ONE_TIME)
@@ -273,7 +273,7 @@ function begin!(o::OneShot, info)
     bq = queueof(o)
     throw_if_error(bq, "vkBeginCommandBuffer", VK._begin_command_buffer(o.cmd, info))
     o.open = true
-    headbarrier!(o.cmd, ctxof(bq))
+    headbarrier!(o.cmd, deviceof(bq))
     return o
 end
 
@@ -340,7 +340,7 @@ body's pieces). A caller-kept vector lets a run submit without allocating.
 function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Closed}, closed;
                      waits = (), signals = (), fence::Union{Nothing,VK.Fence} = nothing)
     ownthread(bq)
-    ctx = ctxof(bq)
+    ctx = deviceof(bq)
     q = driver(bq)
     refuselost(ctx, "submit!")
     # Submitting is when nothing more can be added; `seal!` is idempotent.
@@ -438,16 +438,16 @@ end
 
 """
 The timeline semaphore of another channel this submission waits on. Throws if
-that channel belongs to another `VkContext`: a semaphore of device A in a device
+that channel belongs to another `LavaDevice`: a semaphore of device A in a device
 B submit segfaults inside `vkQueueSubmit2`. A released channel was flushed first
 (`release_batch_queue!`), so `crosswaits!` finds its tokens passed and never
 asks for it.
 """
 @inline function crosssemaphore(bq::SubmitChannel{<:VulkanQueue}, other)
-    o = other::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
-    ctxof(o) === ctxof(bq) || throw(LavaError(
+    o = other::SubmitChannel{VulkanQueue{LavaDevice},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
+    deviceof(o) === deviceof(bq) || throw(LavaError(
         "submit!",
-        "a buffer was last used on a channel from a DIFFERENT VkContext",
+        "a buffer was last used on a channel from a DIFFERENT LavaDevice",
         "Two Vulkan devices are live and one buffer has been used on both. " *
         "Allocate and use the buffer under a single context."))
     return timelineof(o)
@@ -469,7 +469,7 @@ struct Emitter{O,C,A}
     args::A
 end
 
-Emitter(c::Closed, am) = Emitter(c.cmd, c, ctxof(queueof(c)), am)
+Emitter(c::Closed, am) = Emitter(c.cmd, c, deviceof(queueof(c)), am)
 
 @inline hold!(e::Emitter, obj) = hold!(e.owner, obj)
 
@@ -571,7 +571,7 @@ Throw if a kernel on `ctx` threw since the last check, and clear the flag. Call
 after a wait. The invocation that threw stopped there while the others finished,
 so the kernel's output is incomplete: an error, not a warning.
 """
-function checkexceptions!(ctx::VkContext)
+function checkexceptions!(ctx::LavaDevice)
     p = Ptr{UInt32}(ctx.exception_flag.mapped_ptr)
     unsafe_load(p) == 0 && return nothing
     unsafe_store!(p, UInt32(0))
@@ -691,18 +691,18 @@ end
 
 """
     mark_if_lost!(bq::SubmitChannel{<:VulkanQueue}, result)
-    mark_if_lost!(ctx::VkContext, result)
+    mark_if_lost!(ctx::LavaDevice, result)
 
 Mark the device lost if `result` is `ERROR_DEVICE_LOST`; never unwraps or
 throws. For callers that recover before throwing; otherwise use `throw_if_error`.
 """
-@inline function mark_if_lost!(ctx::VkContext, result)
+@inline function mark_if_lost!(ctx::LavaDevice, result)
     iserror(result) || return
     e = unwrap_error(result)::VK.VulkanError
     e.code == VK.ERROR_DEVICE_LOST && mark_device_lost!(ctx)
     return
 end
-@inline mark_if_lost!(bq::SubmitChannel{<:VulkanQueue}, result) = mark_if_lost!(ctxof(bq), result)
+@inline mark_if_lost!(bq::SubmitChannel{<:VulkanQueue}, result) = mark_if_lost!(deviceof(bq), result)
 
 device_lost_hint(call) =
     "Vulkan device is lost during $(call). " *
@@ -710,22 +710,22 @@ device_lost_hint(call) =
 
 """
     throw_if_error(bq::SubmitChannel{<:VulkanQueue}, result)
-    throw_if_error(ctx::VkContext, result)
+    throw_if_error(ctx::LavaDevice, result)
     throw_if_error(ctx_or_bq, call::String, result)       # adds a call name
 
 Return the unwrapped value on success. On error, mark device loss for
 `ERROR_DEVICE_LOST` and throw `LavaVulkanError` naming `call`. Use instead of
 `unwrap(VK.foo(...))`.
 """
-@inline function throw_if_error(ctx::VkContext, call::String, result)
+@inline function throw_if_error(ctx::LavaDevice, call::String, result)
     iserror(result) || return unwrap(result)
     mark_if_lost!(ctx, result)
     e = unwrap_error(result)::VK.VulkanError
     suggestion = e.code == VK.ERROR_DEVICE_LOST ? device_lost_hint(call) : ""
     throw(LavaVulkanError(call, Int32(e.code), e.msg, suggestion))
 end
-@inline throw_if_error(ctx::VkContext, result) = throw_if_error(ctx, "Vulkan call", result)
-@inline throw_if_error(bq::SubmitChannel{<:VulkanQueue}, args...) = throw_if_error(ctxof(bq), args...)
+@inline throw_if_error(ctx::LavaDevice, result) = throw_if_error(ctx, "Vulkan call", result)
+@inline throw_if_error(bq::SubmitChannel{<:VulkanQueue}, args...) = throw_if_error(deviceof(bq), args...)
 
 """
     wait_for_fences!(bq, fences; wait_all=true, timeout=typemax(UInt64))
@@ -755,7 +755,7 @@ signalled): the queue runs in order, so the second is a deadlock, not slowness.
 """
 function flush_stall_report(bq::SubmitChannel{<:VulkanQueue}, target::UInt64)
     io = IOBuffer()
-    ctx = ctxof(bq)
+    ctx = deviceof(bq)
     # Runs after a stall on a possibly lost device: a failed counter read (a
     # Vulkan error only) goes into the report instead of replacing it.
     cur = try
@@ -791,11 +791,11 @@ loss between them; throws on device loss or after `driver(bq).flush_timeout_ns`.
 """
 function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
     ownthread(bq)
-    refuselost(ctxof(bq), "command flush")
+    refuselost(deviceof(bq), "command flush")
     target = something(newest(bq), UInt64(0))
     # Nothing in flight still drains: regions dropped since the last submission
     # are given back only at a drain.
-    target == UInt64(0) && (drain!(bq); checkexceptions!(ctxof(bq)); return)
+    target == UInt64(0) && (drain!(bq); checkexceptions!(deviceof(bq)); return)
     budget = driver(bq).flush_timeout_ns
     quantum = budget == 0 ? typemax(UInt64) : min(budget, FLUSH_WAIT_QUANTUM_NS)
     waited = UInt64(0)
@@ -819,7 +819,7 @@ function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
         let st = VK.queue_wait_idle(vkqueue(bq))
             iserror(st) && mark_if_lost!(bq, st)
         end
-        if device_lost(ctxof(bq))
+        if device_lost(deviceof(bq))
             throw(LavaError("vkWaitSemaphores",
                             "device was lost while waiting for timeline $target " *
                             "(counter stuck at $(query_timeline(bq)), " *
@@ -849,10 +849,10 @@ function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
         end
     end
     drain!(bq)
-    checkexceptions!(ctxof(bq))
+    checkexceptions!(deviceof(bq))
     # This channel's context, not the bound one, so a second device does not
     # report the default device's validation messages.
-    check_validation_errors!("flush!", ctxof(bq))
+    check_validation_errors!("flush!", deviceof(bq))
     return
 end
 
@@ -892,7 +892,7 @@ function throw_with_validation_context(call_name::String, err_result,
         bq::Union{Nothing,SubmitChannel{<:VulkanQueue}}=nothing)
     # `bq`'s context, or the bound one without `bq`: its messages, and dispatch
     # logging re-enabled so the next run records names.
-    ctx = bq === nothing ? VK_CONTEXT_REF[] : ctxof(bq)
+    ctx = bq === nothing ? VK_CONTEXT_REF[] : deviceof(bq)
     ctx === nothing || (ctx.diag.dispatch_logging = true)
     vk_err = unwrap_error(err_result)
     msgs = get_validation_messages(ctx)
@@ -903,7 +903,7 @@ function throw_with_validation_context(call_name::String, err_result,
         "Last $n validation message(s):\n" * join(["  [$i] $(msgs[end-n+i])" for i in 1:n], "\n")
     end
 
-    dlog = bq === nothing ? String[] : (ctxof(bq)).diag.dispatch_log
+    dlog = bq === nothing ? String[] : (deviceof(bq)).diag.dispatch_log
     dispatch_detail = if isempty(dlog)
         "No dispatches logged."
     else
@@ -911,7 +911,7 @@ function throw_with_validation_context(call_name::String, err_result,
         join(["  $d" for d in dlog], "\n")
     end
 
-    total = bq === nothing ? 0 : (ctxof(bq)).diag.total_dispatches[]
+    total = bq === nothing ? 0 : (deviceof(bq)).diag.total_dispatches[]
     # Per queue, so the failure names the failing queue's kernel.
     prev_info = bq === nothing ? "" : driver(bq).prev_dispatch_info
     curr_info = bq === nothing ? "" : driver(bq).last_dispatch_info

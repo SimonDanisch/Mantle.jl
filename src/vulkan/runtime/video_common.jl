@@ -6,7 +6,7 @@ end
 """Decoder state shared by the codecs: session, bitstream buffer, DPB slots and the
 display-order queue. `Codec` is the codec's picture-order state, `Entry` a DPB entry."""
 mutable struct CodecDecoder{Codec,Entry} <: VideoDecoder
-    ctx::MANTLE.VkContext
+    ctx::MANTLE.LavaDevice
     profile::Tuple
     sps::Any
     pps::Any

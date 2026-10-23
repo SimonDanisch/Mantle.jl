@@ -10,10 +10,10 @@ between frames, so a view requested outside a frame is an error.
 """
 mutable struct MetalWindow{T} <: Mantle.Window
     handle::Any
-    layer::MTLm.CAMetalLayer
+    layer::MTL.CAMetalLayer
     width::Int
     height::Int
-    drawable::Union{Nothing,MTLm.CAMetalDrawable}
+    drawable::Union{Nothing,MTL.CAMetalDrawable}
     open::Bool
     # The task that took `drawable`, until it presents (`checkacquirable`).
     acquirer::Union{Nothing,Task}
@@ -28,7 +28,7 @@ A presentation surface of element type `T` (lowered by `mtlformat`, e.g.
 function MetalWindow(::Type{T}, width::Integer, height::Integer;
                      vsync::Bool = true, srgb::Bool = false, handle = nothing) where {T}
     dev = Metal.device()
-    layer = MTLm.CAMetalLayer(dev, width, height; format = mtlformat(T; srgb), vsync)
+    layer = MTL.CAMetalLayer(dev, width, height; format = mtlformat(T; srgb), vsync)
     return MetalWindow{T}(handle, layer, Int(width), Int(height), nothing, true, nothing)
 end
 
@@ -50,10 +50,10 @@ function attach!(w::MetalWindow, glfw_window)
     ns = id{OCObject}(UInt(nswindow))
     view = @objc [ns::id{OCObject} contentView]::id{OCObject}
     @objc [view::id{OCObject} setWantsLayer:true::Bool]::Nothing
-    @objc [view::id{OCObject} setLayer:(w.layer)::id{MTLm.CAMetalLayer}]::Nothing
+    @objc [view::id{OCObject} setLayer:(w.layer)::id{MTL.CAMetalLayer}]::Nothing
     w.layer.contentsScale =
         @objc [ns::id{OCObject} backingScaleFactor]::Cdouble
-    w.layer.drawableSize = MTLm.CGSize(Cdouble(w.width), Cdouble(w.height))
+    w.layer.drawableSize = MTL.CGSize(Cdouble(w.width), Cdouble(w.height))
     got = w.layer.drawableSize
     w.width, w.height = round(Int, got.width), round(Int, got.height)
     w.handle = glfw_window
@@ -137,7 +137,7 @@ after `beforeframe!` and before recording.
 function Base.resize!(w::MetalWindow, width::Integer, height::Integer)
     (width, height) == (w.width, w.height) && return false
     w.width, w.height = Int(width), Int(height)
-    w.layer.drawableSize = MTLm.CGSize(Cdouble(width), Cdouble(height))
+    w.layer.drawableSize = MTL.CGSize(Cdouble(width), Cdouble(height))
     return true
 end
 
@@ -171,7 +171,7 @@ function Mantle.acquire_next_image!(w::MetalWindow)
 end
 
 function nextdrawable(w::MetalWindow)
-    d = MTLm.next_drawable(w.layer)
+    d = MTL.next_drawable(w.layer)
     d === nothing &&
         error("no drawable became available; every one is still in flight. " *
               "Present the frames already recorded before starting another.")
@@ -187,7 +187,7 @@ function Mantle.present_frame!(d::MetalDevice, w::MetalWindow)
     dr = w.drawable
     dr === nothing && return nothing
     cb = framebuffer!(d.dev)
-    MTLm.present_drawable!(cb, dr)
+    MTL.present_drawable!(cb, dr)
     commit!(cb)
     w.drawable = nothing
     w.acquirer = nothing
@@ -207,20 +207,8 @@ function Mantle.readback_window(w::MetalWindow{T}) where {T}
     d = nextdrawable(w)
     tex = d.texture
     # The texture's extent, not the window's, so callers can check they agree.
-    width, height = Int(tex.width), Int(tex.height)
-    dev = Mantle.Device(MetalAPI())
-    row = width * sizeof(T)
-    buf = MTLm.MTLBuffer(dev.dev, row * height; storage = Metal.SharedStorage)
-    cmd = framebuffer!(dev.dev)
-    MTLm.MTLBlitCommandEncoder(cmd) do enc
-        MTLm.append_copy!(enc, buf, 0, row, 0, tex,
-                          MTLm.MTLOrigin(0, 0, 0), MTLm.MTLSize(width, height, 1))
-    end
-    MTLm.present_drawable!(cmd, d)
-    submitwait!(cmd)
-    out = Matrix{T}(undef, width, height)
-    unsafe_copyto!(pointer(out), convert(Ptr{T}, buf), length(out))
-    return out
+    return readbackimage(cmd -> MTL.present_drawable!(cmd, d), Mantle.Device(MetalAPI()),
+                         tex, T, Int(tex.width), Int(tex.height))
 end
 
 Mantle.screenshot(w::MetalWindow) = Mantle.readback_window(w)

@@ -189,9 +189,9 @@ mesh_stage_lead(p::Mantle.MeshPipeline) = (Core.LLVMPtr{mesh_object_of(p), 7},)
 
 """One compiled mesh pipeline: the state, its depth state, and what it needs at draw."""
 struct MetalCompiledMeshPipeline
-    state::MTLm.MTLRenderPipelineState
-    depth_state::Union{Nothing,MTLm.MTLDepthStencilState}
-    cull::MTLm.MTLCullMode
+    state::MTL.MTLRenderPipelineState
+    depth_state::Union{Nothing,MTL.MTLDepthStencilState}
+    cull::MTL.MTLCullMode
     threads::Int
     libs::Vector{Any}
 end
@@ -218,8 +218,8 @@ Compile a portable [`MeshPipeline`](@ref) into a Metal render pipeline state.
 mesh output object is prepended here. Cached on everything baked in.
 """
 function compile_pipeline(d::MetalDevice, p::Mantle.MeshPipeline,
-                          color_formats::Vector{MTLm.MTLPixelFormat},
-                          depth_format::Union{Nothing,MTLm.MTLPixelFormat},
+                          color_formats::Vector{MTL.MTLPixelFormat},
+                          depth_format::Union{Nothing,MTL.MTLPixelFormat},
                           mesh_bufs::Type, frag_bufs::Type)
     p.object === nothing ||
         error("this backend has no object stage yet: Metal.jl emits no `air.object` " *
@@ -256,13 +256,13 @@ function compile_pipeline(d::MetalDevice, p::Mantle.MeshPipeline,
         mfun, mlib = mstage
         ffun, flib = fstage
 
-        desc = MTLm.MTLMeshRenderPipelineDescriptor()
+        desc = MTL.MTLMeshRenderPipelineDescriptor()
         desc.meshFunction = mfun
         desc.fragmentFunction = ffun
         apply_attachments!(desc, color_formats, depth_format, p.blend)
         # From `MeshConfig`: Metal refuses a mismatch with the shader's width.
         desc.maxTotalThreadsPerMeshThreadgroup = cfg.threads
-        state = MTLm.MTLRenderPipelineState(dev, desc)
+        state = MTL.MTLRenderPipelineState(dev, desc)
 
         dstate = depthstate(dev, p.depth, depth_format)
 
@@ -277,7 +277,6 @@ end
 
 # Answered for the backend and the device, since a caller may hold either.
 Mantle.supports_mesh_pipeline(::Metal.MetalBackend) = true
-Mantle.supports_mesh_pipeline(::MetalDevice) = true
 
 # Geometry pipelines run as mesh pipelines via `Mantle.lower_geometry_to_mesh`,
 # so `supports_geometry_stage` is `false` and the same `GraphicsPipeline` still draws.
@@ -286,8 +285,8 @@ Mantle.supports_mesh_pipeline(::MetalDevice) = true
 mutable struct MetalCompiledGeometryDraw
     const device::MetalDevice
     const pipeline::Mantle.GraphicsPipeline
-    const color_formats::Vector{MTLm.MTLPixelFormat}
-    const depth_format::Union{Nothing,MTLm.MTLPixelFormat}
+    const color_formats::Vector{MTL.MTLPixelFormat}
+    const depth_format::Union{Nothing,MTL.MTLPixelFormat}
     const mesh::StageArgs
     const frag::StageArgs
     # The lowered mesh pipeline per indexedness, cached: lowering is pure and
@@ -312,8 +311,8 @@ function loweredmesh(d::MetalCompiledGeometryDraw, indexed::Bool)
 end
 
 """`groups` mesh threadgroups of `threads` threads each."""
-drawmesh!(enc, groups, threads) = MTLm.draw_mesh_threadgroups!(enc, MTLm.MTLSize(groups, 1, 1),
-    MTLm.MTLSize(1, 1, 1), MTLm.MTLSize(threads, 1, 1))
+drawmesh!(enc, groups, threads) = MTL.draw_mesh_threadgroups!(enc, MTL.MTLSize(groups, 1, 1),
+    MTL.MTLSize(1, 1, 1), MTL.MTLSize(threads, 1, 1))
 
 """What `compile_draw` returns for a `MeshPipeline` and `record_draw!` binds: the
 pipeline and both stages' baked arguments, which outlive the pass. The draw count
@@ -351,8 +350,8 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledMeshDraw, args,
     rebakestages!(args, d.mesh, d.frag)
     c = d.pipeline
     setdrawstate!(h.encoder, c)
-    bind_stage!(h.encoder, d.mesh, MTLm.set_mesh_bytes!, MTLm.MTLRenderStageMesh)
-    bind_stage!(h.encoder, d.frag, MTLm.set_fragment_bytes!, MTLm.MTLRenderStageFragment)
+    bind_stage!(h.encoder, d.mesh, MTL.set_mesh_bytes!, MTL.MTLRenderStageMesh)
+    bind_stage!(h.encoder, d.frag, MTL.set_fragment_bytes!, MTL.MTLRenderStageFragment)
     drawmesh!(h.encoder, groups, c.threads)
     return nothing
 end
@@ -405,16 +404,16 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledGeometryDraw, a
 
     enc = h.encoder
     setdrawstate!(enc, c)
-    bind_stage!(enc, d.mesh, MTLm.set_mesh_bytes!, MTLm.MTLRenderStageMesh)
+    bind_stage!(enc, d.mesh, MTL.set_mesh_bytes!, MTL.MTLRenderStageMesh)
     if ix !== nothing
-        useindices!(enc, indices, MTLm.MTLRenderStageMesh)
+        useindices!(enc, indices, MTL.MTLRenderStageMesh)
         # `scratchsize` covered only the stage's own arguments, so grow the
         # scratch to fit the index argument.
         length(d.mesh.scratch) < sizeof(typeof(ix)) &&
             resize!(d.mesh.scratch, sizeof(typeof(ix)))
-        bind_arg!(MTLm.set_mesh_bytes!, enc, ix, length(d.mesh.device) + 1, d.mesh.scratch)
+        bind_arg!(MTL.set_mesh_bytes!, enc, ix, length(d.mesh.device) + 1, d.mesh.scratch)
     end
-    bind_stage!(enc, d.frag, MTLm.set_fragment_bytes!, MTLm.MTLRenderStageFragment)
+    bind_stage!(enc, d.frag, MTL.set_fragment_bytes!, MTL.MTLRenderStageFragment)
 
     groups = Mantle.primitivecount(d.pipeline.topology, count)
     # No primitives (e.g. a one-point `lines`) draws nothing; Metal refuses a

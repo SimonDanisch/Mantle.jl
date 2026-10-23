@@ -1,6 +1,6 @@
 # Graphics pipelines over VK_KHR_dynamic_rendering (no VkRenderPass). Blend, cull,
 # depth and topology lower by dispatch on their config types. The pipeline cache
-# is a `VkContext` field, so a reset makes a new one.
+# is a `LavaDevice` field, so a reset makes a new one.
 
 """
     create_graphics_pipeline(vertex_spirv, fragment_spirv; ctx, mesh_spirv=nothing,
@@ -16,7 +16,7 @@ has no geometry or tessellation stage.
 """
 function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
                                     fragment_spirv::Vector{UInt8};
-                                    ctx::VkContext,
+                                    ctx::LavaDevice,
                                     mesh_spirv::Union{Nothing, Vector{UInt8}}=nothing,
                                     blend::BlendMode=Opaque(),
                                     cull::CullFace=CullBack(),

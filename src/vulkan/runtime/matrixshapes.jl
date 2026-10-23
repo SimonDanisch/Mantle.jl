@@ -24,7 +24,7 @@ The driver's cooperative-matrix table as [`MatrixShape`](@ref)s, so kernels
 pick tiles from what the device reports. Entries with an unmapped component type
 or scope are dropped.
 """
-function matrixshapes(ctx::VkContext)
+function matrixshapes(ctx::LavaDevice)
     out = MatrixShape[]
     ctx.coopmat_available || return out
     for s in ctx.coopmat_shapes
@@ -47,7 +47,7 @@ with A/B operand type `T`. `T` is matched, not only the extents: devices list
 16×16×16 for both Float16 and Int8 operands, and an extent-only match emits
 instructions the device cannot run. The accumulator type is not checked.
 """
-function coopmat_shape(ctx::VkContext, ::Type{T}, M::Integer, N::Integer,
+function coopmat_shape(ctx::LavaDevice, ::Type{T}, M::Integer, N::Integer,
                        K::Integer) where {T}
     ctx.coopmat_available || return false
     want = vkcomponenttype(T)

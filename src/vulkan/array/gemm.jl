@@ -73,7 +73,7 @@ indexes subgroups as `lane ÷ 32`; on an unpinned wave64 device it writes half
 the output tile and leaves the rest zero without error. Otherwise `mul!` uses
 the scalar `gemmlaunch!`, which is correct at any subgroup width.
 """
-function coopmat_gemm_available(ctx::VkContext)
+function coopmat_gemm_available(ctx::LavaDevice)
     coopmat_shape(ctx, Float16, GEMM_TILE, GEMM_TILE, GEMM_TILE) &&
         (device_subgroup_size(ctx) == GEMM_SUBGROUP ||
          can_require_subgroup_size(ctx, GEMM_SUBGROUP))

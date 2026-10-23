@@ -1,4 +1,4 @@
-# Runtime diagnostics over the default `VkContext`.
+# Runtime diagnostics over the default `LavaDevice`.
 
 GPUArraysCore.allowscalar(false)
 

@@ -17,7 +17,7 @@ function check_live_buffers(ctx; n = 2000)
         end
         close(ch)
         wait(freer)
-        Mantle.flush!(bq, Mantle.lavadevice(ctx))
+        Mantle.flush!(bq, ctx)
         Mantle.reclaim!(bq)
         # Every writer has finished, so the set is read without its lock.
         entries = collect(pol.live_buffers)

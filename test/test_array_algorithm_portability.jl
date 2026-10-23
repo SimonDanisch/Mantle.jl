@@ -8,7 +8,7 @@ really Vulkan, and the answer turns out to be: almost none of it.
 
 `gemm.jl` is 2335 lines with 67 KernelAbstractions references and 6 Vulkan ones.
 `fft.jl` is 880 with 29 and (as of 2026-08-27) **0**. Every coupling that was
-removed was the same thing — a capability query routed through a `VkContext`:
+removed was the same thing — a capability query routed through a `LavaDevice`:
 
     workgroup_limit(vk_context(A))   ->   workgrouplimit(A)
     max_shared_memory(vk_context(A)) ->   sharedbudget(A)
@@ -51,7 +51,7 @@ import KernelInterface as KI
 
 """How many lines of `f` name something only the Vulkan backend has."""
 function vulkan_lines(path::AbstractString)
-    pat = r"\bVK\.|VkContext|VulkanBatchQueue|vk_context|\bvk_[a-z_]+"
+    pat = r"\bVK\.|LavaDevice|VulkanBatchQueue|vk_context|\bvk_[a-z_]+"
     count(l -> occursin(pat, l), readlines(path))
 end
 

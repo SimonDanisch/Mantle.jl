@@ -30,11 +30,11 @@ follows a later default device. After `reset_device!` it is dead, like the
 arrays it allocated.
 """
 struct LavaBackend <: KA.Backend
-    dispatch_bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
+    dispatch_bq::SubmitChannel{VulkanQueue{LavaDevice},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
 end
 
 LavaBackend() = LavaBackend(vk_context())
-LavaBackend(ctx::VkContext) = LavaBackend(ctx.default_bq)
+LavaBackend(ctx::LavaDevice) = LavaBackend(ctx.default_bq)
 
 """
     LavaDeviceBackend <: KA.Backend
@@ -54,32 +54,32 @@ holdleaves!(holder, ::LavaBackend) = nothing
 # The device it launches on.
 Base.show(io::IO, b::LavaBackend) = print(io, "LavaBackend(", repr(b.dispatch_bq.channel.ctx.device_name), ")")
 
-# Core verbs on the backend. Not beside the `VkContext` methods in
+# Core verbs on the backend. Not beside the `LavaDevice` methods in
 # `runtime/device.jl`, which is included before `LavaBackend` is defined.
 supports_batch_queue(::LavaBackend) = true
 supports_graphics(::LavaBackend) = true
 waitidle(b::LavaBackend) = waitidle(vk_context(b))
 
 """
-    vk_context(backend) -> VkContext
-    vk_context(a::LavaArray) -> VkContext
+    vk_context(backend) -> LavaDevice
+    vk_context(a::LavaArray) -> LavaDevice
 
 The device a backend or array belongs to, read from its channel or buffer. Use
 it instead of the global `vk_context()` whenever such an object is at hand.
 """
-vk_context(b::LavaBackend) = (ctxof(b.dispatch_bq))::VkContext
-vk_context(a::LavaArray) = (a.buf[].ctx)::VkContext
+vk_context(b::LavaBackend) = (deviceof(b.dispatch_bq))::LavaDevice
+vk_context(a::LavaArray) = (a.buf[].ctx)::LavaDevice
 # `caps` is `KernelInterface.caps` (imported in `Mantle.jl`), so libraries query
-# a device through its backend or array without a `VkContext`.
+# a device through its backend or array without a `LavaDevice`.
 caps(b::LavaBackend) = caps(vk_context(b))
 caps(a::LavaArray) = caps(vk_context(a))
 # Core's query (`runtime/backendhooks.jl`), fixed at device creation.
-videodecodes(ctx::VkContext) = ctx.video_decode_available
+videodecodes(ctx::LavaDevice) = ctx.video_decode_available
 videodecodes(b::LavaBackend) = videodecodes(vk_context(b))
 # `shaderFloat64` is enabled on every device this backend creates.
 supports_float64(::LavaBackend) = true
 # Queried from the physical device, as device creation does before enabling it.
-supports_int64_atomics(ctx::VkContext) =
+supports_int64_atomics(ctx::LavaDevice) =
     VK.get_physical_device_features_2(ctx.physical_device,
         VK.PhysicalDeviceVulkan12Features).next.shader_buffer_int_64_atomics
 supports_int64_atomics(b::LavaBackend) = supports_int64_atomics(vk_context(b))
@@ -94,7 +94,7 @@ Base.:(==)(a::LavaBackend, b::LavaBackend) = vk_context(a) === vk_context(b)
 Base.hash(b::LavaBackend, h::UInt) = hash(objectid(vk_context(b)), hash(:LavaBackend, h))
 
 # The array's own device, not the global default.
-KA.get_backend(a::LavaArray) = LavaBackend((a.buf[].ctx)::VkContext)
+KA.get_backend(a::LavaArray) = LavaBackend((a.buf[].ctx)::LavaDevice)
 # Wait for all work submitted on the backend's channels, so the host can read
 # results. Dispatches are ordered on the GPU without it.
 KA.synchronize(backend::LavaBackend) = (flush!(backend.dispatch_bq); nothing)
@@ -156,7 +156,7 @@ requesting more throws. Modules for two workgroup sizes differ in one
 `LocalSize` byte, so the pipeline cache key must hash every byte
 ([`spirv_content_hash`](@ref)), not a sample as `Base.hash` does.
 """
-workgroup_limit(ctx::VkContext) = caps(ctx).workgrouplimit
+workgroup_limit(ctx::LavaDevice) = caps(ctx).workgrouplimit
 
 "The extents behind a KA size parameter, or `nothing` when they are dynamic."
 @inline statictuple(::Type{<:KA.NDIteration.StaticSize{S}}) where {S} = S
@@ -168,8 +168,8 @@ workgroup_limit(ctx::VkContext) = caps(ctx).workgrouplimit
 Throw if `wg` exceeds [`workgroup_limit`](@ref). Not clamped: a kernel sizes its
 `@localmem` tile to the workgroup it asked for.
 """
-@inline check_workgroup(ctx::VkContext, ::Nothing; static::Bool = false) = nothing
-@inline function check_workgroup(ctx::VkContext, wg; static::Bool = false)
+@inline check_workgroup(ctx::LavaDevice, ::Nothing; static::Bool = false) = nothing
+@inline function check_workgroup(ctx::LavaDevice, wg; static::Bool = false)
     n = prod(wg)
     lim = workgroup_limit(ctx)
     n > lim || return wg
@@ -261,7 +261,7 @@ end
 # `typeof(obj)` (function and KA's static sizes) and `(ndrange, workgroupsize)`.
 # Per device, because `pad_to_3d` reads the device's `max_wg_dims`.
 function get_or_build_iter_plan(obj::KA.Kernel{LavaBackend}, ndrange, workgroupsize,
-                                vkctx::VkContext)
+                                vkctx::LavaDevice)
     # `K` is concrete here, so the scan tests `IterEntry{K}` and compares an
     # isbits key with `===` (see `IterEntry`).
     k = (ndrange, workgroupsize)
@@ -330,7 +330,7 @@ function (obj::KA.Kernel{LavaBackend})(args...; ndrange=nothing, workgroupsize=n
 
     # KA's launch configuration plus `pad_to_3d` cost about half the host time of
     # a launch and depend only on kernel type and shape, so the plan is cached.
-    plan = get_or_build_iter_plan(obj, ndrange, workgroupsize, ctxof(bq))
+    plan = get_or_build_iter_plan(obj, ndrange, workgroupsize, deviceof(bq))
     # Function barrier: the cache returns an abstract `IterPlan`, and reading its
     # fields here (including `nblocks`) would box them. One dynamic dispatch makes
     # every use inside `launch_planned!` concrete.
@@ -384,7 +384,7 @@ function find_split_factor(n::Int, max_dim::Int)
     return max_dim
 end
 
-function pad_to_3d(ctx::VkContext, t::NTuple{1,<:Integer})
+function pad_to_3d(ctx::LavaDevice, t::NTuple{1,<:Integer})
     n = Int(t[1])
     max_x, max_y, _ = ctx.max_wg_dims
     n <= max_x && return (n, 1, 1)
@@ -395,7 +395,7 @@ function pad_to_3d(ctx::VkContext, t::NTuple{1,<:Integer})
     x * y * z == n || @warn "pad_to_3d: over-dispatching $n as ($x, $y, $z) = $(x*y*z) workgroups" maxlog=1
     return (x, y, z)
 end
-function pad_to_3d(ctx::VkContext, t::NTuple{2,<:Integer})
+function pad_to_3d(ctx::LavaDevice, t::NTuple{2,<:Integer})
     x, y = Int(t[1]), Int(t[2])
     max_x, max_y, _ = ctx.max_wg_dims
     if x <= max_x && y <= max_y
@@ -403,13 +403,13 @@ function pad_to_3d(ctx::VkContext, t::NTuple{2,<:Integer})
     end
     return pad_to_3d(ctx, (x * y,))
 end
-function pad_to_3d(::VkContext, t::NTuple{3,<:Integer})
+function pad_to_3d(::LavaDevice, t::NTuple{3,<:Integer})
     (Int(t[1]), Int(t[2]), Int(t[3]))
 end
 # N > 3: drop trailing unit axes and flatten only if a non-unit axis remains past
 # the third. This keeps the common `(W, H, C, 1)` grid 1:1 with the dispatch,
 # which `directdispatch` needs to index without dividing.
-function pad_to_3d(ctx::VkContext, t::NTuple{N,<:Integer}) where N
+function pad_to_3d(ctx::LavaDevice, t::NTuple{N,<:Integer}) where N
     n = N
     while n > 3 && Int(t[n]) == 1
         n -= 1
@@ -428,9 +428,9 @@ end
     # `all_args[1]`, so two with the same argument types would share a pipeline.
     key = Tuple{typeof(f), typeof(all_args)}
     world = Base.get_world_counter()
-    # `ctxof(bq)` asserts `VkContext`; the driver's `ctx` field is untyped, and an
+    # `deviceof(bq)` asserts `LavaDevice`; the driver's `ctx` field is untyped, and an
     # untyped cache makes the lookup below allocate on every dispatch.
-    cache = launch_plan_cache(ctxof(bq))
+    cache = launch_plan_cache(deviceof(bq))
     v = get(cache, key, nothing)
     if v !== nothing
         for q in v
@@ -474,12 +474,12 @@ The kernel-independent half of `build_launch_plan!`, inferred once. The
     tt = ttbox[]
     key = keybox[]::DataType
     compiled, pipeline, offsets, byval_sizes = get_compiled_kernel_and_pipeline(
-        ctxof(bq), f, tt, wg; enable_ray_query=ray_query)
+        deviceof(bq), f, tt, wg; enable_ray_query=ray_query)
     base = compiled.push_info.arg_buffer_size
     p = LaunchPlan(compiled, pipeline, offsets, byval_sizes, base,
                    base + compute_inline_extra_from_byval(byval_sizes),
                    world, wg, ray_query)
-    v = get!(() -> Any[], launch_plan_cache(ctxof(bq)), key)
+    v = get!(() -> Any[], launch_plan_cache(deviceof(bq)), key)
     filter!(q -> (q::LaunchPlan).world === world, v)  # superseded worlds are dead
     push!(v, p)
     p
@@ -509,7 +509,7 @@ function ka_launch!(e::Emitter, @nospecialize(f), all_args::Tuple,
                        plan.arg_buffer_size, plan.byval_sizes, all_args)
 
     name = ""
-    if (ctxof(bq)).diag.dispatch_logging
+    if (deviceof(bq)).diag.dispatch_logging
         name = Base.invokelatest(dispatch_log_string, "ka f=",
                                  dispatch_name(f, all_args), " groups=", block_dims)::String
         driver(bq).last_dispatch_info = name
@@ -559,7 +559,7 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
     else
         (256,)
     end
-    ws_3d = pad_to_3d(ctxof(bq), ws)
+    ws_3d = pad_to_3d(deviceof(bq), ws)
     ws_prod = prod(ws)
 
     # The group count comes from the indirect buffer. A large ndrange makes
@@ -582,7 +582,7 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
     tt = Tuple{map(arg_sigtype, Base.tail(all_args))...}
     enable_ray_query = tlas !== nothing
     compiled, pipeline, offsets, byval_sizes = get_compiled_kernel_and_pipeline(
-        ctxof(bq), converted_f, tt, ws_3d; enable_ray_query)
+        deviceof(bq), converted_f, tt, ws_3d; enable_ray_query)
 
     inline_extra = compute_inline_extra_from_byval(byval_sizes)
     total_size = compiled.push_info.arg_buffer_size + inline_extra
@@ -597,7 +597,7 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
     indirect_view = indirect_command!(batch)
 
     name = ""
-    if (ctxof(bq)).diag.dispatch_logging
+    if (deviceof(bq)).diag.dispatch_logging
         name = Base.invokelatest(dispatch_log_string, "indirect f=",
                                  dispatch_name(obj.f, all_args))::String
         driver(bq).last_dispatch_info = name

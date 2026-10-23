@@ -6,9 +6,9 @@
 # `Core.Typeof`: a type-valued argument is `Type{Float32}` in the compiled
 # signature but `DataType` under `typeof`.
 argtype(dev::LavaDevice, @nospecialize(y)) =
-    Core.Typeof(Adapt.adapt(adaptor(dev.bq), y))
+    Core.Typeof(Adapt.adapt(adaptor(dev.default_bq), y))
 
-accesscache(dev::LavaDevice) = dev.ctx.caches.accesses::AccessCache
+accesscache(dev::LavaDevice) = dev.caches.accesses::AccessCache
 
 devicebuffertype(::LavaDevice, ::Type{T}, N::Int) where {T} = LavaDeviceArray{T,N}
 
@@ -20,7 +20,7 @@ kernelinterpreter(::LavaDevice, kernel, tt) = Lava.kernelinterpreter(kernel, tt)
 # kernel is inferred at the plan's workgroup size.
 function kakernelaccesssignature(dev::LavaDevice, kernel, argT::Tuple, ndrange, group)
     obj  = kernelfor(kernel, group, backend(dev))
-    iter = get_or_build_iter_plan(obj, dispatchrange(ndrange), callgroup(obj, group), dev.ctx)
+    iter = get_or_build_iter_plan(obj, dispatchrange(ndrange), callgroup(obj, group), dev)
     tt   = (typeof(iter.ka_ctx), argT...)
     interp = Lava.kernelinterpreter(obj.f, Tuple{tt...}; workgroup_size = iter.ws_3d)
     return interp, obj.f, tt

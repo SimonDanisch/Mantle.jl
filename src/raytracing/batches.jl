@@ -1,8 +1,9 @@
 """
-Incremental TLAS whose batch registration and mutation live in core
-(`raytracing/mutation.jl`). Subtypes have the fields `blas_list`, `instances`,
-`root_aabb`, `dirty` and `transforms_dirty`, and implement `buildgeometry!`,
-`instancearray` and `updatebatch!`.
+Incremental TLAS whose batch registration, mutation and commit decision live in
+core (`raytracing/mutation.jl`). Subtypes have the fields `blas_list`,
+`instances`, `root_aabb`, `dirty`, `transforms_dirty` and `static_tlas`, and
+implement `buildgeometry!`, `instancearray`, `updatebatch!`, `canrefit`,
+`build!` and `AdaptedAccel`.
 """
 abstract type BatchedTLAS{Tri} <: HWTLAS{Tri} end
 

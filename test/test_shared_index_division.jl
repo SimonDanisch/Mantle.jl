@@ -260,7 +260,7 @@ end
 end
 
 # The second consumer used to be a testset of its own that built a lavapipe
-# context beside the device under test (`VkContext(select = "llvmpipe")`) and
+# context beside the device under test (`LavaDevice(select = "llvmpipe")`) and
 # retired it with `mark_device_lost!`. Both are the Vulkan backend's, and the
 # portable API has no way to retire a device it builds, so lavapipe is reached
 # the portable way instead: as the device under test, where the testset above

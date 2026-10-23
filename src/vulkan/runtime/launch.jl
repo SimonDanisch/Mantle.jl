@@ -10,7 +10,7 @@ Throw a `LavaError` for a `LavaArray` argument whose `DataRef` was released or
 whose buffer is `BUF_STATE_DEAD`. On by default; disable with
 `ctx.diag.launch_arg_validation = false`.
 """
-@generated function validate_launch_args(ctx::VkContext, args::T) where T <: Tuple
+@generated function validate_launch_args(ctx::LavaDevice, args::T) where T <: Tuple
     exprs = Expr[]
     # The toggle is read at run time, not baked into the generated body.
     push!(exprs, :((ctx.diag.launch_arg_validation || return)))
@@ -82,7 +82,7 @@ function preparekernel(owner::O, @nospecialize(f), args::Tuple,
                        ndrange::Union{Integer, NTuple{3,<:Integer}},
                        workgroup_size::NTuple{3,Int}, tlas) where {O<:Closed}
     bq = queueof(owner)
-    ctx = ctxof(bq)
+    ctx = deviceof(bq)
     validate_launch_args(ctx, args)
     if ndrange isa Integer
         ndrange_3d = (Int(ndrange), 1, 1)
@@ -242,7 +242,7 @@ dispatch builds them again; the SPIR-V stays with its `CodeInstance`. All three
 go together, since each can return a pipeline the others would rebuild.
 Submissions and plans keep their own references, so accepted work stays valid.
 """
-function clear_kernel_cache!(ctx::VkContext = vk_context())
+function clear_kernel_cache!(ctx::LavaDevice = vk_context())
     empty!(ctx.caches.pipelines)
     empty!(ctx.caches.pipeline_order)
     empty!(ctx.caches.linked)
@@ -255,7 +255,7 @@ end
 
 `ctx`'s pipeline and argument layout for a compiled kernel.
 """
-function link_kernel(ctx::VkContext, compiled::LavaGPUKernel)
+function link_kernel(ctx::LavaDevice, compiled::LavaGPUKernel)
     pipeline = get_compute_pipeline(ctx, compiled.spirv_bytes, compiled.entry_name;
                                     push_constant_size=compiled.push_info.push_size,
                                     needs_tlas_descriptor=compiled.enable_ray_query)
@@ -272,7 +272,7 @@ The SPIR-V for `(f, tt, workgroup_size)` (`compile_or_lookup`) and this device's
 pipeline for it. `@noinline` and `@nospecialize` keep compiler inference out of
 specialised launch callers.
 """
-@noinline function get_compiled_kernel_and_pipeline(ctx::VkContext, @nospecialize(f), @nospecialize(tt),
+@noinline function get_compiled_kernel_and_pipeline(ctx::LavaDevice, @nospecialize(f), @nospecialize(tt),
                                           workgroup_size;
                                           enable_ray_query::Bool=false)
     job = lava_kernel_job(f, tt; workgroup_size, enable_ray_query, features = ctx.features)
@@ -318,7 +318,7 @@ staging that a GPU copy reads. The owner returns it at its release point.
 @inline function scratch!(owner::O, nbytes::Integer, kind) where {O<:Closed}
     bq = queueof(owner)
     ownthread(bq)
-    dev = lavadevice(ctxof(bq))
+    dev = deviceof(bq)
     # `maywait = false`: this can run inside an open recording, and a waiting
     # reclaim sweeps the channel and pops that recording's hold frame.
     r = acquire!(pool(dev), dev, kind, nothing, max(Int(nbytes), 16);

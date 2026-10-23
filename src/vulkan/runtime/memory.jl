@@ -23,10 +23,10 @@ const BUF_STATE_DEAD     = UInt8(2)
 # gate is `buf.state`.
 const BDA_POISON = UInt64(0)
 
-# Everything here is per `VkContext`, so `reset_device!`'s new context starts fresh.
+# Everything here is per `LavaDevice`, so `reset_device!`'s new context starts fresh.
 
 """Sum of device-local heap sizes in bytes for `ctx`'s physical device."""
-function probe_device_local_heap(ctx::VkContext)
+function probe_device_local_heap(ctx::LavaDevice)
     mem_props = ctx.memory_properties
     total = 0
     # `memory_heaps` has VK_MAX_MEMORY_HEAPS (16) slots; `memory_heap_count` are valid.
@@ -43,7 +43,7 @@ end
 Per-heap `(heap, device_local, size, budget, usage)` in bytes, `heap` 0-based.
 `budget` and `usage` come from `VK_EXT_memory_budget` and are 0 without it.
 """
-function probe_device_memory_budget(ctx::VkContext)
+function probe_device_memory_budget(ctx::LavaDevice)
     mem_props = ctx.memory_properties
     n = Int(mem_props.memory_heap_count)      # of the 16 slots in `memory_heaps`
     sizes = ntuple(i -> Int(mem_props.memory_heaps[i].size), n)
@@ -72,7 +72,7 @@ allocate: RADV then spills into GTT, and past about half the RAM amdgpu's
 The second method applies the rule to one heap of a
 [`probe_device_memory_budget`](@ref) snapshot.
 """
-function overbudget(ctx::VkContext, memtype::Integer, bytes::Integer)
+function overbudget(ctx::LavaDevice, memtype::Integer, bytes::Integer)
     ctx.memory_budget_available || return false
     heap = Int(ctx.memory_properties.memory_types[memtype + 1].heap_index)
     return overbudget(probe_device_memory_budget(ctx)[heap + 1], bytes)
@@ -95,7 +95,7 @@ plans and their resources stay valid and record again on the next `run!`.
 Returns `(0, 0)` while a recording is open, the device is lost or a collection
 is already running.
 """
-function trim_gpu_pool!(ctx::VkContext = vk_context(); invalidate_recordings::Bool=false)
+function trim_gpu_pool!(ctx::LavaDevice = vk_context(); invalidate_recordings::Bool=false)
     bq = ctx.default_bq
     if invalidate_recordings
         # Never sweep an open recording's positional hold frame.
@@ -104,9 +104,9 @@ function trim_gpu_pool!(ctx::VkContext = vk_context(); invalidate_recordings::Bo
         device_lost(ctx) && return (0, 0)
         flush!(bq)
         foreach(flush!,ctx.extra_queues)
-        waitidle(lavadevice(ctx))
+        waitidle(ctx)
         seen=IdDict{Any,Nothing}()
-        for arena in values(spans(ctx).arenas), plan in tenants!(arena)
+        for arena in values(pool(ctx).arenas), plan in tenants!(arena)
             plan isa Plan && recorded(plan) || continue
             haskey(seen,plan) && continue
             seen[plan]=nothing
@@ -116,20 +116,20 @@ function trim_gpu_pool!(ctx::VkContext = vk_context(); invalidate_recordings::Bo
     quiesce_before_reclaim!(bq) || return (0, 0)
     if invalidate_recordings
         foreach(drain!,ctx.extra_queues)
-        reclaim!(spans(ctx),lavadevice(ctx);wait=true)
+        reclaim!(pool(ctx),ctx;wait=true)
     end
     return reclaim_empty_pool_blocks!(bq)
 end
 
 """
-    maybe_collect(ctx::VkContext; blocking::Bool=false)
+    maybe_collect(ctx::LavaDevice; blocking::Bool=false)
 
 Run core's `autotrim!`, then enter core's collection controller with the
 device-local heap pressure. Called by `vk_alloc` and `pool_alloc` before
 allocating; a no-op with `eager_gc` off. `blocking=true` lowers the pressure
 threshold and raises the rate budget, for a caller about to stall anyway.
 """
-function maybe_collect(ctx::VkContext; blocking::Bool=false)
+function maybe_collect(ctx::LavaDevice; blocking::Bool=false)
     p = mempolicy(ctx)
     p.eager_gc || return
     stats = p.stats
@@ -137,7 +137,7 @@ function maybe_collect(ctx::VkContext; blocking::Bool=false)
 
     # Before the pressure gate: a heap ratio is the wrong signal for dead pool
     # blocks, e.g. on an iGPU.
-    autotrim!(spans(ctx), lavadevice(ctx))
+    autotrim!(pool(ctx), ctx)
 
     # Re-probe the device-local heap size every 10 s.
     if current_time - (@atomic stats.last_updated) > 10.0
@@ -149,11 +149,11 @@ function maybe_collect(ctx::VkContext; blocking::Bool=false)
     size = (@atomic stats.size)
     size > 0 || return  # haven't probed yet
 
-    autocollect!(() -> drain!(ctx.default_bq), spans(ctx);
+    autocollect!(() -> drain!(ctx.default_bq), pool(ctx);
                  pressure = gpu_live_bytes(ctx) / size, blocking) || return
 
     # Return blocks the collection emptied, without a second collection.
-    trimcollected!(spans(ctx), lavadevice(ctx))
+    trimcollected!(pool(ctx), ctx)
 
     return
 end
@@ -169,7 +169,7 @@ struct AllocFailure
     mem_type_idx::Int   # -1 if the failure happened before memory-type selection
 end
 
-function format_oom_error(ctx::VkContext, fail::AllocFailure)
+function format_oom_error(ctx::LavaDevice, fail::AllocFailure)
     io = IOBuffer()
     println(io, "Out of GPU memory.")
     req_mb = fail.nbytes ÷ (1024 * 1024)
@@ -225,9 +225,9 @@ function vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
                   extra_usage::UInt32=UInt32(0), unified::Bool=false)
     # On a lost device a Vulkan call may succeed against torn-down state and
     # return garbage addresses.
-    refuselost(ctxof(bq), "vk_alloc")
+    refuselost(deviceof(bq), "vk_alloc")
     drain!(bq)
-    maybe_collect(ctxof(bq))
+    maybe_collect(deviceof(bq))
     result = try_vk_alloc(bq, nbytes; extra_usage, unified)
     result isa VkManagedBuffer && return result
     # Return empty pool blocks before the retry; without this the pool ratchets
@@ -247,7 +247,7 @@ function vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
     end
     fail = result::AllocFailure
     throw(LavaError("memory allocation",
-        format_oom_error(ctxof(bq), fail),
+        format_oom_error(deviceof(bq), fail),
         "Free unused LavaArrays, reduce problem size, or check for memory leaks with gpu_memory_usage()."))
 end
 
@@ -262,16 +262,15 @@ Runs only on allocation failure or an explicit trim. `false`, doing nothing, on
 a lost device, while a recording pins the pool, or while a collection runs.
 """
 function quiesce_before_reclaim!(bq::SubmitChannel{<:VulkanQueue})
-    ctx = ctxof(bq)
-    device_lost(ctx) && return false
-    dev = lavadevice(ctx)
+    dev = deviceof(bq)
+    device_lost(dev) && return false
     return quiesce_pool!(() -> flush!(bq), () -> drain!(bq), pool(dev), dev)
 end
 
 """Attempt GPU buffer allocation, returning an `AllocFailure` on OOM."""
 function try_vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
                       extra_usage::UInt32=UInt32(0), unified::Bool=false)
-    ctx = ctxof(bq)
+    ctx = deviceof(bq)
     dev = ctx.device
     nbytes = max(nbytes, 16)
 
@@ -331,7 +330,7 @@ function try_vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
         if e isa VK.VulkanError &&
            (e.code == VK.ERROR_OUT_OF_DEVICE_MEMORY ||
             e.code == VK.ERROR_OUT_OF_HOST_MEMORY)
-            clear_validation_messages!(ctxof(bq))
+            clear_validation_messages!(deviceof(bq))
             return AllocFailure(e.code, op, Int(nbytes), mem_type_idx_local)
         end
         # Mark the device lost, so later calls refuse with a clear error.
@@ -365,7 +364,7 @@ function vk_free!(buf::VkManagedBuffer)
     ok || return
 
     c = buf.ctx
-    if !(c isa VkContext)
+    if !(c isa LavaDevice)
         # No context: not pooled and named by no queue, so destroy inline.
         destroy_buffer!(buf)
         return
@@ -389,14 +388,14 @@ function destroy_buffer!(buf::VkManagedBuffer)
 
     # Logged here, not in `vk_free!`: the stamp may only be read on the owning thread.
     let c = buf.ctx
-        if c isa VkContext && c.diag.free_debug
+        if c isa LavaDevice && c.diag.free_debug
             st = buf.stamp
             push!(c.diag.free_log,
                   (addr=buf.address, size=buf.size, pool=buf.region !== nothing,
                    lw=(st.channel === nothing ? nothing : (st.channel, st.token))))
         end
         # The address still in an argument block is a pending use-after-free.
-        if c isa VkContext && c.diag.freed_bda_scan
+        if c isa LavaDevice && c.diag.freed_bda_scan
             hits = scan_unified_for_bda!(buf)
             if hits > 0 && c.diag.destroy_freed_bdas_throws
                 throw(LavaError("destroy_buffer!",
@@ -422,7 +421,7 @@ function destroy_buffer!(buf::VkManagedBuffer)
         end
     end
 
-    ctx = buf.ctx::VkContext
+    ctx = buf.ctx::LavaDevice
     let p = mempolicy(ctx)
         @lock p.livelock delete!(p.live_buffers, buf)
     end
@@ -453,7 +452,7 @@ end
 
 """The blocks of the `Unified` arena, which hold every recording's arguments and
 indirect counts: where a stale device address can sit when the GPU runs."""
-unifiedblocks(ctx::VkContext) = get(() -> Block[], spans(ctx).blocks, Unified())
+unifiedblocks(ctx::LavaDevice) = get(() -> Block[], pool(ctx).blocks, Unified())
 
 function scan_unified_for_bda!(buf::VkManagedBuffer)
     target = buf.address
@@ -505,26 +504,12 @@ MemoryPolicy() = MemoryPolicy(false, true, MemoryStats(),
                               Threads.Atomic{Int}(0), Set{VkManagedBuffer}(), ReentrantLock())
 
 """
-    lavadevice(ctx) -> LavaDevice
-
-This context's device handle, and so its `Mantle.Pool`. Always derived from
-`ctx`, never `vk_context()`: an allocation served from another device's pool
-lands in that device's memory (see `MemoryPolicy`).
-"""
-lavadevice(ctx::VkContext) = get!(DEVICES, ctx) do
-    LavaDevice(ctx, ctx.default_bq)
-end
-
-"""The pool this context suballocates from."""
-@inline spans(ctx::VkContext) = pool(lavadevice(ctx))
-
-"""
     mempolicy(ctx) -> MemoryPolicy
 
 This device's allocation policy and dedicated-buffer accounting; the memory
-itself comes from [`spans`](@ref).
+itself comes from the device's [`pool`](@ref).
 """
-@inline mempolicy(ctx::VkContext) = ctx.caches.pool
+@inline mempolicy(ctx::LavaDevice) = ctx.caches.pool
 
 """
     pool_offset(buf) -> Int
@@ -536,8 +521,8 @@ Byte offset of `buf` in its pool block, 0 when it owns its memory. Derived from
     buf.region === nothing ? 0 : offset(buf.region::Region)
 
 """Every block this device has, across the arenas they were cut for."""
-poolblocks(ctx::VkContext) =
-    collect(Iterators.flatten(values(spans(ctx).blocks)))
+poolblocks(ctx::LavaDevice) =
+    collect(Iterators.flatten(values(pool(ctx).blocks)))
 
 """
     gpu_live_bytes(ctx = vk_context()) -> Int
@@ -547,9 +532,9 @@ Bytes this device holds from the driver (pool blocks plus dedicated buffers),
 and the number of dedicated buffers. Pooled regions are not counted separately:
 they cost nothing beyond their block.
 """
-gpu_live_bytes(ctx::VkContext = vk_context()) =
-    reserved(spans(ctx)) + mempolicy(ctx).live_bytes[]
-live_buffer_count(ctx::VkContext = vk_context()) =
+gpu_live_bytes(ctx::LavaDevice = vk_context()) =
+    reserved(pool(ctx)) + mempolicy(ctx).live_bytes[]
+live_buffer_count(ctx::LavaDevice = vk_context()) =
     (p = mempolicy(ctx); @lock p.livelock length(p.live_buffers))
 
 """
@@ -559,11 +544,10 @@ Destroy all of this device's blocks, live regions included, when `reset_device!`
 retires the context. Unlike [`trim_gpu_pool!`](@ref) it ignores the `live`
 ledger: whatever holds those regions points at a dead device either way.
 """
-function destroy_pool!(ctx::VkContext)
-    p = spans(ctx)
-    dev = lavadevice(ctx)
+function destroy_pool!(ctx::LavaDevice)
+    p = pool(ctx)
     for (_, blks) in p.blocks, blk in blks
-        rawfree(dev, blk.memory)
+        rawfree(ctx, blk.memory)
     end
     empty!(p.blocks)
     empty!(p.arenas)
@@ -572,7 +556,6 @@ function destroy_pool!(ctx::VkContext)
     takeall!(p.pendingplans)
     empty!(p.retiring)
     empty!(p.retiring_at)
-    delete!(DEVICES, ctx)
     return nothing
 end
 
@@ -585,7 +568,7 @@ is carved from a block whose usage bits permit it (`compatible`), and a new
 block with those bits is grown when none does.
 """
 function pool_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer; extra_usage::UInt32=UInt32(0))
-    ctx = ctxof(bq)
+    ctx = deviceof(bq)
     # Even reusing a free span: the blocks of a lost device give garbage addresses.
     refuselost(ctx, "pool_alloc")
     p = mempolicy(ctx)
@@ -597,8 +580,7 @@ function pool_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer; extra_usa
 
     p.disabled && return vk_alloc(bq, nbytes; extra_usage)
 
-    dev = lavadevice(ctx)
-    sp = pool(dev)
+    sp = pool(ctx)
     # Past the soft cap, collect (spaced by `autocollect!`) before growing: the
     # bytes are then more likely dead than in use. The `drain!` returns what the
     # collection retired to the channel, or the pool cannot reuse it.
@@ -606,7 +588,7 @@ function pool_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer; extra_usa
         cap > 0 && reserved(sp) >= cap && autocollect!(() -> drain!(bq), sp)
     end
 
-    region = acquire_or_reclaim!(bq, sp, dev, nbytes, extra_usage)
+    region = acquire_or_reclaim!(bq, sp, ctx, nbytes, extra_usage)
     blk = region.block.memory::BufferBlock
     return VkManagedBuffer(
         blk.buffer, blk.memory,
@@ -653,11 +635,11 @@ and report how many and how many bytes. Callers must run
 `quiesce_before_reclaim!` first. Not finalizer-safe.
 """
 function reclaim_empty_pool_blocks!(bq::SubmitChannel{<:VulkanQueue})
-    ctx = ctxof(bq)
-    sp = spans(ctx)
+    ctx = deviceof(bq)
+    sp = pool(ctx)
     before = reserved(sp)
     nbefore = length(poolblocks(ctx))
-    trim!(sp, lavadevice(ctx))
+    trim!(sp, ctx)
     return (nbefore - length(poolblocks(ctx)), before - reserved(sp))
 end
 
@@ -699,11 +681,11 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
     # Core stamps order transfers against other channels. Downloads use the
     # last live producer channel to avoid a second timeline wait.
     bq = if direction === :upload
-        (managed.ctx::VkContext).default_bq
+        (managed.ctx::LavaDevice).default_bq
     else
         wbq = stampof(managed).channel
         (wbq !== nothing && !queue_released(wbq::SubmitChannel{<:VulkanQueue})) ?
-            (wbq::SubmitChannel{<:VulkanQueue}) : (managed.ctx::VkContext).default_bq
+            (wbq::SubmitChannel{<:VulkanQueue}) : (managed.ctx::LavaDevice).default_bq
     end
     # `Mantle.offset`, qualified: this function's `offset` keyword shadows it.
     if direction === :upload
@@ -738,7 +720,7 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
     else
         # Owned here until the host has read it; one-shot scratch could be
         # reclaimed before that read.
-        dev = lavadevice(managed.ctx::VkContext)
+        dev = managed.ctx::LavaDevice
         r = acquire!(pool(dev), dev, Readback(), nothing, max(Int(nbytes), 16);
                      align = ARG_ALIGN, blocksize = READBACK_BLOCK_SIZE)
         mb = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
@@ -785,17 +767,17 @@ function download_typed!(data::AbstractVector{T}, src::VkManagedBuffer; offset::
 end
 
 """
-    bda_alignment_for(ctx::VkContext, scratch::Bool) -> UInt64
+    bda_alignment_for(ctx::LavaDevice, scratch::Bool) -> UInt64
 
 Device-address alignment a buffer needs beyond Vulkan's own:
 `minAccelerationStructureScratchOffsetAlignment` (`ctx.as_scratch_align`) for
 acceleration-structure build scratch, otherwise 1.
 """
-@inline function bda_alignment_for(ctx::VkContext, scratch::Bool)
+@inline function bda_alignment_for(ctx::LavaDevice, scratch::Bool)
     return scratch ? ctx.as_scratch_align : UInt64(1)
 end
 
-function find_memory_type_optional(ctx::VkContext, type_bits::UInt32, required_flags)
+function find_memory_type_optional(ctx::LavaDevice, type_bits::UInt32, required_flags)
     mem_props = ctx.memory_properties
     for i in 0:(length(mem_props.memory_types) - 1)
         if (type_bits & (UInt32(1) << i)) != 0
@@ -808,7 +790,7 @@ function find_memory_type_optional(ctx::VkContext, type_bits::UInt32, required_f
     return nothing
 end
 
-function find_memory_type(ctx::VkContext, type_bits::UInt32, required_flags;
+function find_memory_type(ctx::LavaDevice, type_bits::UInt32, required_flags;
                           preferred_flags=required_flags)
     i = find_memory_type_optional(ctx, type_bits, required_flags | preferred_flags)
     if i === nothing && preferred_flags != required_flags

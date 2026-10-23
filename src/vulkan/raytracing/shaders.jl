@@ -22,7 +22,7 @@ end
 """The device's pipeline for `pipeline` in the current world, compiled if needed.
 Call before opening a one-shot: a cold SBT upload submits its own work."""
 function rt_compiled_for(bq::SubmitChannel{<:VulkanQueue}, pipeline::RayTracingPipeline, args)
-    ctx = ctxof(bq)
+    ctx = deviceof(bq)
     tt_key = Tuple{map(arg_sigtype, args)...}
     key = rt_cache_key(pipeline, tt_key)
     world = Base.tls_world_age()
@@ -44,7 +44,7 @@ end
 Every stage of `pipeline`, compiled for its current code: `raygen`, `chits`,
 `miss`, `anyhit` (or `nothing`), and `all` of them in one tuple.
 """
-function rt_stages(ctx::VkContext, pipeline::RayTracingPipeline, raygen_tt)
+function rt_stages(ctx::LavaDevice, pipeline::RayTracingPipeline, raygen_tt)
     pt = pipeline.payload_type
     features = ctx.features
     raygen = cached_rt_shader(pipeline.raygen_func, raygen_tt; stage = :raygen,
@@ -63,7 +63,7 @@ function rt_stages(ctx::VkContext, pipeline::RayTracingPipeline, raygen_tt)
 end
 
 """The Vulkan pipeline of compiled `stages` (`rt_stages`), with the raygen's argument layout."""
-function build_rt_pipeline(ctx::VkContext, stages)
+function build_rt_pipeline(ctx::LavaDevice, stages)
     vk_pipeline = create_rt_pipeline(
         ctx,
         stages.raygen.spirv_bytes,

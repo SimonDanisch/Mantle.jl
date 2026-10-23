@@ -266,28 +266,15 @@ function updatebatch!(t::MetalHWTLAS, batch, transforms)
     return t
 end
 
-"""
-    mtlinstances_kernel!(descriptors, shading, records, offset, n, index, options, keep)
-
-One batch: `shading[offset + i] = records[i]` (what a hit reads its transform
-from) and `descriptors[offset + i]`, the descriptor Metal builds from, naming
-geometry `index` (zero-based) in the structure's list.
-"""
-function mtlinstances_kernel!(descriptors, shading, records, offset::Int32, n::Int32,
-                              index::UInt32, options::UInt32, keep::UInt32)
-    i = KI.get_global_id().x
-    i <= n || return nothing   # the launch is whole workgroups
-    @inbounds r = records[i]
-    j = offset + i
-    @inbounds shading[j] = r
-    @inbounds descriptors[j] = MetalInstanceDescriptor(r, index, options, keep)
-    return nothing
-end
+# The descriptor Metal builds from, naming geometry `index` (zero-based) in the
+# structure's list.
+@inline instancerecord(::Type{MetalInstanceDescriptor}, r, (index, options), keep::UInt32) =
+    MetalInstanceDescriptor(r, index, options, keep)
 
 """
     writeinstances!(t, descriptors, shading)
 
-Write every batch's instances with [`mtlinstances_kernel!`](@ref) and wait: the
+Write every batch's instances with [`instances_kernel!`](@ref) and wait: the
 build or refit that follows runs on a command buffer of its own, which nothing
 orders after Metal.jl's batch.
 """
@@ -296,8 +283,8 @@ function writeinstances!(t::MetalHWTLAS, descriptors::MtlArray, shading::MtlArra
     offset = 0
     for b in t.instances
         b.n == 0 && continue
-        KI.Kernel(t.backend, mtlinstances_kernel!)(descriptors, shading, b.records,
-            Int32(offset), Int32(b.n), UInt32(b.blas - 1), options,
+        KI.Kernel(t.backend, instances_kernel!)(descriptors, shading, b.records,
+            Int32(offset), Int32(b.n), (UInt32(b.blas - 1), options),
             b.hidden ? UInt32(0) : UInt32(0xff); ndrange = b.n)
         offset += b.n
     end
@@ -305,25 +292,23 @@ function writeinstances!(t::MetalHWTLAS, descriptors::MtlArray, shading::MtlArra
     return nothing
 end
 
-function Raycore.sync!(t::MetalHWTLAS{Tri}) where {Tri}
-    if !t.dirty && !t.transforms_dirty && t.static_tlas !== nothing
-        return t
-    end
-    total = Mantle.ninstances(t.instances)
+# A transform-only change refits in place, keeping the structure and its
+# `gpuResourceID` (why it is built `refittable`). A rebuild makes a new structure
+# and `static_tlas`, while Hikari keeps tracing its cached adapted scene until
+# `accel.dirty`, so a moved mesh would render unchanged.
+canrefit(t::MetalHWTLAS) =
+    t.built !== nothing && t.built.refittable && t.built.count == ninstances(t.instances)
 
-    # A transform-only change refits in place, keeping the structure and its
-    # `gpuResourceID` (why it is built `refittable`). A rebuild makes a new
-    # structure and `static_tlas`, while Hikari keeps tracing its cached adapted
-    # scene until `accel.dirty`, so a moved mesh would render unchanged.
-    if !t.dirty && t.built !== nothing && t.built.refittable &&
-       t.built.count == total && t.static_tlas !== nothing
-        # Structure and shading records take the same transforms in place:
-        # recorded kernels retain the records' device view.
-        writeinstances!(t, t.built.instances, t.records)
-        refit_tlas!(t.device, t.built)
-        t.transforms_dirty = false
-        return t
-    end
+# Structure and shading records take the same transforms in place: recorded
+# kernels retain the records' device view.
+function build!(t::MetalHWTLAS, ::Refit)
+    writeinstances!(t, t.built.instances, t.records)
+    refit_tlas!(t.device, t.built)
+    return t
+end
+
+function build!(t::MetalHWTLAS{Tri}, ::Rebuild) where {Tri}
+    total = ninstances(t.instances)
     # An empty scene is built too (every ray misses): `adapt_structure` asserts
     # `static_tlas::AdaptedAccel`. One TLAS instance per record, naming its
     # batch's BLAS by index into `blas_list`; a batch without triangles gets offset
@@ -363,10 +348,6 @@ function Raycore.sync!(t::MetalHWTLAS{Tri}) where {Tri}
 
     # Non-resident structures are not mapped for the dispatch: every ray misses silently.
     make_resident!(t.device, t.built.handle, (b.handle for b in t.blas_list)...)
-
-    t.dirty = false
-    t.transforms_dirty = false
-    t.static_tlas = AdaptedAccel(t)
     return t
 end
 
@@ -381,7 +362,6 @@ supports_rt_pipeline(::MetalHWTLAS) = false
 supports_procedural_traversal(::Metal.MetalBackend) = true
 # Every Apple-silicon GPU builds and traverses `MTLAccelerationStructure`s.
 supports_hwtlas(::Metal.MetalBackend) = true
-supports_hwtlas(::MetalDevice) = true
 supports_procedural_traversal(::MetalHWTLAS) = true
 
 # The candidate verbs inside a procedural visible function. Overlays in Metal.jl's

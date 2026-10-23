@@ -1,11 +1,11 @@
 # Vulkan device creation, capability queries and validation-message capture.
-# `vk_context()` lazily builds the process-default `VkContext`;
-# `VkContext(; select, debug)` builds others.
+# `vk_context()` lazily builds the process-default `LavaDevice`;
+# `LavaDevice(; select, debug)` builds others.
 
 """
     RTPipelineProperties
 
-Ray tracing pipeline properties of the physical device. `VkContext.rt_pipeline_properties`
+Ray tracing pipeline properties of the physical device. `LavaDevice.rt_pipeline_properties`
 is `nothing` without the RT extensions.
 """
 struct RTPipelineProperties
@@ -126,7 +126,7 @@ mutable struct VulkanQueue{C}
     # Each submit increments `next_timeline` and signals the new value.
     timeline_sem::VK.Semaphore
     next_timeline::UInt64
-    # The owning VkContext; a type parameter because `VkContext` is declared
+    # The owning LavaDevice; a type parameter because `LavaDevice` is declared
     # after this struct.
     ctx::C
     # How long `flush!` waits before deciding a dispatch is not completing.
@@ -162,7 +162,7 @@ end
 # or `nothing` when a run submits its recording alone.
 
 """The queue a closed command buffer was taken from, as the concrete type."""
-@inline queueof(c::Closed) = c.bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
+@inline queueof(c::Closed) = c.bq::SubmitChannel{VulkanQueue{LavaDevice},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
 
 
 function SubmitChannel(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ctx;
@@ -192,15 +192,14 @@ end
 # The driver bundle behind a channel (`bq.channel`, which core never reads)
 # and its fields.
 @inline driver(bq::SubmitChannel{VulkanQueue{C}}) where {C} = bq.channel::VulkanQueue{C}
-@inline ctxof(bq::SubmitChannel{VulkanQueue{C}}) where {C} = driver(bq).ctx::C
 @inline vkdevice(bq::SubmitChannel{<:VulkanQueue}) = driver(bq).device
 @inline vkqueue(bq::SubmitChannel{<:VulkanQueue}) = driver(bq).queue
 @inline timelineof(bq::SubmitChannel{<:VulkanQueue}) = driver(bq).timeline_sem
 
-# The Mantle device this channel submits to, which core passes to `rawfree`
-# and `flush!`. Not a field: a `LavaDevice` holds its default channel, so the
-# channel is built first. `lavadevice` caches one device per context.
-deviceof(bq::SubmitChannel{<:VulkanQueue}) = lavadevice(ctxof(bq))
+# The device this channel submits to, which core passes to `rawfree` and
+# `flush!`. Read from the driver bundle: a `LavaDevice` holds its default
+# channel, so the channel is built first.
+@inline deviceof(bq::SubmitChannel{VulkanQueue{C}}) where {C} = driver(bq).ctx::C
 
 """
     CoopMat2Caps
@@ -236,7 +235,7 @@ SM/CU count and warps per SM, or `(0, 0)` where the device does not report
 them; kernels size grids to fill the device from it. Physical-device property
 queries (vendor coverage as in llama.cpp), so neither extension is enabled, but
 the chained struct is only filled for an advertised extension. The chain also
-needs an instance of API 1.1 or later (`VkContext` asks for 1.4); below that
+needs an instance of API 1.1 or later (`LavaDevice` asks for 1.4); below that
 it is dropped silently, since `vkGetPhysicalDeviceProperties2` returns void.
 """
 function query_shader_cores(phys_dev)
@@ -257,13 +256,15 @@ end
 
 
 """
-    VkContext
+    LavaDevice <: Device
 
 One Vulkan device: instance, physical and logical device, queues, capability
-flags and per-device caches. `default_bq` is the primary submit channel;
-[`allocate_batch_queue!`](@ref) hands out more.
+flags, per-device caches and the `Pool` every plan on the device reserves its
+transient arenas from, so the pool is sized to the largest plan, not the sum.
+`default_bq` is the primary submit channel; [`allocate_batch_queue!`](@ref)
+hands out more.
 """
-mutable struct VkContext
+mutable struct LavaDevice <: Device
     instance::VK.Instance
     physical_device::VK.PhysicalDevice
     device::VK.Device
@@ -271,7 +272,7 @@ mutable struct VkContext
     device_name::String
     # Primary channel; set by the inner constructor once `ctx` exists. Fully
     # concrete so `ctx.default_bq` infers.
-    default_bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
+    default_bq::SubmitChannel{VulkanQueue{LavaDevice},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
     # Queue 1 of the primary family, or the primary queue when the family has
     # only one. Used by the external-image copy.
     compute_queue::VK.Queue
@@ -289,7 +290,7 @@ mutable struct VkContext
     # channel's timeline. Reachable only through the buffers, channel and
     # buffers can be collected together, the semaphore finalized first, and the
     # query segfaults in the driver.
-    extra_queues::Vector{SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}}
+    extra_queues::Vector{SubmitChannel{VulkanQueue{LavaDevice},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}}
     # Hardware queue slots handed back by `release_batch_queue!`, reused before
     # `next_queue_index` advances.
     free_queue_indices::Vector{Int}
@@ -381,6 +382,8 @@ mutable struct VkContext
     # Per-device caches: they die with the context, so nothing outlives the
     # handles they hold. See `DeviceCaches`.
     caches::DeviceCaches
+    # Owned by the device: one allocator per device, shared by all its workloads.
+    pool::Pool
 
     # Debugging and instrumentation toggles for this device; see `Diagnostics`.
     diag::Diagnostics
@@ -388,18 +391,19 @@ mutable struct VkContext
     # Two-phase init via `new()` so `SubmitChannel` gets the live `ctx`; no
     # constructor leaves `default_bq` unset. Every keyword names a field;
     # `primary_queue` is the default channel's queue.
-    function VkContext(primary_queue::VK.Queue; fields...)
+    function LavaDevice(primary_queue::VK.Queue; fields...)
         ctx = new()
         for (name, value) in fields
             setproperty!(ctx, name, value)
         end
-        ctx.extra_queues = eltype(fieldtype(VkContext, :extra_queues))[]
+        ctx.extra_queues = eltype(fieldtype(LavaDevice, :extra_queues))[]
         ctx.free_queue_indices = Int[]
         ctx.features = TargetFeatures(; ser = ctx.ser_available, ray_query = ctx.ray_query_available)
         # Registered before anything can allocate against it, so the exit hook
         # marks it lost (`LIVE_CONTEXTS`).
         push!(LIVE_CONTEXTS, WeakRef(ctx))
         ctx.caches = DeviceCaches()
+        ctx.pool = Pool()
         ctx.diag = Diagnostics()
         # Seeded from disk; the header is validated against this physical
         # device first, since `vkCreatePipelineCache` is no safe place to find
@@ -414,8 +418,8 @@ end
 
 # Compact: the default walks the cycle context -> channels -> queues -> context
 # and took half an hour for one backend.
-Base.show(io::IO, ctx::VkContext) = print(io, "VkContext(", repr(ctx.device_name), ")")
-Base.show(io::IO, q::VulkanQueue{VkContext}) =
+Base.show(io::IO, ctx::LavaDevice) = print(io, "LavaDevice(", repr(ctx.device_name), ")")
+Base.show(io::IO, q::VulkanQueue{LavaDevice}) =
     print(io, "VulkanQueue(", repr(q.ctx.device_name), ", family ", q.family_index, ")")
 
 """
@@ -427,7 +431,7 @@ against the logical device, which does not exist while the context is built.
 Tests may assign a modified copy:
 `ctx.caches.caps = DeviceCaps(caps(ctx); workgrouplimit = 512)`.
 """
-function caps(ctx::VkContext)
+function caps(ctx::LavaDevice)
     c = ctx.caches.caps
     c === nothing || return c
     limits = VK.get_physical_device_properties(ctx.physical_device).limits
@@ -459,7 +463,7 @@ grows (RTX 4000 Ada: 16/16/16 at 64 invocations, 32/32/16 at 256), so padding
 grows with the workgroup. Only fp16 -> fp32 rows are kept; the query also
 returns others.
 """
-function workgroup_matrix_granularity(ctx::VkContext)
+function workgroup_matrix_granularity(ctx::LavaDevice)
     rows = NTuple{4,Int}[]
     ctx.coopmat2.workgroup_scope || return rows
     props = unwrap(VK.get_physical_device_cooperative_matrix_flexible_dimensions_properties_nv(
@@ -477,10 +481,10 @@ function workgroup_matrix_granularity(ctx::VkContext)
     return rows
 end
 
-const VK_CONTEXT_REF = Ref{Union{Nothing, VkContext}}(nothing)
+const VK_CONTEXT_REF = Ref{Union{Nothing, LavaDevice}}(nothing)
 
 """
-Every `VkContext` ever built, weakly. Julia runs `atexit` hooks before the final
+Every `LavaDevice` ever built, weakly. Julia runs `atexit` hooks before the final
 finalizer sweep; the hook in `initbackend!(::VulkanAPI)` marks every context
 here lost (`mark_all_devices_lost!`), not only the bound one, so no finalizer
 calls into a torn-down driver (a second lavapipe context segfaulted at exit).
@@ -498,7 +502,7 @@ Shutdown only: every later Vulkan call on these devices becomes a no-op.
 function mark_all_devices_lost!()
     for r in LIVE_CONTEXTS
         c = r.value
-        c isa VkContext && mark_device_lost!(c)
+        c isa LavaDevice && mark_device_lost!(c)
     end
     return nothing
 end
@@ -510,24 +514,24 @@ Bind the process-default context. Pushes no emitter features: those travel with
 the context (`ctx.features`) and its compile jobs, so a kernel for a second
 device is not shaped by the bound one.
 """
-function bind_context!(ctx::Union{Nothing, VkContext})
+function bind_context!(ctx::Union{Nothing, LavaDevice})
     VK_CONTEXT_REF[] = ctx
     return ctx
 end
-# Guards the lazy init in `vk_context`: `VkContext(; …)` is not idempotent, and
+# Guards the lazy init in `vk_context`: `LavaDevice(; …)` is not idempotent, and
 # two threads arriving together built two devices.
 const VK_CONTEXT_LOCK = ReentrantLock()
 
 """
-    device_lost(ctx::VkContext)  ->  Bool
+    device_lost(ctx::LavaDevice)  ->  Bool
 
 Whether this context's device has been marked lost.
 """
-device_lost(ctx::VkContext) = ctx.device_lost
+device_lost(ctx::LavaDevice) = ctx.device_lost
 
 """Refuse `call` on a lost or retired device: nothing on it works again, and every
 array allocated on it is invalid."""
-refuselost(ctx::VkContext, call::String) = device_lost(ctx) && throw(LavaError(call,
+refuselost(ctx::LavaDevice, call::String) = device_lost(ctx) && throw(LavaError(call,
     "the Vulkan device is lost or retired",
     "Call reset_device!() and allocate again on the device it returns, or restart Julia."))
 
@@ -537,34 +541,34 @@ refuselost(ctx::VkContext, call::String) = device_lost(ctx) && throw(LavaError(c
 Mark `ctx`'s device lost: finalizers and later callers skip Vulkan calls on it.
 Set on `ERROR_DEVICE_LOST` (`mark_if_lost!`) and on retirement of a context
 whose buffers outlive it. `reset_device!` retires the context it replaces;
-whoever builds one with `VkContext(; select)` must retire it. A context dropped
+whoever builds one with `LavaDevice(; select)` must retire it. A context dropped
 unretired hands its finalizers a device VK.jl may already have destroyed, and
 the driver crashes at the next GC.
 """
-mark_device_lost!(ctx::VkContext) = (ctx.device_lost = true; nothing)
+mark_device_lost!(ctx::LavaDevice) = (ctx.device_lost = true; nothing)
 
 """
-    vk_context() -> VkContext
+    vk_context() -> LavaDevice
 
 The process-default context, built and bound on first call. Thread-safe.
 """
 function vk_context()
     ctx = VK_CONTEXT_REF[]
-    ctx === nothing || return ctx::VkContext
+    ctx === nothing || return ctx::LavaDevice
     # Double-checked under a lock: two contexts built concurrently left buffers
     # stamped with the loser's channel, and a cross-queue wait then passed one
     # device's semaphore to the other (driver segfault).
     lock(VK_CONTEXT_LOCK)
     try
         ctx = VK_CONTEXT_REF[]
-        ctx === nothing || return ctx::VkContext
+        ctx === nothing || return ctx::LavaDevice
         # `invokelatest` so inference records no backedge from `vk_context`,
         # which every Lava operation reaches, to the constructor. Otherwise
         # invalidating the constructor (loading GLMakie does) re-infers the
         # whole package on the next GPU call (~41 s).
-        ctx = Base.invokelatest(VkContext)::VkContext
+        ctx = Base.invokelatest(LavaDevice)::LavaDevice
         bind_context!(ctx)
-        return ctx::VkContext
+        return ctx::LavaDevice
     finally
         unlock(VK_CONTEXT_LOCK)
     end
@@ -588,7 +592,7 @@ validation needs a reset, since it is fixed at `vkCreateInstance`:
     verify_gpu_av()
     reset_device!(debug = DebugConfig())
 
-For a device that is not the default, use `VkContext(; select, debug)`.
+For a device that is not the default, use `LavaDevice(; select, debug)`.
 """
 function reset_device!(; select = nothing,
                             debug::Union{Nothing,DebugConfig} = nothing)
@@ -615,7 +619,7 @@ function reset_device!(; select = nothing,
     bind_context!(nothing)
     # Built here, not by `vk_context()`'s lazy path, because `cfg` must reach
     # `vkCreateInstance`. `invokelatest` for the same backedge reason.
-    ctx = Base.invokelatest(VkContext; select, debug = cfg)::VkContext
+    ctx = Base.invokelatest(LavaDevice; select, debug = cfg)::LavaDevice
     bind_context!(ctx)
     # Logs what attached, not what was asked: a run without GPU-AV reads like
     # a clean run.
@@ -628,7 +632,7 @@ end
 
 
 """
-    VkContext(; select = nothing, debug = DebugConfig()) -> VkContext
+    LavaDevice(; select = nothing, debug = DebugConfig()) -> LavaDevice
 
 Build a device without binding it as the process default (`vk_context`,
 `reset_device!` and `defaultdevice!` bind). The caller retires it
@@ -639,10 +643,10 @@ setting; they are fixed at `vkCreateInstance`. `select` picks the physical
 device as `Mantle.selectdevice` does: `nothing` for the ranking, a name
 substring, an index into `devices(VulkanAPI())`, or a predicate over
 `DeviceInfo`. The loader enumerates the GPU and lavapipe from one instance, so
-`VkContext(select = "llvmpipe")` beside `vk_context()` gives two devices on a
+`LavaDevice(select = "llvmpipe")` beside `vk_context()` gives two devices on a
 single-GPU machine.
 """
-function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
+function LavaDevice(; select = nothing, debug::DebugConfig = DebugConfig())
     # API 1.4, for the 1.3/1.4 core features enabled below.
     app_info = VK.ApplicationInfo(
         v"0.1.0", v"0.1.0", v"1.4.0";
@@ -955,7 +959,7 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         @warn "Vulkan validation layers not found. Install vulkan-validationlayers for GPU error diagnostics."
     end
 
-    # Per device (see the `VkContext` field); assigned once the context exists.
+    # Per device (see the `LavaDevice` field); assigned once the context exists.
     cmd_barrier_fptr = VK.function_pointer(device, "vkCmdPipelineBarrier")
 
     mem_props = VK.get_physical_device_memory_properties(phys_dev)
@@ -964,7 +968,7 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     max_wg = (Int(wgc[1]), Int(wgc[2]), Int(wgc[3]))
 
     # The fixed set of (M, N, K, type) tiles a kernel may choose from.
-    CMShape = eltype(fieldtype(VkContext, :coopmat_shapes))
+    CMShape = eltype(fieldtype(LavaDevice, :coopmat_shapes))
     coopmat_shapes = CMShape[]
     if has_coopmat
         try
@@ -983,7 +987,7 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
 
     # Queue indices 0 and 1 of the primary family are the primary and compute
     # queues; `allocate_batch_queue!` hands out from 2.
-    ctx = VkContext(queue; instance, physical_device = phys_dev, device,
+    ctx = LavaDevice(queue; instance, physical_device = phys_dev, device,
         queue_family_index = qf_idx, device_name = dev_name, compute_queue,
         rt_pipeline_properties = rt_props, debug_messenger, validation,
         next_queue_index = 2, max_queue_count = n_queues, device_lost = false,
@@ -1028,7 +1032,7 @@ primary queue with its own command pool once all are taken. The context holds
 it until [`release_batch_queue!`](@ref); a dropped one stays alive with the
 device.
 """
-function allocate_batch_queue!(ctx::VkContext)
+function allocate_batch_queue!(ctx::LavaDevice)
     idx = isempty(ctx.free_queue_indices) ? ctx.next_queue_index : pop!(ctx.free_queue_indices)
     if idx < ctx.max_queue_count
         queue = VK.get_device_queue(ctx.device, ctx.queue_family_index, UInt32(idx))
@@ -1052,7 +1056,7 @@ owning thread once nothing will record on it again. Throws for the primary
 queue; a second release is a no-op.
 """
 function release_batch_queue!(bq::SubmitChannel{<:VulkanQueue})
-    ctx = ctxof(bq)
+    ctx = deviceof(bq)
     bq === ctx.default_bq &&
         throw(LavaError("release_batch_queue!", "the context's primary queue cannot be released",
                         "Only queues from `allocate_batch_queue!` can be given back."))
@@ -1080,7 +1084,7 @@ It has no in-flight work (released after flush and drain), so nothing naming it
 needs a wait.
 """
 function queue_released(bq::SubmitChannel{<:VulkanQueue})
-    ctx = ctxof(bq)
+    ctx = deviceof(bq)
     bq === ctx.default_bq && return false
     return findfirst(q -> q === bq, ctx.extra_queues) === nothing
 end
@@ -1281,7 +1285,7 @@ Turn the ring slots written since the last drain into Strings, capture hard
 validation errors in `ctx.validation.messages` and log them. Main thread only
 (it allocates and logs). Call before reading `ctx.validation.messages`.
 """
-function drain_validation_messages!(ctx::Union{Nothing,VkContext} = VK_CONTEXT_REF[])
+function drain_validation_messages!(ctx::Union{Nothing,LavaDevice} = VK_CONTEXT_REF[])
     ctx === nothing && return nothing
     r = ctx.validation
     write_idx = @inbounds r.write[1]
@@ -1357,7 +1361,7 @@ end
 
 Recent captured validation errors, after draining the ring.
 """
-get_validation_messages(ctx::Union{Nothing,VkContext} = VK_CONTEXT_REF[]) =
+get_validation_messages(ctx::Union{Nothing,LavaDevice} = VK_CONTEXT_REF[]) =
     ctx === nothing ? String[] :
         (drain_validation_messages!(ctx); copy(ctx.validation.messages))
 
@@ -1366,18 +1370,18 @@ get_validation_messages(ctx::Union{Nothing,VkContext} = VK_CONTEXT_REF[]) =
 
 Drain the ring (so errors are logged), then empty the captured list.
 """
-clear_validation_messages!(ctx::Union{Nothing,VkContext} = VK_CONTEXT_REF[]) =
+clear_validation_messages!(ctx::Union{Nothing,LavaDevice} = VK_CONTEXT_REF[]) =
     ctx === nothing ? String[] :
         (drain_validation_messages!(ctx); empty!(ctx.validation.messages))
 
 """
-    check_validation_errors!(context::String, ctx::VkContext)
+    check_validation_errors!(context::String, ctx::LavaDevice)
 
 Throw a `LavaError` listing up to five validation errors captured since the
 last check, and clear them. Call after operations that may trigger validation
 errors (shader module or pipeline creation, dispatch recording).
 """
-function check_validation_errors!(context::String, ctx::VkContext)
+function check_validation_errors!(context::String, ctx::LavaDevice)
     drain_validation_messages!(ctx)
     msgs = ctx.validation.messages
     isempty(msgs) && return
@@ -1395,15 +1399,17 @@ function check_validation_errors!(context::String, ctx::VkContext)
     ))
 end
 
-# `Mantle.waitidle` (declared in `graph/queue.jl`); the `LavaBackend` method is
-# in `array/ka_backend.jl`.
-function waitidle(ctx::VkContext)
+# `Mantle.waitidle` (declared in `graph/queue.jl`): `flush!` waits for the
+# default channel, then the device wait covers the other queues. The
+# `LavaBackend` method is in `array/ka_backend.jl`.
+function waitidle(ctx::LavaDevice)
+    flush!(ctx.default_bq)
     # Checked: a discarded Result let a lost device look idle.
     throw_if_error(ctx, "vkDeviceWaitIdle", VK.device_wait_idle(ctx.device))
     return nothing
 end
 
-supports_graphics(::VkContext) = true
+supports_graphics(::LavaDevice) = true
 
 """
     vulkan_available() -> Bool

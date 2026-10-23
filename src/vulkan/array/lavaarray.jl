@@ -37,7 +37,7 @@ function LavaArray{T,N}(::UndefInitializer, dims::NTuple{N,Int};
     # Otherwise the selector bytes are silently dropped and values read back wrong.
     Base.isbitsunion(T) &&
         throw(ArgumentError("LavaArray does not support isbits-union element types like $T: their type-selector bytes are not stored"))
-    ctx = ctxof(bq)
+    ctx = deviceof(bq)
     nbytes = checkedbytes(T,dims)
 
     # Acceleration-structure scratch needs `ctx.as_scratch_align`: over-allocate
@@ -147,7 +147,7 @@ end
 
 # Allocate on the array's own device, not the process default, so broadcast,
 # `copy` and `map` results stay on it.
-queueof(a::LavaArray) = (a.buf[].ctx::VkContext).default_bq
+queueof(a::LavaArray) = (a.buf[].ctx::LavaDevice).default_bq
 Base.similar(a::LavaArray{T,N}) where {T,N} = LavaArray{T,N}(undef, a.dims; bq = queueof(a))
 Base.similar(a::LavaArray{T}, dims::Base.Dims{N}) where {T,N} = LavaArray{T,N}(undef, dims; bq = queueof(a))
 Base.similar(a::LavaArray, ::Type{T}, dims::Base.Dims{N}) where {T,N} = LavaArray{T,N}(undef, dims; bq = queueof(a))

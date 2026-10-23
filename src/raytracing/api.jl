@@ -131,6 +131,7 @@ ordinary kernel (Vulkan ray query, Metal intersector). Ask before
 unless a backend opts in.
 """
 supports_hwtlas(::Any) = false
+supports_hwtlas(dev::Device) = supports_hwtlas(backend(dev))
 
 # No pinning verb: a submission's payload holds what its command buffers pinned
 # (`Outstanding` in `graph/submission.jl`).

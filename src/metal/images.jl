@@ -77,28 +77,36 @@ function Mantle.materialize!(::MetalDevice, t::MetalTransientImage, heap::MTL.MT
 end
 
 """
-    readback_target(dev, t, T) -> Matrix{T}
+    readbackimage(f, dev, tex, T, width, height) -> Matrix{T}
 
-Copy a placed render target to the host through a blit into a `Shared` buffer,
-since `getBytes!` refuses `Private` textures. Rows are tight (`width * sizeof(T)`).
-Waits for completion.
+Blit `tex` into a `Shared` buffer behind everything already submitted, since
+`getBytes!` refuses `Private` textures; `f(cmd)` adds to the same command buffer.
+Waits for completion and returns the texels with tight rows (`width * sizeof(T)`).
 """
-function Mantle.readback_target(dev::MetalDevice, t::MetalTransientImage{T}, ::Type) where {T}
-    tex = t.image
-    tex === nothing &&
-        error("this target has not been placed yet; readback needs a compiled plan")
-    row = t.width * sizeof(T)
-    buf = MTL.MTLBuffer(dev.dev, row * t.height; storage = Metal.SharedStorage)
-    # Behind everything already submitted; the blit is the last command.
+function readbackimage(f, dev::MetalDevice, tex, ::Type{T}, width::Int, height::Int) where {T}
+    row = width * sizeof(T)
+    buf = MTL.MTLBuffer(dev.dev, row * height; storage = Metal.SharedStorage)
     cmd = framebuffer!(dev.dev)
     MTL.MTLBlitCommandEncoder(cmd) do enc
         MTL.append_copy!(enc, buf, 0, row, 0, tex,
-                         MTL.MTLOrigin(0, 0, 0), MTL.MTLSize(t.width, t.height, 1))
+                         MTL.MTLOrigin(0, 0, 0), MTL.MTLSize(width, height, 1))
     end
+    f(cmd)
     submitwait!(cmd)
-    out = Matrix{T}(undef, t.width, t.height)
+    out = Matrix{T}(undef, width, height)
     unsafe_copyto!(pointer(out), convert(Ptr{T}, buf), length(out))
     return out
+end
+
+"""
+    readback_target(dev, t, T) -> Matrix{T}
+
+Copy a placed render target to the host ([`readbackimage`](@ref)).
+"""
+function Mantle.readback_target(dev::MetalDevice, t::MetalTransientImage{T}, ::Type) where {T}
+    t.image === nothing &&
+        error("this target has not been placed yet; readback needs a compiled plan")
+    return readbackimage(identity, dev, t.image, T, t.width, t.height)
 end
 
 """

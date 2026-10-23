@@ -13,7 +13,7 @@ const KA = KernelAbstractions
 #     baseline                                          781
 #     `Vector{Any}` for the launch-plan cache           739   immutable-with-refs
 #                                                             boxes on inline read
-#     `bq.ctx::VkContext` in `launch_plan`              275   untyped ctx made the
+#     `bq.ctx::LavaDevice` in `launch_plan`              275   untyped ctx made the
 #                                                             lookup AND its loop
 #                                                             dynamic: -464 alone
 #     function barrier on the abstract `IterPlan`       115   dynamic getfields +

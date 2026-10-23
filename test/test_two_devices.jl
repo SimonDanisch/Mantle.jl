@@ -12,7 +12,7 @@ card. A Mac has one Metal device, and there this skips.
 ## What it is for
 
 Four caches hold device-owned handles at module scope. Keying them by
-`VkContext.id` (never reused) is necessary and — as this probe demonstrated on
+`LavaDevice.id` (never reused) is necessary and — as this probe demonstrated on
 its first run — **not sufficient**. Module-scope device state is a larger
 category than the cache list, and the only way to enumerate it honestly is to
 run two devices and see what breaks.
@@ -22,7 +22,7 @@ run two devices and see what breaks.
 Each was fixed and the probe re-run, which is why the list is ordered: nothing
 below was visible until everything above it was fixed.
 
-1. **`CMD_PIPELINE_BARRIER_FPTR`** — FIXED, now `VkContext.cmd_pipeline_barrier_fptr`.
+1. **`CMD_PIPELINE_BARRIER_FPTR`** — FIXED, now `LavaDevice.cmd_pipeline_barrier_fptr`.
    A device function pointer is per device: `vkGetDeviceProcAddr` returns one
    valid only for the device asked. As a global, creating the second context
    overwrote it, and the FIRST device's command buffers were then recorded
@@ -77,7 +77,7 @@ below was visible until everything above it was fixed.
    dispatched on whichever context was global rather than on the array's own.
    The array read back as zeros and Lava's `sync_access!` guard caught it much
    later as *"buffer was last written on a VulkanBatchQueue from a DIFFERENT
-   VkContext"* — a good error a long way from its cause. All six now derive the
+   LavaDevice"* — a good error a long way from its cause. All six now derive the
    backend from the data with `KA.get_backend`.
 
    That guard existing and firing is worth noting: the library already knew this

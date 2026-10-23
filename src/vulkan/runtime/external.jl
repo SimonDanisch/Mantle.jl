@@ -16,10 +16,10 @@ mutable struct VulkanExternalImage <: ExternalImage
     height::Int
     allocation_size::Int   # importers must import exactly this many bytes
     layout_initialized::Bool
-    ctx::VkContext         # the device that owns the image and exports its memory
+    ctx::LavaDevice         # the device that owns the image and exports its memory
 end
 
-function VulkanExternalImage(ctx::VkContext, width::Integer, height::Integer;
+function VulkanExternalImage(ctx::LavaDevice, width::Integer, height::Integer;
                        format::VK.Format = VK.FORMAT_R8G8B8A8_UNORM)
     ctx.external_memory_available ||
         error("this device was created without VK_KHR_external_memory_fd support")
@@ -79,7 +79,7 @@ function Base.copyto!(img::VulkanExternalImage, a::LavaArray)
     needed = 4 * img.width * img.height
     nbytes >= needed ||
         error("array holds $nbytes bytes; image needs $needed")
-    ctx = (a.buf[].ctx)::VkContext
+    ctx = (a.buf[].ctx)::LavaDevice
     KA.synchronize(LavaBackend(ctx))  # pending kernel writes must land first
 
     managed = a.buf[]
@@ -128,7 +128,7 @@ dedicated, outside the pool, and with `mapped_ptr` the memory itself. `ptr` and
 the buffer; destroying the buffer leaves it alone.
 """
 function importhost(bq::SubmitChannel{<:VulkanQueue}, ptr::Ptr, nbytes::Integer)
-    ctx = ctxof(bq)
+    ctx = deviceof(bq)
     align = ctx.host_import_alignment
     align > 0 || error("this device was created without VK_EXT_external_memory_host")
     UInt(ptr) % align == 0 && nbytes % align == 0 || throw(ArgumentError(

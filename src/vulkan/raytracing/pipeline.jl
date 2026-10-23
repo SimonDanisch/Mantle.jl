@@ -6,7 +6,7 @@ const VK_SHADER_UNUSED_KHR = ~UInt32(0)  # 0xFFFFFFFF
     LavaRTPipeline
 
 A compiled ray-tracing pipeline with its shader binding table. Subtypes
-`CompiledRTPipeline` (`runtime/coretypes.jl`) because it holds the `VkContext`
+`CompiledRTPipeline` (`runtime/coretypes.jl`) because it holds the `LavaDevice`
 whose `DeviceCaches` store it, so the cache cannot name the concrete type.
 """
 struct LavaRTPipeline <: CompiledRTPipeline
@@ -25,7 +25,7 @@ struct LavaRTPipeline <: CompiledRTPipeline
     # Stage flags for push constants and descriptor sets
     stage_flags::VK.ShaderStageFlag
     # The context this pipeline was built against.
-    ctx::VkContext
+    ctx::LavaDevice
 end
 
 """
@@ -36,7 +36,7 @@ A ray-tracing pipeline from SPIR-V. Groups: 0 raygen, 1 miss, 2..1+N one triangl
 hit group per closest-hit, all sharing the optional any-hit. Set 0, binding 0 is
 the TLAS; the push constant is the argument buffer's device address.
 """
-function create_rt_pipeline(ctx::VkContext, raygen_spirv::Vector{UInt8}, miss_spirv::Vector{UInt8},
+function create_rt_pipeline(ctx::LavaDevice, raygen_spirv::Vector{UInt8}, miss_spirv::Vector{UInt8},
                             chit_spirvs::Vector{Vector{UInt8}};
                             anyhit_spirv::Union{Nothing,Vector{UInt8}} = nothing,
                             push_constant_size::Integer = 8)
@@ -173,7 +173,7 @@ of `create_rt_pipeline`. An instance picks its hit group with
 the handle alignment, regions start at the base alignment, and the raygen
 region's stride equals its size.
 """
-function build_sbt(ctx::VkContext, pipeline::VK.Pipeline, rt_props::RTPipelineProperties,
+function build_sbt(ctx::LavaDevice, pipeline::VK.Pipeline, rt_props::RTPipelineProperties,
                    n_hit_groups::Int)
     hsize = Int(rt_props.shader_group_handle_size)
     base = Int(rt_props.shader_group_base_alignment)

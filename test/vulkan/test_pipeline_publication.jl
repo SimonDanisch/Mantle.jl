@@ -11,7 +11,7 @@ publication_fragment(inputs) = inputs.tint
 
 function check_pipeline_publication(ctx, other=nothing)
     @testset "concurrent native pipeline publication" begin
-        dev = Mantle.lavadevice(ctx)
+        dev = ctx
         description = Mantle.GraphicsPipeline(;
             vertex=Mantle.VertexShader(publication_vertex; outputs=(tint=NTuple{4,Float32},)),
             fragment=Mantle.FragmentShader(publication_fragment),
@@ -27,7 +27,7 @@ function check_pipeline_publication(ctx, other=nothing)
         @test pipelines[1].pipeline !== warm.pipeline
         @test compile(dev).pipeline === pipelines[1].pipeline
         if other !== nothing
-            @test compile(Mantle.lavadevice(other)).pipeline !== pipelines[1].pipeline
+            @test compile(other).pipeline !== pipelines[1].pipeline
         end
 
         # Element types cannot distinguish these native attachment formats.

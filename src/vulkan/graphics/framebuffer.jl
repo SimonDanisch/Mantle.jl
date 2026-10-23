@@ -18,7 +18,7 @@ mutable struct VulkanFramebuffer <: Framebuffer
     depth_memory::Union{Nothing, VK.DeviceMemory}
     depth_view::Union{Nothing, VK.ImageView}
     depth_format::VK.Format
-    ctx::VkContext
+    ctx::LavaDevice
 end
 
 """Default usage of a framebuffer's color attachment."""
@@ -32,7 +32,7 @@ const COLOR_USAGE = VK.IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
 A 2D image with no memory bound. Bind it with `alloc_image_memory` for one of its
 own, or with `bind_image!` to place it in a shared allocation.
 """
-image_2d(ctx::VkContext, width::Integer, height::Integer, format::VK.Format,
+image_2d(ctx::LavaDevice, width::Integer, height::Integer, format::VK.Format,
          usage::VK.ImageUsageFlag; levels::Integer = 1) =
     VK.Image(ctx.device, VK.IMAGE_TYPE_2D, format,
         VK.Extent3D(UInt32(width), UInt32(height), UInt32(1)), UInt32(levels), UInt32(1),
@@ -40,7 +40,7 @@ image_2d(ctx::VkContext, width::Integer, height::Integer, format::VK.Format,
         VK.SHARING_MODE_EXCLUSIVE, UInt32[], VK.IMAGE_LAYOUT_UNDEFINED)
 
 """A 2D view of `levels` mip levels. Must be created after the image has memory bound."""
-image_view(ctx::VkContext, image::VK.Image, format::VK.Format,
+image_view(ctx::LavaDevice, image::VK.Image, format::VK.Format,
            aspect::VK.ImageAspectFlag = VK.IMAGE_ASPECT_COLOR_BIT; levels::Integer = 1) =
     VK.ImageView(ctx.device, image, VK.IMAGE_VIEW_TYPE_2D, format,
         VK.ComponentMapping(VK.COMPONENT_SWIZZLE_IDENTITY, VK.COMPONENT_SWIZZLE_IDENTITY,
@@ -55,7 +55,7 @@ An offscreen framebuffer with a color and an optional `D32_SFLOAT` depth attachm
 lowered by `vkformat` as for transient images.
 """
 function VulkanFramebuffer(width::Integer, height::Integer;
-                          ctx::VkContext,
+                          ctx::LavaDevice,
                           depth::Bool=true,
                           color_format::Union{VK.Format,Type}=VK.FORMAT_B8G8R8A8_SRGB,
                           srgb::Bool=false)
@@ -87,7 +87,7 @@ end
 What an image needs from an allocation, for choosing offsets when several
 resources share one.
 """
-function image_requirements(ctx::VkContext, image::VK.Image)
+function image_requirements(ctx::LavaDevice, image::VK.Image)
     r = VK.get_image_memory_requirements(ctx.device, image)
     (size = Int(r.size), alignment = Int(r.alignment), type_bits = r.memory_type_bits)
 end
@@ -98,7 +98,7 @@ end
 Device-local memory that can back any image whose requirements include
 `type_bits`. `type_bits` is the *intersection* over everything to be placed in it.
 """
-function device_memory(ctx::VkContext, bytes::Integer, type_bits::Integer)
+function device_memory(ctx::LavaDevice, bytes::Integer, type_bits::Integer)
     type_bits == 0 && error("no memory type satisfies every resource in this allocation")
     idx = find_memory_type(ctx, UInt32(type_bits), VK.MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
     # Always `MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`: this also backs graph arenas,
@@ -123,7 +123,7 @@ Bind an image to a byte offset in an existing allocation. Two images may share
 bytes only if their contents never have to survive each other; the caller is
 responsible for that and for transitioning the second from `UNDEFINED`.
 """
-bind_image!(ctx::VkContext, image::VK.Image, memory::VK.DeviceMemory, offset::Integer) =
+bind_image!(ctx::LavaDevice, image::VK.Image, memory::VK.DeviceMemory, offset::Integer) =
     unwrap(VK.bind_image_memory(ctx.device, image, memory, UInt64(offset)))
 
 """
@@ -132,12 +132,12 @@ bind_image!(ctx::VkContext, image::VK.Image, memory::VK.DeviceMemory, offset::In
 A `VkBuffer` with no memory bound, for placing into an allocation someone else
 owns with [`bind_buffer!`](@ref).
 """
-unbound_buffer(ctx::VkContext, bytes::Integer, usage::VK.BufferUsageFlag) =
+unbound_buffer(ctx::LavaDevice, bytes::Integer, usage::VK.BufferUsageFlag) =
     VK.Buffer(ctx.device, UInt64(max(bytes, 1)), usage,
                   VK.SHARING_MODE_EXCLUSIVE, UInt32[])
 
 """Memory requirements of `buf`, shaped like [`image_requirements`](@ref)."""
-function buffer_requirements(ctx::VkContext, buf::VK.Buffer)
+function buffer_requirements(ctx::LavaDevice, buf::VK.Buffer)
     r = VK.get_buffer_memory_requirements(ctx.device, buf)
     (size = Int(r.size), alignment = Int(r.alignment), type_bits = r.memory_type_bits)
 end
@@ -149,12 +149,12 @@ Bind a buffer to a byte offset in an existing allocation, under the rule of
 [`bind_image!`](@ref): resources may share bytes only if their contents never have
 to survive each other, which the caller guarantees.
 """
-bind_buffer!(ctx::VkContext, buf::VK.Buffer, memory::VK.DeviceMemory, offset::Integer) =
+bind_buffer!(ctx::LavaDevice, buf::VK.Buffer, memory::VK.DeviceMemory, offset::Integer) =
     throw_if_error(ctx, "vkBindBufferMemory",
                    VK.bind_buffer_memory(ctx.device, buf, memory, UInt64(offset)))
 
 """Allocate device-local memory for an image and bind it."""
-function alloc_image_memory(ctx::VkContext, image::VK.Image)
+function alloc_image_memory(ctx::LavaDevice, image::VK.Image)
     req = image_requirements(ctx, image)
     mem = device_memory(ctx, req.size, req.type_bits)
     bind_image!(ctx, image, mem, 0)
@@ -172,7 +172,7 @@ x, so an image indexed `(row, column)` needs `permutedims`.
 """
 function readback_framebuffer(fb::VulkanFramebuffer)
     bq = fb.ctx.default_bq
-    return readbackimage(lavadevice(fb.ctx), bq, eltypeof(fb.color_format), fb.width, fb.height) do mb, off
+    return readbackimage(fb.ctx, bq, eltypeof(fb.color_format), fb.width, fb.height) do mb, off
         oneshot!(bq; tag = :readback) do e
             copyattachment!(e.cmd, fb, mb.buffer, off)
             hold!(e, mb)
@@ -297,7 +297,7 @@ function readback_window(win::VulkanWindow)
 
     # Read after `acquireframe!`, which may have rebuilt the swapchain.
     w, h = size(win)
-    return readbackimage(lavadevice(ctx), bq, eltypeof(win.format), w, h) do mb, off
+    return readbackimage(ctx, bq, eltypeof(win.format), w, h) do mb, off
         frame = oneshot(bq) do e
             cmd = e.cmd
             # srcStage COLOR_ATTACHMENT_OUTPUT matches the acquire-semaphore wait

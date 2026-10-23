@@ -1,35 +1,15 @@
 # Graph, plan and pass machinery for the Vulkan backend. From Lava it uses only
 # the compiler: `lava_compile_gpu_from_job`, `LavaGPUKernel`, the SPIR-V module.
 
-"""
-    LavaDevice <: Device
-
-A Vulkan context, its default channel and the `Pool` in which every plan on the
-device reserves its transient arenas, so the pool is sized to the largest plan,
-not the sum. Transients never outlive a plan; the barrier at the head of every
-recording ([`headbarrier!`](@ref)) orders one plan's reads before the next
-plan's writes. `ctx` and `bq` are concretely typed because hot paths read them.
-"""
-struct LavaDevice <: Device
-    ctx::VkContext
-    bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
-    pool::Pool          # owned by the device
-end
-LavaDevice(ctx, bq) = LavaDevice(ctx, bq, Pool())
+# Transients never outlive a plan; the barrier at the head of every recording
+# ([`headbarrier!`](@ref)) orders one plan's reads before the next plan's writes.
 pool(d::LavaDevice) = d.pool
 
-"""
-One cached `LavaDevice` per `VkContext`. The device owns the pool, so a second
-device over one context would be a second allocator and workloads would stop
-sharing memory.
-"""
-const DEVICES = IdDict{Any,LavaDevice}()
-
 function Device(::VulkanAPI; select = nothing, debug::Union{Nothing,DebugConfig} = nothing)
-    # Without `select` or `debug`: the cached process default. Otherwise a new
-    # device that is not made the default (see `defaultdevice!`).
-    select === nothing && debug === nothing && return lavadevice(vk_context())
-    return lavadevice(VkContext(; select, debug = something(debug, DebugConfig())))
+    # Without `select` or `debug`: the process default. Otherwise a new device
+    # that is not made the default (see `defaultdevice!`).
+    select === nothing && debug === nothing && return vk_context()
+    return LavaDevice(; select, debug = something(debug, DebugConfig()))
 end
 
 """
@@ -38,20 +18,19 @@ end
 Make `d` the process default for `Device(VulkanAPI())`, `LavaBackend()` and
 `defaultbackend()`. The previous default stays alive with its arrays and backends.
 """
-defaultdevice!(d::LavaDevice) = (bind_context!(d.ctx); d)
+defaultdevice!(d::LavaDevice) = (bind_context!(d); d)
 
 """
     Device(backend::LavaBackend)
 
-The cached device of the backend's own context, so a KA workload holding only
-a `LavaBackend` (such as `DNNKernels`) shares that device's pool.
+The backend's own device, so a KA workload holding only a `LavaBackend` (such
+as `DNNKernels`) shares that device's pool.
 """
-Device(b::LavaBackend) = lavadevice(vk_context(b))
+Device(b::LavaBackend) = vk_context(b)
 
-# Device and backend forms of the context's queue and build verbs.
-allocate_batch_queue!(d::LavaDevice) = allocate_batch_queue!(d.ctx)
+# Backend forms of the device's queue and build verbs.
 allocate_batch_queue!(b::LavaBackend) = allocate_batch_queue!(vk_context(b))
-build_accel!(f, d::LavaDevice) = build_accel!(f, d.bq)
+build_accel!(f, d::LavaDevice) = build_accel!(f, d.default_bq)
 build_accel!(f, b::LavaBackend) = build_accel!(f, b.dispatch_bq)
 
 
@@ -63,7 +42,7 @@ device-local heaps, which excludes what other processes hold. Without the
 extension it is the heap size, an upper bound.
 """
 function capacity(dev::LavaDevice)
-    heaps = probe_device_memory_budget(dev.ctx)
+    heaps = probe_device_memory_budget(dev)
     total = 0
     for h in heaps
         h.device_local || continue
@@ -74,65 +53,60 @@ end
 
 """The KernelAbstractions backend pinned to this device's channel, for kernels
 outside the graph."""
-backend(d::LavaDevice) = LavaBackend(d.bq)
+backend(d::LavaDevice) = LavaBackend(d.default_bq)
 
 """The KernelAbstractions backend that launches on `bq`, a channel from
 `allocate_batch_queue!` or the device's own. Core's `crosswaits!` orders buffers
 shared between channels with timeline-semaphore waits."""
 backend(bq::SubmitChannel{<:VulkanQueue}) = LavaBackend(bq)
 
-"""What this device can do, as KernelInterface's `DeviceCaps`."""
-caps(dev::LavaDevice) = caps(dev.ctx)
-videodecodes(dev::LavaDevice) = videodecodes(dev.ctx)
 h264decoder(dev::LavaDevice, paramnals::AbstractVector{UInt8}; kw...) =
-    VideoDecode.H264Decoder(dev.ctx, paramnals; kw...)
+    VideoDecode.H264Decoder(dev, paramnals; kw...)
 supports_float64(::LavaDevice) = true
-supports_int64_atomics(dev::LavaDevice) = supports_int64_atomics(dev.ctx)
-supports_hwtlas(dev::LavaDevice) = dev.ctx.ray_query_available
+supports_hwtlas(dev::LavaDevice) = dev.ray_query_available
 
-# Lifecycle verbs (`runtime/lifecycle.jl`) over the context's validation ring,
+# Lifecycle verbs (`runtime/lifecycle.jl`) over the device's validation ring,
 # submission counter and lost flag.
 
-validating(dev::LavaDevice) = dev.ctx.validating
+validating(dev::LavaDevice) = dev.validating
 
 validationmessages!(dev::LavaDevice) =
-    (msgs = get_validation_messages(dev.ctx); empty!(dev.ctx.validation.messages); msgs)
+    (msgs = get_validation_messages(dev); empty!(dev.validation.messages); msgs)
 
-# Counts every `vkQueueSubmit2` on any of the context's queues.
-submissions(dev::LavaDevice) = dev.ctx.diag.flush_counter[]
+# Counts every `vkQueueSubmit2` on any of the device's queues.
+submissions(dev::LavaDevice) = dev.diag.flush_counter[]
 
 # Retirement is the lost flag, which `vk_free!` and the other finalizers check
 # (see `mark_device_lost!`).
-retire!(dev::LavaDevice) = mark_device_lost!(dev.ctx)
-retired(dev::LavaDevice) = device_lost(dev.ctx)
+retire!(dev::LavaDevice) = mark_device_lost!(dev)
+retired(dev::LavaDevice) = device_lost(dev)
 
 """
-    reset_device!(dev::LavaDevice; debug = dev.ctx.debug) -> LavaDevice
+    reset_device!(dev::LavaDevice; debug = dev.debug) -> LavaDevice
 
 Retire `dev` (save its pipeline cache, release its pool, set the lost flag) and
 build a device on the same physical device. If `dev` is the process default, the
 new device becomes the default.
 """
-function reset_device!(dev::LavaDevice; debug::DebugConfig = dev.ctx.debug)
-    ctx = dev.ctx
+function reset_device!(dev::LavaDevice; debug::DebugConfig = dev.debug)
     # `select` takes the enumeration index; a new instance enumerates in the
     # same order.
-    select = findfirst(pd -> pd.vks == ctx.physical_device.vks,
-                       unwrap(VK.enumerate_physical_devices(ctx.instance)))
-    if VK_CONTEXT_REF[] === ctx
+    select = findfirst(pd -> pd.vks == dev.physical_device.vks,
+                       unwrap(VK.enumerate_physical_devices(dev.instance)))
+    if VK_CONTEXT_REF[] === dev
         reset_device!(; select, debug)
-        return lavadevice(vk_context())
+        return vk_context()
     end
-    save_pipeline_cache!(ctx)
-    destroy_pool!(ctx)
-    mark_device_lost!(ctx)
-    return lavadevice(Base.invokelatest(VkContext; select, debug)::VkContext)
+    save_pipeline_cache!(dev)
+    destroy_pool!(dev)
+    mark_device_lost!(dev)
+    return Base.invokelatest(LavaDevice; select, debug)::LavaDevice
 end
 
 # Bypasses the pool and returns `nothing` on refusal; `try_vk_alloc` discards the
 # refused `vkCreateBuffer`'s validation messages.
 function tryallocate(dev::LavaDevice, ::Type{T}, dims::Dims{N}) where {T,N}
-    buf = try_vk_alloc(dev.bq, max(checkedbytes(T,dims),16))
+    buf = try_vk_alloc(dev.default_bq, max(checkedbytes(T,dims),16))
     buf isa AllocFailure && return nothing
     return LavaArray{T,N}(GPUArrays.DataRef(vk_free!, buf), dims)
 end
@@ -154,7 +128,7 @@ extrausage(::Type{Predicate}) = UInt32(VK.BUFFER_USAGE_CONDITIONAL_RENDERING_BIT
 
 # Conditional rendering is optional; without it `repeat!` must refuse the graph
 # rather than run every iteration.
-supportspredicate(d::LavaDevice) = (d.ctx::VkContext).conditional_rendering_available
+supportspredicate(d::LavaDevice) = d.conditional_rendering_available
 
 # The kernel cache is Lava's; forwarded so callers need not name Lava.
 kernelcompiles(::LavaDevice) = compile_stats()
@@ -164,26 +138,23 @@ bufferusage(::LavaDevice, ::Type{T}) where {T} = extrausage(T)
 # Vulkan index buffers need `INDEX_BUFFER_BIT` at allocation; core's default, a
 # plain `Buffer`, suffices for Metal.
 Mantle.indexbuffer(dev::LavaDevice, indices::AbstractVector{UInt32}) =
-    alloc_index_buffer(dev.bq, indices)
+    alloc_index_buffer(dev.default_bq, indices)
 
 rawalloc(dev::LavaDevice, ::Persistent, bytes::Int, usage) =
     rawalloc(dev, Buffers(), bytes, usage)
 constraintof(::LavaDevice, ::Persistent, ts) = UInt32(0)
 
-devicename(d::LavaDevice) = d.ctx.device_name
+devicename(d::LavaDevice) = d.device_name
 
 # The timeline value after which a region retired now is free: the newest
 # submission, since nothing is recorded and left unsubmitted.
-fence(d::LavaDevice) = driver(d.bq).next_timeline
-# `flush!` waits for this device's channel, then the context wait covers its
-# other queues.
-waitidle(d::LavaDevice) = (flush!(d.bq); waitidle(d.ctx::VkContext))
+fence(d::LavaDevice) = driver(d.default_bq).next_timeline
 
 # The one completion predicate: `Pool` and plan argument memory ask the device
 # rather than compare raw counters.
 passed(bq::SubmitChannel{<:VulkanQueue}, v) = query_timeline(bq) >= v
 
-passed(d::LavaDevice, f) = passed(d.bq, f)
+passed(d::LavaDevice, f) = passed(d.default_bq, f)
 
 """
     waitfor(d::LavaDevice, f) -> Bool
@@ -193,9 +164,9 @@ submission, which nothing will signal; core's `waitfor!` raises the error.
 """
 function waitfor(d::LavaDevice, f)
     passed(d, f) && return true
-    f > driver(d.bq).next_timeline && return false
-    wait_timeline!(d.bq, UInt64(f))
-    checkexceptions!(d.ctx)
+    f > driver(d.default_bq).next_timeline && return false
+    wait_timeline!(d.default_bq, UInt64(f))
+    checkexceptions!(d)
     return true
 end
 
@@ -284,7 +255,7 @@ end
 
 function makeimage(dev::LavaDevice, ::Type{T}, width::Int, height::Int,
                    srgb::Bool, usage::VK.ImageUsageFlag, source) where {T}
-    ctx = dev.ctx
+    ctx = dev
     fmt = vkformat(VulkanAPI(), T; srgb)
     checkusage(ctx, fmt, usage)
     img = image_2d(ctx, width, height, fmt, usage)
@@ -294,7 +265,7 @@ function makeimage(dev::LavaDevice, ::Type{T}, width::Int, height::Int,
 end
 
 function remakeimage!(dev::LavaDevice, t::VulkanTransientImage)
-    ctx = dev.ctx
+    ctx = dev
     t.image = image_2d(ctx, t.width, t.height, t.format, t.usage)
     t.req = image_requirements(ctx, t.image)
     return t
@@ -495,7 +466,7 @@ One arena buffer with its own memory, mapped once if host-visible and with a
 device address if kernels need one. The core block owns reclamation.
 """
 function rawalloc(dev::LavaDevice, kind::Union{Buffers,Unified,Readback}, bytes::Int, usage)
-    ctx = dev.ctx::VkContext
+    ctx = dev
     cfg = arenabufferconfig(kind)
     u = VK.BufferUsageFlag(usage) | cfg.usage |
         VK.BUFFER_USAGE_TRANSFER_SRC_BIT | VK.BUFFER_USAGE_TRANSFER_DST_BIT
@@ -512,7 +483,7 @@ function rawalloc(dev::LavaDevice, kind::Union{Buffers,Unified,Readback}, bytes:
 end
 
 rawalloc(dev::LavaDevice, ::Images, bytes::Int, bits) =
-    device_memory(dev.ctx, max(bytes,1), bits)
+    device_memory(dev, max(bytes,1), bits)
 
 constraintof(::LavaDevice, ::Unified, ts) = UInt32(0)
 mergeconstraints(::LavaDevice, ::Unified, a::Integer, b::Integer) = a | b
@@ -574,8 +545,8 @@ function materialize!(dev::LavaDevice, t::VulkanTransientImage{T}, slab, offset)
     t.memory === nothing || remakeimage!(dev, t)
     t.memory = slab                       # the image outlives the call; the slab must too
     # The graph's device, never the process default.
-    bind_image!(dev.ctx, t.image, slab, offset)
-    t.view = image_view(dev.ctx, t.image, t.format, aspect(T))
+    bind_image!(dev, t.image, slab, offset)
+    t.view = image_view(dev, t.image, t.format, aspect(T))
 end
 
 """
@@ -586,9 +557,9 @@ device-local heap because NVIDIA reports no limit.
 """
 function maxalloc(dev::LavaDevice)
     props = VK.get_physical_device_properties_2(
-        dev.ctx.physical_device, VK.PhysicalDeviceMaintenance3Properties)
+        dev.physical_device, VK.PhysicalDeviceMaintenance3Properties)
     m3 = props.next::VK.PhysicalDeviceMaintenance3Properties
-    heap = maximum(h -> h.device_local ? h.size : 0, probe_device_memory_budget(dev.ctx))
+    heap = maximum(h -> h.device_local ? h.size : 0, probe_device_memory_budget(dev))
     return Int(min(m3.max_memory_allocation_size, UInt64(heap)))
 end
 
@@ -646,15 +617,15 @@ function compile_dispatch(c::Compile{LavaDevice}, d::Dispatch, argoff::Int, indi
         return kicompile_dispatch(c, dev, d, argoff, indirect)
     obj = kernelfor(d, dev)
     raw = rawargs(d.args)
-    args = devargs(adaptor(dev.bq), raw)
+    args = devargs(adaptor(dev.default_bq), raw)
     nd = dispatchrange(d.ndrange)
     # `callgroup`: `nothing` when `kernelfor` baked the group into the kernel type
     # (passing it again keys a duplicate plan), the group for a `DynamicSize` kernel.
     wgs = callgroup(obj, d.group)
-    iter = get_or_build_iter_plan(obj, nd, wgs, dev.ctx)
+    iter = get_or_build_iter_plan(obj, nd, wgs, dev)
     tlas = find_tlas_in_args(raw)
     all_args = (obj.f, iter.ka_ctx, args...)
-    launch = launch_plan(dev.bq, obj.f, all_args, iter.ws_3d, tlas !== nothing)
+    launch = launch_plan(dev.default_bq, obj.f, all_args, iter.ws_3d, tlas !== nothing)
     CompiledDispatch(launch, iter, nd, obj, wgs, obj.f, d.args, d.ndrange,
                      tlas !== nothing, argoff, launch.total_size, indirect)
 end
@@ -671,14 +642,14 @@ function kicompile_dispatch(c::Compile{LavaDevice}, dev::LavaDevice, d::Dispatch
                             argoff::Int, indirect::Int)
     be = backend(dev)
     raw = rawargs(d.args)
-    args = devargs(adaptor(dev.bq), raw)
+    args = devargs(adaptor(dev.default_bq), raw)
     nd = dispatchrange(d.ndrange)
     kern = kikernel(d.kernel, dev, args)
     wg, blocks = ki_launch_extents(kern, nd, d.group)
-    iter = IterPlan(nothing, pad_to_3d(dev.ctx, blocks), wg, prod(blocks))
+    iter = IterPlan(nothing, pad_to_3d(dev, blocks), wg, prod(blocks))
     tlas = find_tlas_in_args(raw)
     all_args = (nothing, args...)
-    launch = launch_plan(dev.bq, d.kernel, all_args, iter.ws_3d, tlas !== nothing)
+    launch = launch_plan(dev.default_bq, d.kernel, all_args, iter.ws_3d, tlas !== nothing)
     CompiledDispatch(launch, iter, nd, kern, nothing, d.kernel, d.args, d.ndrange,
                      tlas !== nothing, argoff, launch.total_size, indirect)
 end
@@ -718,7 +689,7 @@ binding table, which is not allowed while recording.
 function compile_dispatch(c::Compile{LavaDevice}, t::Trace, argoff::Int, indirect::Int)
     dev = c.graph.dev
     raw = rawargs(t.args)
-    vk_pipeline, raygen, offsets, byval = rt_compiled_for(dev.bq, t.pipeline, raw)
+    vk_pipeline, raygen, offsets, byval = rt_compiled_for(dev.default_bq, t.pipeline, raw)
     argbytes = raygen.push_info.arg_buffer_size
     total = argbytes + compute_inline_extra_from_byval(byval)
     compiled = VulkanTracePipeline(vk_pipeline, t.pipeline, offsets, byval, argbytes)
@@ -791,7 +762,7 @@ function collect!(prof::Profiler, dev::LavaDevice)
     # Core sets `pending` per submission, not per emission: a recording emits its
     # timestamps once but writes them every run.
     prof.pending || return prof
-    ctx = dev.ctx
+    ctx = dev
     # Two words per slot: the value and whether it is there yet.
     raw = Vector{UInt64}(undef, 2 * prof.nslots)
     ok = GC.@preserve raw begin
@@ -1035,13 +1006,13 @@ devicearray(b::LavaBackend, data::AbstractArray) = LavaArray(data; bq = b.dispat
 
 # The plan's timestamp profiler; core's `Plan` also accepts `nothing`.
 makeprofiler(dev::LavaDevice, passes, profile::Bool) =
-    profile ? Profiler(dev.ctx, passes) : nothing
+    profile ? Profiler(dev, passes) : nothing
 # Asked once per plan: with `timestampPeriod = 0` there are no usable
 # timestamps and building a profiler would throw.
 timestamps(dev::LavaDevice) =
-    VK.get_physical_device_properties(dev.ctx.physical_device).limits.timestamp_period > 0
+    VK.get_physical_device_properties(dev.physical_device).limits.timestamp_period > 0
 
-batchqueue(d::LavaDevice) = d.bq
+batchqueue(d::LavaDevice) = d.default_bq
 
 
 """
@@ -1051,7 +1022,7 @@ A command buffer of the plan's own for the recording walk, packing into the
 plan's argument memory. `range` is ignored: a Vulkan command buffer grows.
 """
 openrecording(dev::LavaDevice, pl::Plan, ::AbstractUnitRange) =
-    Emitter(recording!(dev.bq), pl.args)
+    Emitter(recording!(dev.default_bq), pl.args)
 
 # `runscalls` stays `false` (core's default): a host call would run once at
 # record time instead of on every replay, and in an unrecorded walk it would
@@ -1128,7 +1099,7 @@ function openrun(dev::LavaDevice, pl::Plan)
             "run!: the frame's image was not acquired; `beforeframe!` acquires it before " *
             "the plan is refit, and `execute!` records against that image"))
     end
-    return Emitter(openoneshot(dev.bq), pl.args)
+    return Emitter(openoneshot(dev.default_bq), pl.args)
 end
 
 """
@@ -1137,7 +1108,7 @@ a windowed frame's one-shot with the swapchain semaphores and frame fence, then
 the present.
 """
 function closerun!(dev::LavaDevice, pl::Plan, e::Union{Nothing,Emitter})
-    bq = dev.bq
+    bq = dev.default_bq
     surfaces = pl.graph.surfaces
     if !isempty(surfaces)
         win = only(surfaces).win
@@ -1196,10 +1167,10 @@ Present the acquired image of a frame nothing drew into, transitioning it from
 an image's layout, so the two cases need separate paths.
 """
 function present_frame!(dev::LavaDevice, win::VulkanWindow)
-    o = oneshot(dev.bq) do e
+    o = oneshot(dev.default_bq) do e
         presentuntouched!(e, win)
     end
-    return submit_and_present!(dev.bq, win, o)
+    return submit_and_present!(dev.default_bq, win, o)
 end
 
 """Present the acquired image of a failed frame untouched, through the same
@@ -1208,11 +1179,11 @@ paired. A no-op if nothing is acquired or the device is lost."""
 function abandonframe!(dev::LavaDevice, pl::Plan)
     for s in pl.graph.surfaces
         win = s.win
-        (win.acquired && !device_lost(dev.ctx)) || continue
-        o = oneshot(dev.bq) do e
+        (win.acquired && !device_lost(dev)) || continue
+        o = oneshot(dev.default_bq) do e
             presentuntouched!(e, win)
         end
-        submit_and_present!(dev.bq, win, o)
+        submit_and_present!(dev.default_bq, win, o)
     end
     return nothing
 end

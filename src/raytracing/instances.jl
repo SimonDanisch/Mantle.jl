@@ -31,3 +31,31 @@ function update_instance_records_kernel!(records, transforms)
     @inbounds records[i] = Raycore.InstanceRecord(transforms[i], old.id, old.mask)
     return nothing
 end
+
+"""
+    instancerecord(::Type{R}, record, geometry, keep) -> R
+
+The driver's instance record `R` for one portable `record`, naming the batch's
+`geometry` (a backend-chosen isbits value) with the record's mask ANDed with
+`keep`. Each backend implements it for its record type.
+"""
+function instancerecord end
+
+"""
+    instances_kernel!(native, shading, records, offset, n, geometry, keep)
+
+One batch's instances into the two arrays a build reads: `shading[offset + i] =
+records[i]`, which hits read transforms from, and `native[offset + i]`, the
+driver record from [`instancerecord`](@ref). `keep` is 0 for a hidden batch,
+else `0xff`.
+"""
+function instances_kernel!(native, shading, records, offset::Int32, n::Int32,
+                           geometry, keep::UInt32)
+    i = KI.get_global_id(Int32).x
+    i <= n || return nothing   # the launch is whole workgroups
+    @inbounds r = records[i]
+    j = offset + i
+    @inbounds shading[j] = r
+    @inbounds native[j] = instancerecord(eltype(native), r, geometry, keep)
+    return nothing
+end

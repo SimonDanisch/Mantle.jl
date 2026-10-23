@@ -20,7 +20,7 @@ function ensure_compiled_with_shader!(pipeline::GraphicsPipeline, vert_fn, frag_
                               color_format=VK.FORMAT_B8G8R8A8_SRGB,
                               depth_format=VK.FORMAT_UNDEFINED,
                               descriptor_set_layout=nothing,
-                              ctx::VkContext)
+                              ctx::LavaDevice)
     vert = get_or_compile_gfx(vert_fn, tt_vertex, :vertex)
     frag = get_or_compile_gfx(frag_fn, tt_fragment, :fragment)
 
@@ -62,7 +62,7 @@ function ensure_compiled_with_shader!(pipeline::MeshPipeline, mesh_fn, frag_fn, 
                               color_format=VK.FORMAT_B8G8R8A8_SRGB,
                               depth_format=VK.FORMAT_UNDEFINED,
                               descriptor_set_layout=nothing,
-                              ctx::VkContext)
+                              ctx::LavaDevice)
     pipeline.object === nothing || throw(ArgumentError(
         "ensure_compiled!: this pipeline has an object stage, and the Vulkan " *
         "backend dispatches its mesh threadgroups from the host. The task stage " *

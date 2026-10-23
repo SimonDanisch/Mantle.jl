@@ -15,6 +15,6 @@ function check_tlas_mutation_allocations(ctx)
         records = Array(Raycore.instance_buffer(t, h))
         @test getproperty.(records, :id) == UInt32[17,29]
         @test getproperty.(records, :mask) == UInt32[0x42,0x42]
-        @test isempty(Mantle.validationmessages!(Mantle.lavadevice(ctx)))
+        @test isempty(Mantle.validationmessages!(ctx))
     end
 end

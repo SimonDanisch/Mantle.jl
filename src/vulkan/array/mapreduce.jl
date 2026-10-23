@@ -34,7 +34,7 @@ The host-mapped one-cell buffer `vk_reduce_sum` writes into, allocated once
 per context on `ctx`'s queue and stored in `ctx.caches`, so its `mapped_ptr`
 lives as long as `ctx`. Allocating per call dominated small sums.
 """
-@inline function reduce_scratch(ctx::VkContext)
+@inline function reduce_scratch(ctx::LavaDevice)
     buf = ctx.caches.reduce_scratch
     buf === nothing || return buf::LavaArray{Float32,1}
     buf = LavaArray{Float32}(undef, (1,); unified=true, bq=ctx.default_bq)
