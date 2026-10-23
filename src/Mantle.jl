@@ -97,6 +97,7 @@ include("sync/usage.jl")      # ResourceKind, which backend.jl dispatches on
 include("sync/backend.jl")
 include("sync/transition.jl")
 include("runtime/backends.jl")
+include("runtime/hostwait.jl")   # every host wait on the device; backends call it
 include("runtime/cache.jl")
 include("runtime/backendhooks.jl")  # declared here, answered in vulkan/ or metal/
 include("runtime/format.jl")

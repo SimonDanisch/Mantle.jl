@@ -14,20 +14,15 @@
 # run sealed and blocks on the timeline, so the measurement covers the full
 # steady-state submission cycle, not just the seal.
 #
-# Everything measured lives inside `cycle`/`measure` — locals, not globals —
-# because a non-const global read boxes its way into the count and a fresh
-# world age recompiles into it too.
-#
-# Counted by the allocation profiler's STACKS, not by `@allocated`. `@allocated`
-# reads the process-wide counter, and `waitfor!` waits: whatever else runs during
-# that wait is counted as the run's. Inside a bt session that is its own timer task,
-# 112 bytes every ~250 ms, which failed this test at 1.1-1.7 bytes per run while
-# the profiler recorded no allocation from the run at all. Which allocations are the
-# run's is `byrun`'s question.
+# Counted by `allocations_per_run` (`runallocations.jl`), which says why it counts
+# the allocation profiler's stacks rather than `@allocated`.
 
 using Test, Mantle, Profile
 import KernelAbstractions as KA
 include(joinpath(@__DIR__, "testbackend.jl"))
+const M = Mantle
+include(joinpath(@__DIR__, "spinwork.jl"))
+include(joinpath(@__DIR__, "runallocations.jl"))
 
 KA.@kernel function _allocfree_step!(a)
     i = KA.@index(Global)
@@ -43,51 +38,6 @@ function _allocfree_plan(dev, n; budget)
     return pl, a
 end
 
-function _allocfree_measure(pl)
-    cycle() = (Mantle.run!(pl); Mantle.waitfor!(pl))
-    # Warm: compile the path, grow every pool and vector to steady state.
-    for _ in 1:50
-        cycle()
-    end
-    GC.gc()
-    for _ in 1:50
-        cycle()
-    end
-    Profile.Allocs.clear()
-    Profile.Allocs.@profile sample_rate = 1 for _ in 1:200
-        cycle()
-    end
-    ours = filter(byrun, Profile.Allocs.fetch().allocs)
-    # Whose, when there is one: the stack is the whole point of counting this way.
-    for a in first(ours, 3)
-        @info "an allocation by the run" a.type a.size stack = Text(join(first(a.stacktrace, 24), "\n"))
-    end
-    return sum(a -> a.size, ours; init = 0) / 200
-end
-
-"""
-Whether an allocation was made by the code under test: walking out from the
-allocation, a frame in the SOURCE of a package a run goes through (`src/` or `lib/`,
-so not this test file) comes before any frame of the event loop.
-
-The event loop is the line between the run and everything else that happens while it
-waits. A wait yields, and the scheduler's `process_events` runs whatever libuv has
-pending on the waiting task's stack — a bt session's timer callback looks up its
-`cfunction` there, 32 + 24 + 24 bytes under the run's own `poll_completed`. Those
-callbacks belong to whoever registered them.
-"""
-function byrun(a)
-    for f in a.stacktrace
-        f.func in EVENT_LOOP && return false
-        occursin(RUN_PACKAGES, string(f.file)) && return true
-    end
-    return false
-end
-
-const EVENT_LOOP = (:uv_run, :ijl_process_events, :process_events)
-
-const RUN_PACKAGES = r"/(Mantle|Metal|Lava|ObjectiveC|KernelAbstractions|KernelInterface|GPUArrays|Vulkan)/([^/]+/)?(src|lib)/"
-
 @testset "run! of a recorded plan allocates nothing" begin
     dev = Mantle.Device(TESTBACKEND)
     # `budget = Inf` is recorded whole and never measures; the device's budget
@@ -95,7 +45,7 @@ const RUN_PACKAGES = r"/(Mantle|Metal|Lava|ObjectiveC|KernelAbstractions|KernelI
     # state after that has to be just as free.
     for budget in (Inf, Mantle.submissionbudget(dev))
         pl, a = _allocfree_plan(dev, 256; budget)
-        per_run = _allocfree_measure(pl)
+        per_run = allocations_per_run(pl)
         # …and the run still ran: 300 cycles of +1 from 0.
         @test all(==(300f0), Array(Mantle.storage(a)))
         @test per_run == 0
@@ -122,10 +72,22 @@ end
 @testset "run! of a recorded loop allocates nothing" begin
     dev = Mantle.Device(TESTBACKEND)
     pl, a = _allocfree_loopplan(dev, 256, 5)
-    per_run = _allocfree_measure(pl)
+    per_run = allocations_per_run(pl)
     @test all(==(1500f0), Array(Mantle.storage(a)))
     @test length(pl.recording.batches) == 1
     @test per_run == 0
+    Mantle.free!(pl)
+end
+
+# The same cycle with GPU work that outlasts the wait's poll, so every `waitfor!` hands
+# its wait to a worker thread (`Mantle.hostwait`), and handing it over has to be as free.
+# The dispatches above are short enough that a wait reaches a worker only now and then:
+# 2 waits in 200 did on an RTX 4000, and their 308 bytes each failed the test above at
+# 3 bytes per run, while a machine that polls a little longer would have passed it.
+@testset "run! of a recorded plan allocates nothing when its wait reaches a worker" begin
+    dev = Mantle.Device(TESTBACKEND)
+    pl = spinplan(dev, spinsteps(dev, 0.01))
+    @test allocations_per_run(pl) == 0
     Mantle.free!(pl)
 end
 

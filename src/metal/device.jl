@@ -753,15 +753,33 @@ function waitfor(q::MTL4Queue, f)
     target = UInt64(f) > q.next && !quiet(q) ? flushlegacy!(q) : min(UInt64(f), q.next)
     # Bounded waits in a loop so a failed submission is reported, not waited on
     # forever. Not a timeout: healthy work is waited for as long as it takes.
-    while !MTL.waitUntilSignaledValue(q.event, target, UInt64(1000))
+    w = EventWait(Base.unsafe_convert(id{MTL.MTLSharedEvent}, q.event), target, UInt64(1000))
+    while true
+        r = hostwait(blockon, w -> q.event.signaledValue >= w.target, w)
+        (r === nothing || something(r)) && return true
         why = MTL.failure(q.feedback)
-        why === nothing && continue
-        error("Mantle: a Metal 4 submission failed, so the timeline stopped at " *
-              "$(q.event.signaledValue) and value $target will never arrive. " *
-              "The driver says: $why")
+        why === nothing || error("Mantle: a Metal 4 submission failed, so the timeline " *
+            "stopped at $(q.event.signaledValue) and value $target will never arrive. " *
+            "The driver says: $why")
     end
-    return true
 end
+
+"""
+One bounded wait for a Metal 4 queue's shared event to reach `target`, as a worker
+thread performs it (`hostwait`): `true` once it did, `false` after `timeout`
+milliseconds. The event by handle, so the wait is a bits type and handing it over
+boxes nothing; the queue, which keeps the event alive, stays with the waiting task,
+and so does the check for a failed submission.
+"""
+struct EventWait
+    event::id{MTL.MTLSharedEvent}
+    target::UInt64
+    timeout::UInt64
+end
+
+# On the worker; an `@objc` call blocks GC-safely.
+blockon(w::EventWait) = @objc [w.event::id{MTL.MTLSharedEvent} waitUntilSignaledValue:w.target::UInt64
+                                                                  timeoutMS:w.timeout::UInt64]::Bool
 
 """
     ownflush!(dev, own::Bool)

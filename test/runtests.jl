@@ -905,6 +905,7 @@ foreachbackend(joinpath(@__DIR__, "test_trace_hwtlas.jl"))
 foreachbackend(joinpath(@__DIR__, "test_trace_hit_record.jl"))
 foreachbackend(joinpath(@__DIR__, "test_trace_procedural.jl"))
 foreachbackend(joinpath(@__DIR__, "test_recorded_plan_runs.jl"))
+foreachbackend(joinpath(@__DIR__, "test_hostwait.jl"))
 foreachbackend(joinpath(@__DIR__, "test_pool_on_device.jl"))
 foreachbackend(joinpath(@__DIR__, "test_stored_device_array.jl"))
 
@@ -994,7 +995,8 @@ global METAL_TESTS = joinpath(@__DIR__, "metal")
 
 if _METAL_OK
     @testset "Metal backend" begin
-        for f in ("test_kernelinterface_metal.jl", "test_hwtlas_memory_metal.jl")
+        for f in ("test_kernelinterface_metal.jl", "test_hwtlas_memory_metal.jl",
+                  "test_mtl4_hostwait.jl")
             @testset "$f" begin
                 include(joinpath(METAL_TESTS, f))
             end

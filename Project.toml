@@ -14,6 +14,7 @@ GLFW = "f7f18e0c-5ee9-5ccd-a5bf-e8befd85ed98"
 GPUArrays = "0c68f7d7-f131-5f86-a1c3-88cf8149b2d7"
 GPUArraysCore = "46192b85-c4d5-4398-a991-12ede77f4527"
 GPUCompiler = "61eb1bfa-7361-4325-ad38-22787b887f55"
+GPUToolbox = "096a3bc2-3ced-46d0-87f4-dd12716f4bfc"
 GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 KernelInterface = "4ee993da-d684-4d17-a7dd-4e58e78d92bf"
@@ -43,6 +44,7 @@ Raycore = {url = "https://github.com/JuliaGeometry/Raycore.jl", rev = "sd/with-t
 # KernelInterface needs the local matrix-vocabulary branch until registered;
 # develop KernelAbstractions/lib/KernelInterface and Lava locally.
 GPUCompiler = "1, 2"
+GPUToolbox = "3.3"
 KernelInterface = "0.4"
 SPIRV_LLVM_Backend_jll = "21.1.4, 22, 23"
 StaticArrays = "1.9.17"
