@@ -966,7 +966,9 @@ else
             @eval Main MANTLE_TEST_BACKEND = \$(only(found))
             include($(repr(joinpath(@__DIR__, wf))))"""
         cmd = `$(Base.julia_cmd()) --project=$(Base.active_project()) -e $child`
-        proc = run(pipeline(cmd; stdout = log, stderr = log); wait = false)
+        # `append`: both streams name one file, and opened twice without it each
+        # writes from offset 0 over the other, so the log read on failure was garbled.
+        proc = run(pipeline(cmd; stdout = log, stderr = log, append = true); wait = false)
         deadline = time() + 600
         while process_running(proc) && time() < deadline
             sleep(1)
