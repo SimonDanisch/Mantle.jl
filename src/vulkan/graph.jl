@@ -15,23 +15,12 @@ end
 """
     defaultdevice!(d::LavaDevice) -> d
 
-Make `d` the process default for `Device(VulkanAPI())`, `LavaBackend()` and
-`defaultbackend()`. The previous default stays alive with its arrays and backends.
+Make `d` the process default for `Device(VulkanAPI())` and `defaultbackend()`.
+The previous default stays alive with its arrays.
 """
 defaultdevice!(d::LavaDevice) = (bind_context!(d); d)
 
-"""
-    Device(backend::LavaBackend)
-
-The backend's own device, so a KA workload holding only a `LavaBackend` (such
-as `DNNKernels`) shares that device's pool.
-"""
-Device(b::LavaBackend) = vk_context(b)
-
-# Backend forms of the device's queue and build verbs.
-allocate_batch_queue!(b::LavaBackend) = allocate_batch_queue!(vk_context(b))
 build_accel!(f, d::LavaDevice) = build_accel!(f, d.default_bq)
-build_accel!(f, b::LavaBackend) = build_accel!(f, b.dispatch_bq)
 
 
 """
@@ -51,14 +40,10 @@ function capacity(dev::LavaDevice)
     total
 end
 
-"""The KernelAbstractions backend pinned to this device's channel, for kernels
-outside the graph."""
-backend(d::LavaDevice) = LavaBackend(d.default_bq)
-
-"""The KernelAbstractions backend that launches on `bq`, a channel from
-`allocate_batch_queue!` or the device's own. Core's `crosswaits!` orders buffers
-shared between channels with timeline-semaphore waits."""
-backend(bq::SubmitChannel{<:VulkanQueue}) = LavaBackend(bq)
+# A device is its own KernelAbstractions backend and launches on its default
+# channel; a channel from `allocate_batch_queue!` is one too (core's `backend`
+# returns either unchanged). Core's `crosswaits!` orders buffers shared between
+# channels with timeline-semaphore waits.
 
 h264decoder(dev::LavaDevice, paramnals::AbstractVector{UInt8}; kw...) =
     VideoDecode.H264Decoder(dev, paramnals; kw...)
@@ -990,18 +975,18 @@ adaptor(::SubmitChannel{<:VulkanQueue}) = LavaAdaptor(nothing)
 
 # Portable constructors, on the backend's own device rather than the default
 # context.
-Framebuffer(b::LavaBackend, w::Integer, h::Integer; kw...) = VulkanFramebuffer(w, h; ctx = vk_context(b), kw...)
+Framebuffer(d::LavaDevice, w::Integer, h::Integer; kw...) = VulkanFramebuffer(w, h; ctx = d, kw...)
 # Not sRGB, unlike `VulkanWindow`'s default: a portable window stores what the
 # shader wrote, as on Metal.
-Window(b::LavaBackend, w::Integer, h::Integer; color_format::Type = BGRA{N0f8},
+Window(d::LavaDevice, w::Integer, h::Integer; color_format::Type = BGRA{N0f8},
        srgb::Bool = false, kw...) =
-    VulkanWindow(w, h; ctx = vk_context(b), color_format, srgb, kw...)
-Texture2D(b::LavaBackend, data::AbstractArray; kw...) = VulkanTexture2D(data; ctx = vk_context(b), kw...)
-Sampler(b::LavaBackend; kw...) = VulkanSampler(; ctx = vk_context(b), kw...)
+    VulkanWindow(w, h; ctx = d, color_format, srgb, kw...)
+Texture2D(d::LavaDevice, data::AbstractArray; kw...) = VulkanTexture2D(data; ctx = d, kw...)
+Sampler(d::LavaDevice; kw...) = VulkanSampler(; ctx = d, kw...)
 
 # A `LavaArray`, which is capacity-aware on `resize!`, unlike the generic
 # fallback in `memory/array.jl`.
-devicearray(b::LavaBackend, data::AbstractArray) = LavaArray(data; bq = b.dispatch_bq)
+devicearray(d::LavaDevice, data::AbstractArray) = LavaArray(data; bq = d.default_bq)
 
 
 # The plan's timestamp profiler; core's `Plan` also accepts `nothing`.

@@ -162,7 +162,7 @@ end
 # or `nothing` when a run submits its recording alone.
 
 """The queue a closed command buffer was taken from, as the concrete type."""
-@inline queueof(c::Closed) = c.bq::SubmitChannel{VulkanQueue{LavaDevice},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
+@inline queueof(c::Closed) = c.bq::VulkanChannel
 
 
 function SubmitChannel(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ctx;
@@ -416,11 +416,14 @@ mutable struct LavaDevice <: Device
     end
 end
 
-# Compact: the default walks the cycle context -> channels -> queues -> context
-# and took half an hour for one backend.
-Base.show(io::IO, ctx::LavaDevice) = print(io, "LavaDevice(", repr(ctx.device_name), ")")
+# Compact, like core's `show(::Device)`: the default walks the cycle device ->
+# channels -> queues -> device and took half an hour for one backend.
 Base.show(io::IO, q::VulkanQueue{LavaDevice}) =
     print(io, "VulkanQueue(", repr(q.ctx.device_name), ", family ", q.family_index, ")")
+
+"""The channel type of every `LavaDevice`: its default channel and those from
+`allocate_batch_queue!`."""
+const VulkanChannel = SubmitChannel{VulkanQueue{LavaDevice},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
 
 """
     caps(ctx) -> DeviceCaps
@@ -1020,9 +1023,8 @@ function LavaDevice(; select = nothing, debug::DebugConfig = DebugConfig())
     return ctx
 end
 
-# The `LavaBackend` method is in `array/ka_backend.jl`: `LavaBackend` is defined
-# after this file.
 supports_batch_queue(::VulkanAPI) = true
+supports_batch_queue(::LavaDevice) = true
 
 """
     allocate_batch_queue!(ctx) -> SubmitChannel
@@ -1400,8 +1402,7 @@ function check_validation_errors!(context::String, ctx::LavaDevice)
 end
 
 # `Mantle.waitidle` (declared in `graph/queue.jl`): `flush!` waits for the
-# default channel, then the device wait covers the other queues. The
-# `LavaBackend` method is in `array/ka_backend.jl`.
+# default channel, then the device wait covers the other queues.
 function waitidle(ctx::LavaDevice)
     flush!(ctx.default_bq)
     # Checked: a discarded Result let a lost device look idle.

@@ -36,7 +36,7 @@ reads. `Raycore.wait_for_gpu!(hwtlas)`
 waits on `hwtlas.bq`.
 """
 mutable struct VulkanTLAS{Tri} <: BatchedTLAS{Tri}
-    backend::LavaBackend
+    backend::LavaDevice
 
     # Channel for every AS build and trace of this TLAS.
     bq::SubmitChannel{<:VulkanQueue}
@@ -80,14 +80,14 @@ mutable struct VulkanTLAS{Tri} <: BatchedTLAS{Tri}
 end
 
 # The portable constructor, for callers that do not name a backend.
-HWTLAS{Tri}(backend::LavaBackend; kw...) where {Tri} = VulkanTLAS{Tri}(backend; kw...)
+HWTLAS{Tri}(backend::LavaDevice; kw...) where {Tri} = VulkanTLAS{Tri}(backend; kw...)
 
 """
-    VulkanTLAS{Tri}(backend::LavaBackend; bq=backend.dispatch_bq) -> VulkanTLAS{Tri}
+    VulkanTLAS{Tri}(backend; bq=batchqueue(backend)) -> VulkanTLAS{Tri}
 
 An empty VulkanTLAS whose builds and traces run on `bq`.
 """
-function VulkanTLAS{Tri}(backend::LavaBackend; bq::SubmitChannel{<:VulkanQueue}=backend.dispatch_bq) where {Tri}
+function VulkanTLAS{Tri}(backend::LavaDevice; bq::SubmitChannel{<:VulkanQueue}=batchqueue(backend)) where {Tri}
     VulkanTLAS{Tri}(
         backend, bq,
         LavaBLAS[],
@@ -105,11 +105,11 @@ function VulkanTLAS{Tri}(backend::LavaBackend; bq::SubmitChannel{<:VulkanQueue}=
 end
 
 """
-    VulkanTLAS(backend::LavaBackend; bq=backend.dispatch_bq) -> VulkanTLAS{Triangle{UInt32}}
+    VulkanTLAS(backend; bq=batchqueue(backend)) -> VulkanTLAS{Triangle{UInt32}}
 
 A `VulkanTLAS{Raycore.Triangle{UInt32}}`.
 """
-VulkanTLAS(backend::LavaBackend; bq::SubmitChannel{<:VulkanQueue}=backend.dispatch_bq) =
+VulkanTLAS(backend::LavaDevice; bq::SubmitChannel{<:VulkanQueue}=batchqueue(backend)) =
     VulkanTLAS{Raycore.Triangle{UInt32}}(backend; bq)
 
 """The host-side AdaptedAccel of a synced VulkanTLAS."""
@@ -428,10 +428,9 @@ end
 
 # The SBT path needs VK_KHR_ray_tracing_pipeline, which a ray-query device may
 # lack (`supports_rt_pipeline` in `raytracing/api.jl`).
-supports_rt_pipeline(b::LavaBackend) = vk_context(b).rt_pipeline_properties !== nothing
-supports_hwtlas(b::LavaBackend) = vk_context(b).ray_query_available
+supports_rt_pipeline(d::LavaDevice) = d.rt_pipeline_properties !== nothing
 supports_rt_pipeline(t::VulkanTLAS) = supports_rt_pipeline(t.backend)
 
 # The inline ray query answers boxes through the candidate verbs above.
-supports_procedural_traversal(b::LavaBackend) = vk_context(b).ray_query_available
+supports_procedural_traversal(d::LavaDevice) = d.ray_query_available
 supports_procedural_traversal(t::VulkanTLAS) = supports_procedural_traversal(t.backend)

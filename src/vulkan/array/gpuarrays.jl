@@ -181,8 +181,7 @@ function GPUArrays._copyto!(dest::AnyLavaArray, bc::Broadcast.Broadcasted;
     axes(dest) == axes(bc) || Broadcast.throwdm(axes(dest), axes(bc))
     isempty(dest) && return dest
     n = length(dest)
-    # The array's backend, not `LavaBackend()`: an unpinned backend dispatches
-    # on the global `vk_context()`, which may be another GPU.
+    # The array's device, not the global `vk_context()`, which may be another GPU.
     backend = KernelAbstractions.get_backend(dest)
     wg, u, nd = broadcastlaunch(n)
     if ndims(dest) > 1 && IndexStyle(dest) === IndexLinear() && flatok(dest, bc)

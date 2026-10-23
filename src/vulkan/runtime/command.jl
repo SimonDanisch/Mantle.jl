@@ -444,7 +444,7 @@ B submit segfaults inside `vkQueueSubmit2`. A released channel was flushed first
 asks for it.
 """
 @inline function crosssemaphore(bq::SubmitChannel{<:VulkanQueue}, other)
-    o = other::SubmitChannel{VulkanQueue{LavaDevice},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
+    o = other::VulkanChannel
     deviceof(o) === deviceof(bq) || throw(LavaError(
         "submit!",
         "a buffer was last used on a channel from a DIFFERENT LavaDevice",

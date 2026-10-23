@@ -42,7 +42,7 @@ function check_pipeline_creation(ctx)
         old = other.mesh_shader_available
         other.mesh_shader_available = false
         try
-            @test !Mantle.supports_mesh_pipeline(Mantle.LavaBackend(other))
+            @test !Mantle.supports_mesh_pipeline(other)
         finally
             other.mesh_shader_available = old
         end

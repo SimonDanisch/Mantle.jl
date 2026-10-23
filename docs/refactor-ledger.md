@@ -130,6 +130,7 @@ Every comment and docstring checked against the code and the plan (plan,
 | P0.B13 | `Ref` without `GC.@preserve` and UserID vs `instance_id` in `metal/trace.jl` | - | n/a | 2430663 deletes `metal/trace.jl`, which had no caller |
 | P0.B14 | device features enabled without querying them | - | done | ab5e296: `devicefeatures` enables only reported bits and names a missing required one |
 | P0.B15 | regression test for `destroy_pool!` calling `empty!` on an `Inbox` (fixed in 2c7dc14) | - | done | ab5e296; test/test_device_reset_finalizer.jl, fails with `empty!` |
+| P0.B16 | pool memory (regions, arena parts, `Buffer`) has no per-channel last use: only `VkManagedBuffer` carries a `Stamp`, so a use on a second channel derives no cross-channel wait, and `reclaim!` stamps retired regions with the default channel's `fence(dev)`, which work on another channel does not pass. Fix: `Token(channel, value)` and a last use per resource driving both the submit-time waits and release (lifetime S1, S2, S4); `Graph(dev; priority)` builds on it. Regression test: two graphs on two channels sharing a buffer, a slow write and an add in both directions with no host wait, exact results, and a negative control without the wait | - | open | |
 
 ### Baseline
 

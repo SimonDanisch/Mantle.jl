@@ -193,8 +193,8 @@ function submit_and_present!(bq::SubmitChannel{<:VulkanQueue}, win::VulkanWindow
 end
 
 # Native Vulkan graphics capabilities.
-Mantle.supports_geometry_stage(::LavaBackend) = true
-Mantle.supports_tessellation(::LavaBackend) = true
+Mantle.supports_geometry_stage(::LavaDevice) = true
+Mantle.supports_tessellation(::LavaDevice) = true
 
-# `VK_EXT_mesh_shader` is optional, so the backend's own device answers.
-Mantle.supports_mesh_pipeline(b::LavaBackend) = vk_context(b).mesh_shader_available
+# `VK_EXT_mesh_shader` is optional, so the device answers.
+Mantle.supports_mesh_pipeline(d::LavaDevice) = d.mesh_shader_available

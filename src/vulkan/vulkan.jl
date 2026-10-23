@@ -96,7 +96,7 @@ function initbackend!(::VulkanAPI)
     # Never the default on a Mac: Metal is the GPU there, Vulkan a CPU driver
     # chosen by name.
     @static Sys.isapple() || register_backend!(; name = :vulkan, priority = 100) do
-        vulkan_available() ? LavaBackend() : nothing
+        vulkan_available() ? vk_context() : nothing
     end
     init_pipeline_thread!()
     atexit() do

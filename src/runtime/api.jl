@@ -4,11 +4,13 @@
     Device(api; select)
     Device(backend)
 
-A device owns its graphs, resources and submit channels. Device(api) returns its
-cached default; select creates an independent device without installing it.
-Device(backend) returns the cached device of that backend's context.
+A device owns its graphs, resources and submit channels, and is a
+KernelAbstractions backend. Device(api) returns its cached default; select
+creates an independent device without installing it. Device(backend) returns a
+device unchanged and resolves a vendor backend to its device.
 See devices, selectdevice and defaultdevice!."""
-abstract type Device end
+abstract type Device <: KernelAbstractions.Backend end
+Device(d::Device) = d
 abstract type Resource end
 # Graph and Plan are shared concrete types in graph/types.jl.
 

@@ -80,7 +80,7 @@ function Base.copyto!(img::VulkanExternalImage, a::LavaArray)
     nbytes >= needed ||
         error("array holds $nbytes bytes; image needs $needed")
     ctx = (a.buf[].ctx)::LavaDevice
-    KA.synchronize(LavaBackend(ctx))  # pending kernel writes must land first
+    KA.synchronize(ctx)  # pending kernel writes must land first
 
     managed = a.buf[]
     src_offset = UInt64(pool_offset(managed) + a.offset)
@@ -152,10 +152,10 @@ function importhost(bq::SubmitChannel{<:VulkanQueue}, ptr::Ptr, nbytes::Integer)
                            Stamp{UInt64}(), BUF_STATE_ALIVE, ctx)
 end
 
-canimporthost(backend::LavaBackend) = vk_context(backend).host_import_alignment > 0
+canimporthost(dev::LavaDevice) = dev.host_import_alignment > 0
 
-function importhost(backend::LavaBackend, A::DenseArray{T,N}) where {T,N}
-    managed = importhost(backend.dispatch_bq, pointer(A), sizeof(A))
+function importhost(backend::LavaDevice, A::DenseArray{T,N}) where {T,N}
+    managed = importhost(batchqueue(backend), pointer(A), sizeof(A))
     # The release closure keeps `A` alive. It synchronizes first because
     # `vk_free!` defers the destroy, and `A` may be freed once the closure is
     # collected.
@@ -165,7 +165,7 @@ function importhost(backend::LavaBackend, A::DenseArray{T,N}) where {T,N}
         A
         return
     end
-    # ambient-allocation-ok: wraps `ref`, whose buffer carries the context of
-    # `backend.dispatch_bq`; nothing is allocated.
+    # ambient-allocation-ok: wraps `ref`, whose buffer carries `backend`;
+    # nothing is allocated.
     return LavaArray{T,N}(ref, size(A))
 end

@@ -1,9 +1,7 @@
-# KernelAbstractions backend `LavaBackend`: the host side of KA launches on Vulkan.
+# KernelAbstractions backends on Vulkan: the host side of KA launches.
 
 import KernelAbstractions as KA
 import Adapt
-
-export LavaBackend
 
 # Kernel name for dispatch logging. A `workqueue_map_kernel!` launch (Hikari)
 # carries its inner function in `all_args[3]`, so that name is appended.
@@ -17,91 +15,54 @@ export LavaBackend
     return string(fname)
 end
 
-"""
-    LavaBackend <: KA.Backend
-
-    LavaBackend()                        # process default device
-    LavaBackend(ctx)                     # a specific device
-    LavaBackend(bq)                      # a specific channel
-
-KA backend for one Vulkan device; kernels are recorded on `dispatch_bq`. Every
-constructor pins its channel, `LavaBackend()` included, so a backend never
-follows a later default device. After `reset_device!` it is dead, like the
-arrays it allocated.
-"""
-struct LavaBackend <: KA.Backend
-    dispatch_bq::SubmitChannel{VulkanQueue{LavaDevice},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
-end
-
-LavaBackend() = LavaBackend(vk_context())
-LavaBackend(ctx::LavaDevice) = LavaBackend(ctx.default_bq)
+# A `LavaDevice` is the KernelAbstractions backend on Vulkan and launches on its
+# default channel. It never follows a later default device; after
+# `reset_device!` it is dead, like the arrays it allocated.
 
 """
     LavaDeviceBackend <: KA.Backend
 
-A `LavaBackend` as a kernel sees it: an empty type to dispatch on. Kernels may
-capture their backend to choose a code path by type, and a `LavaBackend` holds
-channels, which are not bits.
+A `LavaDevice` as a kernel sees it: an empty type to dispatch on. Kernels may
+capture their backend to choose a code path by type, and a device holds driver
+objects, which are not bits.
 """
 struct LavaDeviceBackend <: KA.Backend end
 
-Adapt.adapt_structure(::LavaAdaptor, ::LavaBackend) = LavaDeviceBackend()
+Adapt.adapt_structure(::LavaAdaptor, ::LavaDevice) = LavaDeviceBackend()
 
-# A backend holds no array a kernel reads. Walking it reaches the cycle through
+# A device holds no array a kernel reads. Walking it reaches the cycle through
 # `Vulkan.Instance` (see `graph/lifetime.jl`) and overflows the stack.
-holdleaves!(holder, ::LavaBackend) = nothing
-
-# The device it launches on.
-Base.show(io::IO, b::LavaBackend) = print(io, "LavaBackend(", repr(b.dispatch_bq.channel.ctx.device_name), ")")
-
-# Core verbs on the backend. Not beside the `LavaDevice` methods in
-# `runtime/device.jl`, which is included before `LavaBackend` is defined.
-supports_batch_queue(::LavaBackend) = true
-supports_graphics(::LavaBackend) = true
-waitidle(b::LavaBackend) = waitidle(vk_context(b))
+holdleaves!(holder, ::LavaDevice) = nothing
 
 """
-    vk_context(backend) -> LavaDevice
     vk_context(a::LavaArray) -> LavaDevice
 
-The device a backend or array belongs to, read from its channel or buffer. Use
-it instead of the global `vk_context()` whenever such an object is at hand.
+The device an array belongs to, read from its buffer. Use it instead of the
+global `vk_context()` whenever an array is at hand.
 """
-vk_context(b::LavaBackend) = (deviceof(b.dispatch_bq))::LavaDevice
 vk_context(a::LavaArray) = (a.buf[].ctx)::LavaDevice
 # `caps` is `KernelInterface.caps` (imported in `Mantle.jl`), so libraries query
-# a device through its backend or array without a `LavaDevice`.
-caps(b::LavaBackend) = caps(vk_context(b))
+# a device through its array.
 caps(a::LavaArray) = caps(vk_context(a))
 # Core's query (`runtime/backendhooks.jl`), fixed at device creation.
 videodecodes(ctx::LavaDevice) = ctx.video_decode_available
-videodecodes(b::LavaBackend) = videodecodes(vk_context(b))
-# `shaderFloat64` is enabled on every device this backend creates.
-supports_float64(::LavaBackend) = true
 # Queried from the physical device, as device creation does before enabling it.
 supports_int64_atomics(ctx::LavaDevice) =
     VK.get_physical_device_features_2(ctx.physical_device,
         VK.PhysicalDeviceVulkan12Features).next.shader_buffer_int_64_atomics
-supports_int64_atomics(b::LavaBackend) = supports_int64_atomics(vk_context(b))
 # A view is on its parent's device, for every `AnyLavaArray` wrapper.
 vk_context(a::Union{SubArray, Base.ReshapedArray, PermutedDimsArray,
                      LinearAlgebra.Transpose, LinearAlgebra.Adjoint}) = vk_context(parent(a))
 
-# Backends are equal when they drive the same device; the channel is a
-# scheduling choice. Raycore and RayMakie compare backends to check that data
-# and launch share a device.
-Base.:(==)(a::LavaBackend, b::LavaBackend) = vk_context(a) === vk_context(b)
-Base.hash(b::LavaBackend, h::UInt) = hash(objectid(vk_context(b)), hash(:LavaBackend, h))
-
 # The array's own device, not the global default.
-KA.get_backend(a::LavaArray) = LavaBackend((a.buf[].ctx)::LavaDevice)
-# Wait for all work submitted on the backend's channels, so the host can read
-# results. Dispatches are ordered on the GPU without it.
-KA.synchronize(backend::LavaBackend) = (flush!(backend.dispatch_bq); nothing)
-KA.supports_unified(::LavaBackend) = true
+KA.get_backend(a::LavaArray) = (a.buf[].ctx)::LavaDevice
+# Wait for all work submitted on the device's default channel, so the host can
+# read results. Dispatches are ordered on the GPU without it.
+KA.synchronize(b::LavaDevice) = (flush!(batchqueue(b)); nothing)
+KA.supports_unified(::LavaDevice) = true
 # `unified = nothing` is KernelInterface's generic spelling of "no preference".
-function KA.allocate(backend::LavaBackend, ::Type{T}, dims::Tuple; unified::Union{Nothing,Bool}=nothing) where T
-    bq = backend.dispatch_bq
+function KA.allocate(b::LavaDevice, ::Type{T}, dims::Tuple; unified::Union{Nothing,Bool}=nothing) where T
+    bq = batchqueue(b)
     dims = Int.(dims)
     nbytes = checkedbytes(T,dims)
     # Allocations up to 64 bytes (counters) are host-mapped, so the host reads
@@ -111,16 +72,18 @@ function KA.allocate(backend::LavaBackend, ::Type{T}, dims::Tuple; unified::Unio
 end
 KA.unsafe_free!(x::LavaArray) = unsafe_free!(x)
 
-function KA.copyto!(::LavaBackend, A, B)
+function KA.copyto!(::LavaDevice, A, B)
     GC.@preserve A B begin
         copyto!(A, 1, B, 1, length(A))
     end
     return
 end
 
-# `Adapt.adapt(backend, x)` uploads to the backend's device;
-# `Adapt.adapt(LavaArray, x)` uses the process default device.
-Adapt.adapt_storage(b::LavaBackend, a::Array) = LavaArray(a; bq = b.dispatch_bq)
+# `Adapt.adapt(device, x)` uploads to the device; `Adapt.adapt(LavaArray, x)`
+# uses the process default device. Concrete because core routes
+# `adapt_storage(::Device, x)` to the device's backend, which a device is.
+Adapt.adapt_storage(d::LavaDevice, a::Array) = LavaArray(a; bq = d.default_bq)
+Adapt.adapt_storage(::LavaDevice, x) = x
 
 """
     alloc_index_buffer(bq, data) -> LavaArray{UInt32,1}
@@ -135,7 +98,6 @@ function alloc_index_buffer(bq::SubmitChannel{<:VulkanQueue}, data::AbstractVect
     upload!(arr, data)
     return arr
 end
-Adapt.adapt_storage(::LavaBackend, a::LavaArray) = a
 Adapt.adapt_storage(::KA.CPU, a::LavaArray) = Array(a)
 
 # `@Const` leaves a device array as is: its BDA pointer can already be read-only.
@@ -179,7 +141,7 @@ Throw if `wg` exceeds [`workgroup_limit`](@ref). Not clamped: a kernel sizes its
         a validation error, not a slow launch. See `DeviceCaps`."""))
 end
 
-function KA.launch_config(kernel::KA.Kernel{LavaBackend}, ndrange, workgroupsize)
+function KA.launch_config(kernel::KA.Kernel{LavaDevice}, ndrange, workgroupsize)
     if ndrange isa Integer
         ndrange = (ndrange,)
     end
@@ -193,13 +155,13 @@ function KA.launch_config(kernel::KA.Kernel{LavaBackend}, ndrange, workgroupsize
 
     iterspace, dynamic = if KA.workgroupsize(kernel) <: KA.DynamicSize && workgroupsize === nothing
         # Core's default, the same on every backend.
-        workgroupsize = Mantle.defaultgroup(ndrange, workgroup_limit(vk_context(kernel.backend)))
+        workgroupsize = Mantle.defaultgroup(ndrange, workgroup_limit(kernel.backend))
         KA.partition(kernel, ndrange, workgroupsize)
     else
         # `kernel(backend, wg)` puts the size in the kernel's type and passes the
         # keyword as `nothing`, so check whichever holds it.
         static = workgroupsize === nothing
-        check_workgroup(vk_context(kernel.backend),
+        check_workgroup(kernel.backend,
                         static ? statictuple(KA.workgroupsize(kernel)) : workgroupsize;
                         static = static)
         KA.partition(kernel, ndrange, workgroupsize)
@@ -208,19 +170,19 @@ function KA.launch_config(kernel::KA.Kernel{LavaBackend}, ndrange, workgroupsize
     return ndrange, workgroupsize, iterspace, dynamic
 end
 
-function KA.mkcontext(kernel::KA.Kernel{LavaBackend}, _ndrange, iterspace)
+function KA.mkcontext(kernel::KA.Kernel{LavaDevice}, _ndrange, iterspace)
     KA.CompilerMetadata{KA.ndrange(kernel), KA.DynamicCheck}(_ndrange, iterspace)
 end
 
-function KA.mkcontext(kernel::KA.Kernel{LavaBackend}, I, _ndrange, iterspace, ::Dynamic) where Dynamic
+function KA.mkcontext(kernel::KA.Kernel{LavaDevice}, I, _ndrange, iterspace, ::Dynamic) where Dynamic
     KA.CompilerMetadata{KA.ndrange(kernel), Dynamic}(I, _ndrange, iterspace)
 end
 
 # Pure conversion for type reflection; launch paths hold the originals with
 # `holdleaves!`.
-KA.argconvert(::KA.Kernel{LavaBackend}, a::LavaArray{T,N}) where {T,N} =
+KA.argconvert(::KA.Kernel{LavaDevice}, a::LavaArray{T,N}) where {T,N} =
     LavaDeviceArray{T,N}(Ptr{T}(bda_address(a)), a.dims)
-KA.argconvert(::KA.Kernel{LavaBackend}, x) = x
+KA.argconvert(::KA.Kernel{LavaDevice}, x) = x
 
 # `find_tlas_in_args` returns the hardware TLAS of any pre-adapt argument with
 # an `hwtlas` field (such as `AdaptedAccel`), so passing an accel compiles with
@@ -260,7 +222,7 @@ end
 # The `IterPlan` for `obj` at this shape, cached in `vkctx.caches.iterplans` by
 # `typeof(obj)` (function and KA's static sizes) and `(ndrange, workgroupsize)`.
 # Per device, because `pad_to_3d` reads the device's `max_wg_dims`.
-function get_or_build_iter_plan(obj::KA.Kernel{LavaBackend}, ndrange, workgroupsize,
+function get_or_build_iter_plan(obj::KA.Kernel{LavaDevice}, ndrange, workgroupsize,
                                 vkctx::LavaDevice)
     # `K` is concrete here, so the scan tests `IterEntry{K}` and compares an
     # isbits key with `===` (see `IterEntry`).
@@ -312,11 +274,11 @@ function launchindirect!(bq, obj, args, count::LavaArray, workgroupsize, tlas)
     return nothing
 end
 
-function (obj::KA.Kernel{LavaBackend})(args...; ndrange=nothing, workgroupsize=nothing)
+function (obj::KA.Kernel{LavaDevice})(args...; ndrange=nothing, workgroupsize=nothing)
     # The kernel's own device, not the global context.
-    validate_launch_args(vk_context(obj.backend), args)
+    validate_launch_args(obj.backend, args)
     # Always an immediate launch; graphs declare passes with `dispatch!`.
-    bq = obj.backend.dispatch_bq
+    bq = batchqueue(obj.backend)
 
     # Before Adapt, which sets `hwtlas` to `nothing`.
     tlas = find_tlas_in_args(args)
@@ -337,7 +299,7 @@ function (obj::KA.Kernel{LavaBackend})(args...; ndrange=nothing, workgroupsize=n
     return launch_planned!(bq, obj, args, plan, tlas)
 end
 
-@noinline function launch_planned!(bq::SubmitChannel{<:VulkanQueue}, obj::KA.Kernel{LavaBackend},
+@noinline function launch_planned!(bq::SubmitChannel{<:VulkanQueue}, obj::KA.Kernel{LavaDevice},
                                    args::Tuple, plan::IterPlan, tlas)
     plan.nblocks == 0 && return nothing
     ka_ctx     = plan.ka_ctx

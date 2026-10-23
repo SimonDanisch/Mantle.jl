@@ -243,11 +243,11 @@ _VULKAN_OK || @info "Mantle tests: no Vulkan driver and compiler pair; skipping 
 # its backend's names.
 #
 # Here rather than file by file, because the files are `include`d into `Main` and
-# one import serves all of them — 54 of them name `LavaBackend` alone. Derived by
-# parsing every driven test file for free identifiers that ONLY the extension
-# defines, so the list is what is actually used and not a guess.
+# one import serves all of them. Derived by parsing every driven test file for
+# free identifiers that ONLY the extension defines, so the list is what is
+# actually used and not a guess.
 if _VULKAN_OK
-    using Mantle: LavaArray, LavaBackend, VulkanFramebuffer, VulkanWindow,
+    using Mantle: LavaArray, VulkanFramebuffer, VulkanWindow,
                 VulkanCompiledGraphicsPipeline, DebugConfig, copy_framebuffer!,
                 fastdiv
 end
@@ -696,11 +696,9 @@ foreachbackend(joinpath(@__DIR__, "test_narrow_phase_kernel.jl"))
 # owning thread at the next `reclaim!`.
 foreachbackend(joinpath(@__DIR__, "test_dropped_resources.jl"))
 # A device's life and its queues, on every backend (DECISIONS.md 5 and 6): how
-# many submissions a call makes, a second channel and the order between the two,
-# what `error()` in a kernel means, the pool's own trim policy, and a refused
-# allocation that is `nothing`.
+# many submissions a call makes, what `error()` in a kernel means, the pool's own
+# trim policy, and a refused allocation that is `nothing`.
 foreachbackend(joinpath(@__DIR__, "test_submission_count.jl"))
-foreachbackend(joinpath(@__DIR__, "test_crossqueue_sync.jl"))
 foreachbackend(joinpath(@__DIR__, "test_kernel_error.jl"))
 foreachbackend(joinpath(@__DIR__, "test_pool_trim_policy.jl"))
 foreachbackend(joinpath(@__DIR__, "test_tolerated_alloc_failure.jl"))
@@ -741,7 +739,7 @@ foreachbackend(joinpath(@__DIR__, "test_fastdiv.jl"))
 foreachbackend(joinpath(@__DIR__, "test_fft.jl"))
 foreachbackend(joinpath(@__DIR__, "test_gemv.jl"))
 # Under `test/vulkan/` and guarded, because it is that backend's: it builds a
-# `Mantle.LavaBackend()` and asserts `Mantle.gemv_split`, a rule with no core
+# Vulkan device and asserts `Mantle.gemv_split`, a rule with no core
 # default and no other backend's answer. It sat in the section above, whose
 # stated assertion is that its files need no GPU, so on a machine with no Vulkan
 # driver it threw from the first line of its testset rather than being skipped.

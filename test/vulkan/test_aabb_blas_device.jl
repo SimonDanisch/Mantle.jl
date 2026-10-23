@@ -15,7 +15,7 @@ using KernelAbstractions: @kernel, @index, @Const
 using GeometryBasics: Point3f
 include(joinpath(@__DIR__, "..", "testbackend.jl"))
 
-if TESTBACKEND isa Mantle.LavaBackend && Mantle.supports_hwtlas(TESTBACKEND) &&
+if TESTBACKEND isa Mantle.LavaDevice && Mantle.supports_hwtlas(TESTBACKEND) &&
    Mantle.supports_procedural_traversal(TESTBACKEND)
 
 using Mantle.Lava: lava_ray_query_init, lava_ray_query_proceed, lava_ray_query_get_type,
@@ -65,7 +65,7 @@ end
     centres = Mantle.devicearray(TESTBACKEND, start)
     boxes = Mantle.aabbinput(TESTBACKEND, length(start))
     centred_boxes!(TESTBACKEND, 64)(boxes, centres, r; ndrange = length(start))
-    blas = Mantle.build_accel!(ctx -> Mantle.build_blas_aabb(ctx, boxes; allow_update = true), TESTBACKEND.dispatch_bq)
+    blas = Mantle.build_accel!(ctx -> Mantle.build_blas_aabb(ctx, boxes; allow_update = true), Mantle.batchqueue(TESTBACKEND))
     tlas = Mantle.HWTLAS{Raycore.Triangle{UInt32}}(TESTBACKEND)
     push!(tlas, blas; instance_id = UInt32(0))
     Raycore.sync!(tlas)

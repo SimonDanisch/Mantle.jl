@@ -4,7 +4,7 @@ import Raycore
 function check_tlas_mutation_allocations(ctx)
     @testset "queued GPU transforms remain allocation-free" begin
         mesh = Mesh(Point3f[(0,0,0), (1,0,0), (0,1,0)], GLTriangleFace[(1,2,3)])
-        t = Mantle.VulkanTLAS(Mantle.LavaBackend(ctx))
+        t = Mantle.VulkanTLAS(ctx)
         h = push!(t, mesh, fill(Mat4f(I), 2);
                   instance_ids=UInt32[17,29], instance_mask=UInt8(0x42))
         transforms = Mantle.LavaArray(fill(Mantle.identity_transform(), 2); bq=t.bq)

@@ -86,7 +86,7 @@ syncbuf!(owner::Closed, b::LavaBLAS) = syncbuf!(owner, b.storage)
 
 """AccelBuildContext over a Vulkan submit channel. Core holds and stamps named
 resources; `preserves` keeps scratch and temporary host objects until completion."""
-const VulkanAccelBuildContext = AccelBuildContext{SubmitChannel{VulkanQueue{LavaDevice},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}}
+const VulkanAccelBuildContext = AccelBuildContext{VulkanChannel}
 
 @inline buildcmd(ctx::VulkanAccelBuildContext)   = ctx.into.cmd
 @inline as_device(ctx::VulkanAccelBuildContext)  = vkdevice(ctx.bq)
@@ -226,15 +226,15 @@ end
 
 # Host-vector refits run on this device’s dispatch channel.
 Raycore.refit!(blas::LavaBLAS, vertices::AbstractVector) =
-    build_accel!(KA.get_backend(blas.storage).dispatch_bq) do ctx
+    build_accel!(batchqueue(KA.get_backend(blas.storage))) do ctx
         refit_blas!(ctx, blas, NTuple{3,Float32}[Tuple(Float32.(v)) for v in vertices])
     end
 
-"""aabbinput(backend::LavaBackend, n) -> LavaArray{AABB,1}
+"""aabbinput(dev, n) -> LavaArray{AABB,1}
 
-Allocate n AS-readable boxes for kernels to write before build/refit."""
-aabbinput(backend::LavaBackend, n::Integer) =
-    LavaArray{AABB,1}(undef, (Int(n),); bq = backend.dispatch_bq, extra_usage = AS_INPUT_USAGE)
+Allocate n AS-readable boxes on `dev` for kernels to write before build/refit."""
+aabbinput(backend::LavaDevice, n::Integer) =
+    LavaArray{AABB,1}(undef, (Int(n),); bq = batchqueue(backend), extra_usage = AS_INPUT_USAGE)
 
 """build_blas_aabb(ctx, aabbs; opaque=true, allow_update=false) -> LavaBLAS
 
@@ -272,7 +272,7 @@ end
 
 # On the device's dispatch channel, after the kernels that wrote the boxes.
 Raycore.refit!(blas::LavaBLAS, aabbs::LavaArray{AABB,1}) =
-    build_accel!(KA.get_backend(blas.storage).dispatch_bq) do ctx
+    build_accel!(batchqueue(KA.get_backend(blas.storage))) do ctx
         refit_blas!(ctx, blas, aabbs)
     end
 

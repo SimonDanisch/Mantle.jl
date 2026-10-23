@@ -107,8 +107,7 @@ function (::Type{LavaArray{T,N}})(s::UniformScaling, dims::Tuple{Int,Int}) where
     res = similar(LavaArray{T,N}, dims)
     fill!(res, zero(T))
     isempty(res) && return res
-    # The array's backend, not `LavaBackend()`: an unpinned backend dispatches
-    # on the global `vk_context()`, which may be another GPU.
+    # The array's device, not the global `vk_context()`, which may be another GPU.
     KI.Kernel(KernelAbstractions.get_backend(res), identity_kernel!)(
         res, size(res, 1), T(s.λ); ndrange=minimum(dims))
     return res

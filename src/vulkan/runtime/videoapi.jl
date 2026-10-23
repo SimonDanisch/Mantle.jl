@@ -26,6 +26,4 @@ end
 
 # `decode_h264_luma` (this decode plus a download) is defined in core. The
 # `LavaDevice` method of `h264decoder` is in `graph.jl`.
-h264decoder(b::LavaBackend, paramnals::AbstractVector{UInt8}; kw...) =
-    VideoDecode.H264Decoder(vk_context(b), paramnals; kw...)
 
