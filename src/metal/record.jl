@@ -79,8 +79,21 @@ batch and is released when that command buffer completes.
 function Mantle.retire!(::Pool, dev::MetalDevice, buf::MTL.MTLBuffer)
     # `dev`'s batch, not `Metal.global_queue` or the process device: the root must
     # be held by the command buffer that reads these bytes.
-    Metal.record_operation!(batchqueue(dev), buf)
+    forgetmanaged!(dev, buf)
+    Metal.record_operation!(batchqueue(dev), DeferredFree(buf))
     return nothing
+end
+
+"""
+A root that frees its buffer when it is collected.
+
+An `MTLBuffer` is not a managed wrapper: dropping it releases nothing, and only
+`Metal.free` takes it out of the residency set and releases it. As a root of the
+open batch this is collectable only once that batch's command buffer completes.
+"""
+mutable struct DeferredFree
+    buffer::MTL.MTLBuffer
+    DeferredFree(buffer::MTL.MTLBuffer) = finalizer(d -> Metal.free(d.buffer), new(buffer))
 end
 
 """
@@ -423,6 +436,7 @@ end
 
 """What a recorded frame replays, and everything it keeps alive for it."""
 struct MetalRecording
+    dev::MetalDevice
     icb::MTL.MTLIndirectCommandBuffer
     segments::Vector{MetalSegment}
     # `segments closed before => call`, in plan order (`replaywithcalls!`).
@@ -485,8 +499,13 @@ function argmanaged(pl::Mantle.Plan)
     return c.records
 end
 
-# The recording's Objective-C objects die with it; the argument memory is the plan's.
-Mantle.release!(::MetalRecording) = nothing
+# Held by the open batch, which completes after every frame recorded before it:
+# the indirect command buffer leaves the residency set when it is collected, and
+# the auxiliary arguments are freed then. The argument memory is the plan's.
+function Mantle.release!(rec::MetalRecording)
+    Metal.record_operation!(batchqueue(rec.dev), rec.icb, DeferredFree(rec.aux))
+    return nothing
+end
 
 """
 Whether this plan is walked per run instead of recorded: a render or copy pass
@@ -611,6 +630,8 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan,
     # since a calls-only plan has no commands; `encode!` still bounds by `ncommands`.
     icb = MTL.MTLIndirectCommandBuffer(d.dev, desc, max(ncommands, 1);
                                        storage = MTL.MTLResourceStorageModeShared)
+    # Leaves the residency set when collected, as in `newstructure`.
+    finalizer(Metal.forget_resident!, icb)
     # Resident for the recording's life: on MTL4 nothing else makes it resident,
     # and reading an unmapped indirect command buffer faults the queue.
     Metal.make_persistently_resident!(icb, d.dev)
@@ -977,7 +998,7 @@ function Mantle.closerecording!(e::MetalRecorder, pl::Mantle.Plan)
         e.gridcursor == 0 || copyto!(e.templ, e.templhost)
         markgates!(e)
     end
-    return MetalRecording(e.icb, e.segments, e.calls,
+    return MetalRecording(e.dev, e.icb, e.segments, e.calls,
                           e.ranges.data[].buffer, Int(e.ranges.offset),
                           e.ranges, e.grids.data[].buffer, Int(e.grids.offset), e.grids,
                           e.templ, e.aux, am.store, e.writers, e.ncommands,
