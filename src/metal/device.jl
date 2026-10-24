@@ -233,10 +233,15 @@ function rawfree(d::MetalDevice, buf::MTL.MTLBuffer)
     # Not through the driver on a retired device: at exit Metal may be gone. The
     # buffer is released when whatever still holds it is collected.
     d.retired && return nothing
-    delete!(d.managed, Base.bitcast(UInt, pointer(buf)))
+    forgetmanaged!(d, buf)
     Metal.free(buf)
     return nothing
 end
+
+"""The `managedbuffer` record of `buf`, dropped before its memory goes back, so a
+later buffer at the same address does not inherit it."""
+forgetmanaged!(d::MetalDevice, buf::MTL.MTLBuffer) =
+    (delete!(d.managed, Base.bitcast(UInt, pointer(buf))); nothing)
 
 """
     managedbuffer(dev, buf) -> Metal.Managed
