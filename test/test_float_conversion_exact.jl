@@ -20,8 +20,9 @@
 # it where the narrowed value fed a half multiply. So Lava narrows such a value in
 # integer operations (`narrow_in_integers!`), on every device. The testsets below
 # run that sequence on the device: every half, every tie between neighbouring
-# halves and the floats either side of it, the subnormal range, overflow, and the
-# narrowed value multiplied in half precision before it is widened.
+# halves and the floats either side of it, the subnormal range, overflow, the
+# narrowed value multiplied in half precision before it is widened, and a product
+# of two halves that LLVM computes in half precision and the kernel keeps adding.
 
 using Test, Mantle, Random
 import KernelInterface as KI
@@ -142,4 +143,35 @@ end
     unrounded = [Float32(Float16(x[i] * r * Float32(g[i]))) for i in 1:n]
     @test count(rounded .!= unrounded) > n ÷ 20     # the rounding is visible here
     @test got == rounded
+end
+
+function fce_halfproducts!(out, a, b, c, n::Int32)
+    i = Int32(KI.get_global_id().x)
+    if i <= n
+        @inbounds begin
+            p(j) = Float32(Float16(Float32(a[4i - 4 + j]) * Float32(b[4i - 4 + j])))
+            out[i] = (p(1) + p(2)) + (p(3) - p(4)) + c[i]
+        end
+    end
+    return nothing
+end
+
+# `Float16(Float32(a) * Float32(b))` of two halves is `fmul half a, b` after
+# InstCombine, the product being exact in Float32. Widened and added, NVIDIA
+# computed it without the rounding: DNNKernels' SwiGLU inside a ConvRot pass.
+@testset "a product of halves keeps its rounding where it is added" begin
+    backend = TESTBACKEND
+    rng = MersenneTwister(15)
+    n = 1 << 16
+    a = Float16.(2f0 .* randn(rng, Float32, 4n)); b = Float16.(2f0 .* randn(rng, Float32, 4n))
+    c = randn(rng, Float32, n)
+    out = Mantle.devicearray(TESTBACKEND, zeros(Float32, n))
+    KI.@launch backend ndrange = n workgroupsize = 64 fce_halfproducts!(
+        out, Mantle.devicearray(TESTBACKEND, a), Mantle.devicearray(TESTBACKEND, b),
+        Mantle.devicearray(TESTBACKEND, c), Int32(n))
+    p(j, f) = f(Float32(a[j]) * Float32(b[j]))
+    sums(f) = [(p(4i - 3, f) + p(4i - 2, f)) + (p(4i - 1, f) - p(4i, f)) + c[i] for i in 1:n]
+    rounded, unrounded = sums(x -> Float32(Float16(x))), sums(identity)
+    @test count(rounded .!= unrounded) > n ÷ 2     # the rounding is visible here
+    @test Array(out) == rounded
 end
