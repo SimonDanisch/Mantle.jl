@@ -320,3 +320,23 @@ end
     run!(g)
     @test Array(o) == x .+ Int32(1)
 end
+
+# internals.jl section 9 (storage is retired with the tokens of every access in flight, on any channel), recording-plan.md Queues: HOLD-03 with every submission on the next queue (spreadqueues): feat is written late on two queues when its last hold goes; canaries allocated at once stay intact, and memory comes back.
+@case "HOLD-15" 3 :multicompute begin
+    dev = testdevice()
+    base = memory(dev)
+    spreadqueues(dev) do
+        feat = MantleArray(dev, Int32, HO_LEN)
+        e1, d1 = Graph(dev), Graph(dev)
+        slowwrite!(e1, feat, 7; ms = 300)
+        slowwrite!(d1, feat, 9; ms = 300)
+        run!(e1); run!(d1)                    # compiled
+        run!(e1); run!(d1)                    # on two queues, writing feat late
+        free!(feat); free!(e1); free!(d1)     # the last hold goes while they run
+        cs = [canary(dev, HO_LEN) for _ in 1:4]
+        Mantle.waitidle(dev)
+        @test all(intact, cs)
+        foreach(free!, cs)
+    end
+    @test memory(dev) == base
+end

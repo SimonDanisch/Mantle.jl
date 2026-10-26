@@ -10,8 +10,9 @@
 # wrong value. Kernels are compiled by a first run before the measured one, so
 # a compile never stands in for a wait.
 #
-# A second queue: Graph(dev; priority = 1) (plan, open decision 11: the
-# keyword and its values are open). A result read for a timing is in unified
+# Two queues: independent work finds a busy queue and takes an idle one (the
+# default policy); dependent work crosses queues under `spreadqueues`
+# (helpers.jl; plan, Queues). A result read for a timing is in unified
 # memory (`unified = true`, api.md 2.2): its read is a wait for its writer
 # and a memcpy, with no GPU copy on another queue.
 
@@ -91,14 +92,8 @@ end
 """Spin iterations for about `ms` milliseconds on the device under test."""
 ord_spin(ms) = Int32(min(calibratedspin(testdevice(), ms), typemax(Int32)))
 
-"""A graph; on the second queue when `second` (`priority`; plan, open decision 11)."""
-ord_graph(dev, second::Bool; kw...) = second ? Graph(dev; priority = 1, kw...) : Graph(dev; kw...)
-
 """A one-element result in unified memory: reading it waits for its writer only."""
 ord_unified(dev) = MantleArray(dev, Int32, 1; unified = true)
-
-"""The channels that submitted something, from a Diagnostics."""
-ord_channels(d) = count(>(0), values(d.submissions))
 
 ord_median(x) = sort(x)[cld(length(x), 2)]
 
@@ -128,8 +123,9 @@ end
 """
 The two graphs of ORD-08: g1 copies s into its transient and writes s + 1
 back (a read, then a write of s); g2 copies s into its transient and adds it
-into sums. Their transients share an arena part unless core separates them
-for a second queue.
+into sums. For two queues g2 has another priority, so the two graphs'
+transients are in separate arena parts and only s orders them; for one queue
+they share a part (plan, Ordering, "Arenas").
 """
 function ord_crossgraphs(dev, s, sums, second; kw...)
     n = length(s)
@@ -137,7 +133,7 @@ function ord_crossgraphs(dev, s, sums, second; kw...)
     t1 = MantleArray(g1, Int32, n)
     dispatch!(g1, ord_copy!, (t1, s), n)
     dispatch!(g1, ord_addone!, (s, t1), n)
-    g2 = ord_graph(dev, second; kw...)
+    g2 = Graph(dev; priority = second ? 1 : 0, kw...)
     t2 = MantleArray(g2, Int32, n)
     dispatch!(g2, ord_copy!, (t2, s), n)
     dispatch!(g2, ord_accumulate!, (sums, t2), n)
@@ -152,20 +148,22 @@ end
     rounds = 10^4
     for second in (false, true)
         second && !has(dev, :multicompute) && continue
-        a, sums = MantleArray(dev, zeros(Int32, ORDN)), MantleArray(dev, zeros(Int32, ORDN))
-        p = Graph(dev); dispatch!(p, ord_bump!, (a,), ORDN)
-        c = ord_graph(dev, second); dispatch!(c, ord_accumulate!, (sums, a), ORDN)
-        run!(p); run!(c); Mantle.waitidle(dev)
-        _, d = counted() do
-            for _ in 2:rounds
-                run!(p); run!(c)
+        withqueues(second) do                         # two queues: every run on the next one
+            a, sums = MantleArray(dev, zeros(Int32, ORDN)), MantleArray(dev, zeros(Int32, ORDN))
+            p = Graph(dev); dispatch!(p, ord_bump!, (a,), ORDN)
+            c = Graph(dev); dispatch!(c, ord_accumulate!, (sums, a), ORDN)
+            run!(p); run!(c); Mantle.waitidle(dev)
+            _, d = counted() do
+                for _ in 2:rounds
+                    run!(p); run!(c)
+                end
             end
+            @test d.hostwaits == 0
+            second && @test channelsused(d) >= 2
+            @test all(==(rounds), Array(a))
+            @test all(==(rounds * (rounds + 1) ÷ 2), Array(sums))
+            free!(p); free!(c); free!(a); free!(sums)
         end
-        @test d.hostwaits == 0
-        second && @test ord_channels(d) == 2
-        @test all(==(rounds), Array(a))
-        @test all(==(rounds * (rounds + 1) ÷ 2), Array(sums))
-        free!(p); free!(c); free!(a); free!(sums)
     end
 end
 
@@ -195,16 +193,16 @@ end
     end
 end
 
-# plan, Ordering (two plans overlap on the GPU unless one writes what the other uses): R1 and R2 only read a, each spinning 400 ms, on two queues: neither waits for the other, so both finish in about the time of one.
+# plan, Ordering (two plans overlap on the GPU unless one writes what the other uses), plan, Queues (the queue is picked at submission): R1 and R2 only read a, each spinning 400 ms; R2 finds R1's queue busy and takes an idle one, under the default policy: neither waits for the other, so both finish in about the time of one.
 @case "ORD-04" 3 :multicompute begin
     dev = testdevice()
     a = MantleArray(dev, Int32[3, 3])
     o1, o2 = ord_unified(dev), ord_unified(dev)
     spin = ord_spin(400)
     r1 = Graph(dev); dispatch!(r1, ord_slowread!, (o1, a, spin), 1)
-    r2 = ord_graph(dev, true); dispatch!(r2, ord_slowread!, (o2, a, spin), 1)
+    r2 = Graph(dev); dispatch!(r2, ord_slowread!, (o2, a, spin), 1)
     _, d = counted(() -> (run!(r1); run!(r2)))
-    @test ord_channels(d) == 2
+    @test channelsused(d) == 2
     Mantle.waitidle(dev)
     alone = @elapsed (run!(r1); Array(o1))
     both = @elapsed (run!(r1); run!(r2); Array(o1); Array(o2))
@@ -277,8 +275,10 @@ end
         s, sums = MantleArray(dev, zeros(Int32, ORDN)), MantleArray(dev, zeros(Int32, ORDN))
         kw = control ? (; ordering = Mantle.Unordered()) : (;)
         g1, g2 = ord_crossgraphs(dev, s, sums, second; kw...)
-        for _ in 1:rounds
-            run!(g1); run!(g2)
+        withqueues(second) do
+            for _ in 1:rounds
+                run!(g1); run!(g2)
+            end
         end
         exact = all(==(rounds), Array(s)) && all(==(want), Array(sums))
         if !control
@@ -345,16 +345,18 @@ end
     @test all(o -> allequal(Array(o)), outs)
 end
 
-# plan, Ordering (tokens per segment; a later stage's accesses are not recorded in advance): gx writes x from y, gy (second queue) writes y from x, 10^4 rounds: no GPU deadlock and exact (validation is the session's: the suite runs with the validation layers on).
+# plan, Ordering (tokens per segment; a later stage's accesses are not recorded in advance): gx writes x from y, gy writes y from x, each run on the next queue (spreadqueues), 10^4 rounds: no GPU deadlock and exact (validation is the session's: the suite runs with the validation layers on).
 @case "ORD-13" 3 :multicompute :long begin
     dev = testdevice()
     rounds = 10^4
     x, y = MantleArray(dev, zeros(Int32, ORDN)), MantleArray(dev, zeros(Int32, ORDN))
     gx = Graph(dev); dispatch!(gx, ord_addone!, (x, y), ORDN)              # x = y + 1
-    gy = ord_graph(dev, true); dispatch!(gy, ord_addone!, (y, x), ORDN)    # y = x + 1
+    gy = Graph(dev); dispatch!(gy, ord_addone!, (y, x), ORDN)              # y = x + 1
     withtimeout(1200) do
-        for _ in 1:rounds
-            run!(gx); run!(gy)
+        spreadqueues() do
+            for _ in 1:rounds
+                run!(gx); run!(gy)
+            end
         end
         Mantle.waitidle(dev)
     end
@@ -368,7 +370,7 @@ end
     mq = has(dev, :multicompute)
     a, out, z = MantleArray(dev, Int32[1, 1]), MantleArray(dev, Int32[0]), MantleArray(dev, Int32[0])
     pdone = ord_unified(dev)
-    g = ord_graph(dev, mq)
+    g = Graph(dev)                                    # p finds g's queue busy and takes an idle one
     h = Group(g, "slow read")
     dispatch!(h, ord_slowread!, (out, a, ord_spin(500)), 1)
     slowwrite!(g, z, 1; ms = 500)                     # g's node outside the group: its later runs stay busy
@@ -403,7 +405,7 @@ end
     @test Array(out) == [9]
 end
 
-# plan, Queues (independent graphs on different queues, with priorities), plan, open decision 11 (priorities): a priority frame graph beside a background graph busy for 500 ms: the frame's result is ready without waiting for the background.
+# plan, Queues (the queue is picked at submission; priority limits it to the queues of its class), fixed decision 11 (a different priority gets its own arena part): a priority frame graph beside a background graph busy for 500 ms: the frame's result is ready without waiting for the background.
 @case "ORD-16" 3 :multicompute begin
     dev = testdevice()
     w, src, fout = MantleArray(dev, Int32[0]), MantleArray(dev, Int32[5, 5]), ord_unified(dev)

@@ -55,14 +55,6 @@ function capsdevice(; kw...)
     return fd
 end
 
-# submissions(g) lists stages (cut by host nodes), each with its segments (cut
-# by budget and queue). api.md 2.3 leaves the shape open; this is the one the
-# suite assumes.
-segmentcount(g) = sum(s -> length(s.segments), Mantle.submissions(g))
-
-"""The channels a run's submissions went to (diagnostics count them per channel)."""
-channelsused(d) = count(>(0), values(d.submissions))
-
 # ── Compile, split, queues (SPLIT) ──
 
 # recording-plan.md "Submission split: estimated", internals.jl section 4 (submissions!): with a bandwidth of 1 byte/s the estimated cost of a 7-kernel graph is many times the submission budget: it is cut into at least 3 segments at compile, and recorded once (5 later runs record nothing, compile nothing, and submit every segment once each).
@@ -146,7 +138,7 @@ end
     Mantle.steplog!(fd, false)
 end
 
-# internals.jl section 4 (submissions!: a segment waits on the segments holding its predecessors on other queues): two independent chains and a kernel joining them, one segment per kernel (bandwidth 1 byte/s) and the chains on two queues (crossqueuecost 0): a segment waits only on segments of other queues, never on an earlier one of its own queue (queue order covers that). Reads the segments from submissions(g); that a segment shows its `channel` and `after` (the run's segments it waits on, internals.jl section 6, submitstage!) is assumed, the shape being open (api.md 2.3, `submissions(g)`).
+# internals.jl section 4 (submissions!: a segment waits on the segments holding its predecessors on other queues): two independent chains and a kernel joining them, one segment per kernel (bandwidth 1 byte/s) and the chains on two queue kinds (crossqueuecost 0): a segment waits only on segments of other kinds, never on an earlier one of its own kind (a run picks one queue per kind, and queue order covers that). Reads the segments from submissions(g); that a segment shows its `kind` and `after` (the run's segments it waits on, internals.jl section 6, submitstage!) is assumed, the shape being open (api.md 2.3, `submissions(g)`).
 @case "SPLIT-05" 3 :multicompute begin
     fd = capsdevice(; crossqueuecost = 0.0, bandwidth = 1.0); n = 1024
     g = Graph(fd)
@@ -154,8 +146,8 @@ end
     dispatch!(g, split_sum!, (out, splitchain!(g, n, 3), splitchain!(g, n, 3)), n)
     run!(g)
     segs = [s for stage in Mantle.submissions(g) for s in stage.segments]
-    @test length(unique(s.channel for s in segs)) >= 2
+    @test length(unique(s.kind for s in segs)) >= 2
     @test any(s -> !isempty(s.after), segs)
-    @test all(s -> all(p -> p.channel !== s.channel, s.after), segs)
+    @test all(s -> all(p -> p.kind !== s.kind, s.after), segs)
     @test Array(out) == Int32.(2 .* (1:n) .+ 4)
 end

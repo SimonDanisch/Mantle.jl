@@ -154,7 +154,9 @@ include("raytracing/api.jl")
 # Needs resources, graphics commands and backend hooks above.
 include("graph/build.jl")
 # KernelAbstractions plan execution; Vulkan overrides it with native recording.
+include("graph/readback.jl")
 include("graph/kalaunch.jl")
+export ReadbackFuture
 
 export Span, OffsetWindow, Gap, Item, Problem, Placement
 # `overlaps` is not exported: GeometryBasics exports the same name.

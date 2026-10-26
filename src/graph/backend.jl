@@ -129,6 +129,9 @@ Emit a target-to-buffer copy pass.
 """
 function emitcopy! end
 
+"""Record a buffer-to-host transfer, including host visibility, in this run."""
+function emitreadback! end
+
 """
     beginrender!(emitter, plan, passplan) -> handle
     emitdraw!(emitter, handle, draw)
@@ -564,7 +567,8 @@ const BACKEND_VOCABULARY = (
     # the walk's primitives
     :openrecording, :closerecording!, :emithead!, :emitloophead!, :emitbarriers!,
     :withpredicate,
-    :emitupdate!, :emitdispatch!, :emitcopy!, :beginrender!, :emitdraw!, :endrender!,
+    :emitupdate!, :emitdispatch!, :emitcopy!, :emitreadback!, :nativebuffercopy, :readbackbinding, :samereadback,
+    :beginrender!, :emitdraw!, :endrender!,
     :collect!,
     :emitkernel!, :emitpreparebarrier!, :workgroupsize, :indirectslot, :writegroups!, :slotgrid,
     :storebytes!, :orderstore!,

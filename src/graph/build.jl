@@ -1054,7 +1054,13 @@ Plan(g::Graph; alias::Bool = true,
             budget::Real = submissionbudget(g.dev)) =
     # `hostwritten!` before the compile: it adds the update pass and its `CopyDst` usages.
     let pl = Plan(g, hostwritten!(g), alias, policy, Float64(budget), profile)
-        c = compile!(Compile(g; alias, policy))
+        bindreadbacks!(pl)
+        c = try
+            compile!(Compile(g; alias, policy))
+        catch err
+            freereadbacks!(pl, err)
+            rethrow()
+        end
         install!(pl, c)
         # With timestamps and a finite budget, profile even unasked: the plan
         # measures itself once to partition its recording (`partitionranges`).
@@ -1074,7 +1080,7 @@ An empty graph for `device`.
 Graph(dev::Device) =
     Graph{typeof(dev)}(dev, Pass[], WindowSurface[], TransientResource[],
                        Dict{Int,TransientResource}(), IdTable(),
-                       Dict{Tuple{Int,UnitRange{Int}},Any}())
+                       Dict{Tuple{Int,UnitRange{Int}},Any}(), Any[], false)
 
 """
     Transient.Buffer(graph, T, dims...; hostwritten = false) -> TransientBuffer
@@ -1095,6 +1101,7 @@ function Transient.Buffer(g::Graph, ::Type{T}, dims::Dims{N};
         "Transient.Buffer: $(dims) has no elements. An empty result needs no " *
         "buffer and no pass -- skip it where the shape is decided."))
     t = TransientBuffer{T,N}(dims, typemax(Int), 0, nothing, 0; hostwritten)
+    t.graph = g
     push!(g.transients, t)
     t
 end
@@ -1191,6 +1198,7 @@ function free!(pl::Plan)
     # Before the regions: the recording holds a command buffer, descriptor sets
     # and references to every resource it names, and listens for moves.
     droprecording!(pl)
+    freereadbacks!(pl)
     let am = pl.args
         am === nothing || retire!(pool(pl.graph.dev), pl.graph.dev, am.store)
     end

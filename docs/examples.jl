@@ -319,9 +319,9 @@ ray = raygraph(dev)             # peak 300 MB
 run!(sam); run!(ray)            # the arena part needs 900 MB, not 1200 MB
 run!(ray)                       # ray waits on sam's work in the shared arena part
 
-# 33. Graphs core expects to run at the same time (the editor's frame beside a
-#     DNN, from relative priority hints) may get separate arena parts: 1200 MB then, in
-#     exchange for overlap. Core decides; either is correct.
+# 33. Graphs of different priority get separate arena parts, so the editor's
+#     frame never waits for a DNN's transients. Equal priority shares, as above.
+fast = raygraph(dev; priority = 1)      # its own part: 900 MB + 300 MB, and its runs need not wait for sam's
 
 # 34. Sparse arenas grow by mapping pages and never move anything.
 big = biggraph(dev)             # peak 2 GB

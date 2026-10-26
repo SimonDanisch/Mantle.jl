@@ -226,3 +226,66 @@ end
     # back 524_288 like the aliased case.
     @test M.peakbytes(plan) == 1_310_720
 end
+
+@testset "alias handovers respect bytes, lifetimes and arenas" begin
+    dev = M.Device(TESTBACKEND)
+    g = M.Graph(dev)
+    ts = [M.Transient.Buffer(g, Float32, 8), M.Transient.Buffer(g, UInt16, 8),
+          M.Transient.Buffer(g, UInt8, 16), M.Transient.Buffer(g, Float32, 4),
+          M.Transient.Buffer(g, UInt8, 8), M.Transient.Buffer(g, UInt8, 8)]
+    for (t, (a, b)) in zip(ts, [(1, 2), (3, 4), (2, 3), (5, 6), (7, 8), (9, 10)])
+        t.first, t.last = a, b
+    end
+    c = compilectx(g)
+    a = M.analysis(c)
+    a.offsets = [0, 16, 16, 32, 20, 0]
+    a.parts = Any[:first, :first, :first, :first, :first, :second]
+    M.run!(M.Aliasing(), c)
+    # 2 reuses the top half of 1; 5 reuses bytes of 1, 2 and 3. The live
+    # overlap of 2 and 3, adjacent bytes of 4, and separate arena of 6 add none.
+    @test a.alias_begins == Dict(3 => [(2, 1)], 7 => [(5, 1), (5, 2), (5, 3)])
+end
+
+@testset "hazards depend on the wait set and destination" begin
+    R = M.Storage{M.BufferKind,M.ReadOnly}
+    W = M.Storage{M.BufferKind,M.WriteOnly}
+    RW = M.Storage{M.BufferKind,M.ReadWrite}
+    ts = [M.Transition(1, R, Type[R, W], RW),
+          M.Transition(2, W, Type[W, R], RW),
+          M.Transition(3, R, Type[R, W], R),
+          M.Transition(4, R, Type[R], RW)]
+    hazards = M.barrierhazards(ts)
+    @test length(hazards) == 3
+    @test count(h -> h[2] === RW && issetequal(h[1], [R, W]), hazards) == 1
+    @test any(h -> h[2] === R && issetequal(h[1], [R, W]), hazards)
+    @test any(h -> h[2] === RW && h[1] == [R], hazards)
+end
+
+@testset "partially overlapping views survive replanning" begin
+    dev = M.Device(TESTBACKEND)
+    g = M.Graph(dev)
+    src = M.Buffer(dev, Float32.(1:16))
+    out = M.Buffer(dev, fill(NaN32, 16))
+    tmp = M.Transient.Buffer(g, Float32, 16)
+    window(b, offset) = M.ResourceView{Float32,1,typeof(b)}(b, (8,), offset)
+    M.dispatch!(g, goldenscale!, (tmp, src, 2f0), 16)
+    M.dispatch!(g, goldenscale!, (window(out, 0), window(tmp, 0), 3f0), 8)
+    M.dispatch!(g, goldenscale!, (window(out, 8), window(tmp, 4), 4f0), 8)
+    try
+        # The first compile interns segments of the overlapping ranges; the
+        # second must find those same segments without changing their hazards.
+        for _ in 1:2
+            plan = M.Plan(g)
+            try
+                M.record!(plan)
+                M.run!(plan)
+                @test Array(out) == vcat(6f0 .* (1:8), 8f0 .* (5:12))
+            finally
+                M.free!(plan)
+            end
+        end
+    finally
+        M.free!(src)
+        M.free!(out)
+    end
+end

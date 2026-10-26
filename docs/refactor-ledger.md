@@ -130,7 +130,6 @@ Every comment and docstring checked against the code and the plan (plan,
 | P0.B13 | `Ref` without `GC.@preserve` and UserID vs `instance_id` in `metal/trace.jl` | - | n/a | 2430663 deletes `metal/trace.jl`, which had no caller |
 | P0.B14 | device features enabled without querying them | - | done | ab5e296: `devicefeatures` enables only reported bits and names a missing required one |
 | P0.B15 | regression test for `destroy_pool!` calling `empty!` on an `Inbox` (fixed in 2c7dc14) | - | done | ab5e296; test/test_device_reset_finalizer.jl, fails with `empty!` |
-| P0.B16 | pool memory (regions, arena parts, `Buffer`) has no per-channel last use: only `VkManagedBuffer` carries a `Stamp`, so a use on a second channel derives no cross-channel wait, and `reclaim!` stamps retired regions with the default channel's `fence(dev)`, which work on another channel does not pass. Fix: `Token(channel, value)` and a last use per resource driving both the submit-time waits and release (lifetime S1, S2, S4); `Graph(dev; priority)` builds on it. Regression test: two graphs on two channels sharing a buffer, a slow write and an add in both directions with no host wait, exact results, and a negative control without the wait | - | open | |
 
 ### Baseline
 
@@ -143,7 +142,7 @@ Every comment and docstring checked against the code and the plan (plan,
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P0.A10 | consolidate verified duplicate implementation bodies before the foundation; map larger duplicated algorithms/state and every caller to one core owner and a deletion gate; each replacement slice supersedes named old copies rather than reproducing them | seven source audits and source-disposition.tsv exist | doing | consolidation-order.md and evidence-index.md record owners, deletions, size and qualification. Open: cache retention/holds and CodeInstance compute entries, token retirement, Builder execution and TLAS pending-change/build ownership. Native Metal/ROCm qualification remains explicit per batch. |
+| P0.A10 | consolidate verified duplicate implementation bodies before the foundation; map larger duplicated algorithms/state and every caller to one core owner and a deletion gate; each replacement slice supersedes named old copies rather than reproducing them | seven source audits and source-disposition.tsv exist | doing | consolidation-order.md and evidence-index.md record owners, deletions, size and qualification. Consolidated so far: 2430663, 5be6d30, ec168af (one Vulkan device object), be46b47 (`Device` is the KernelAbstractions backend); per-item status in experiments/deadcode/duplicate-status.md. Open: cache retention/holds and CodeInstance compute entries, token retirement, Builder execution and TLAS pending-change/build ownership. Native Metal/ROCm qualification remains explicit per batch. |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
@@ -290,9 +289,9 @@ Every comment and docstring checked against the code and the plan (plan,
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P3.A1 | core `SubmitChannel`/`Recording`/`Submission` | - | open | |
+| P3.A1 | core `SubmitChannel`/`Recording`/`Submission`; a `Recording` belongs to a queue kind, not to a queue | - | open | |
 | P3.A2 | `Builder` and the emit verbs on core's walk (signatures: api.md 4.5) | - | open | |
-| P3.A3 | queue kinds and core's queue policy | - | open | |
+| P3.A3 | queue kinds per segment and core's queue policy; a graph without graphics work records for the compute-capable kind with the most queues (Compute on RADV, Main on NVIDIA) | - | open | |
 | P3.A4 | tokens per segment and channel, claim and submit in one step | - | open | |
 | P3.A5 | waits derived for the whole run before its accesses are recorded | - | open | |
 | P3.A6 | the lock order with `finally` | - | open | |
@@ -349,12 +348,12 @@ Every comment and docstring checked against the code and the plan (plan,
 | P3.D43 | delete `openrun` (Metal's uses stay until phase 9) | 24 hits, 8 files | open | |
 | P3.D44 | delete `closerun!` (Metal's uses stay until phase 9) | 23 hits, 8 files | open | |
 | P3.D45 | delete `submitrun!` (Metal's uses stay until phase 9) | 8 hits, 3 files | open | |
-| P3.D46 | delete `batchqueue` (Metal's uses stay until phase 9) | 107 hits, 47 files | open | |
+| P3.D46 | delete `batchqueue` (Metal's uses stay until phase 9); work beside the default queue is a graph of another priority or a submission that finds the main queue busy (P3.A25) | 107 hits, 47 files | open | |
 | P3.D47 | delete `allocate_batch_queue!` (Metal's uses stay until phase 9) | 31 hits, 17 files | open | |
 | P3.D48 | delete `supports_batch_queue` (Metal's uses stay until phase 9) | 15 hits, 9 files | open | |
 | P3.D49 | delete `release_batch_queue!` (Metal's uses stay until phase 9) | 26 hits, 9 files | open | |
 | P3.D50 | delete the channel's hold stack (`SubmitChannel.holds`), `spare`, `thread` | - | open | |
-| P3.D52 | delete `LavaBackend`'s upload queue and `external.jl`'s direct use of `compute_queue` | 7 hits of `compute_queue` | open | |
+| P3.D52 | delete `LavaDevice.compute_queue` and `external.jl`'s direct use of it | 7 hits of `compute_queue` | open | |
 | P3.D53 | delete the head barrier | - | open | |
 | P3.D54 | delete `drain!(::SubmitChannel)` (core's `drain!(pool.inbox)` stays, internals.jl) and `flush!` as user-facing verbs; `acquire!(::SubmitChannel)`, `release!(::SubmitChannel, r)`, `waitfor!(::Stamp)` | 60 hits of `drain!` (all methods), 16 files | open | |
 
@@ -365,7 +364,7 @@ Every comment and docstring checked against the code and the plan (plan,
 | P3.W3 | rewrite `test/vulkan/test_closed_command_buffers.jl` | exists | open | |
 | P3.W4 | rewrite `test/vulkan/test_hold_trace.jl` | exists | open | |
 | P3.W5 | rewrite `test/test_holdleaves_stops_at_tlas.jl` | exists | open | |
-| P3.G1 | green: threads.jl THR-01/02/03 plus P0.T3 pure recording; run.jl (headless), ordering.jl, host.jl without its resize part | - | open | |
+| P3.G1 | green: threads.jl THR-01/02/03/12 plus P0.T3 pure recording; run.jl (headless), ordering.jl and inbox.jl (their two-queue cases under `spreadqueues`), holds.jl HOLD-15, host.jl without its resize part | - | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
@@ -392,6 +391,7 @@ Every comment and docstring checked against the code and the plan (plan,
 | P3.A22 | inbox per plan: pending a change or recording a non-run access pushes the resource into the inboxes of the plans naming it (and naming composites built from it); a stage locks only its inbox resources (expanded to the members their pending builds read), its arena parts (stage 1), and the sync locks of itself, the plans sharing what it writes and the plans naming its inbox resources; no per-resource walk at run | - | open | |
 | P3.A23 | plan sync lock in the lock order (after the window lock, before sync states); eager calls, evictions and storage release take the sync locks of the plans naming what they touch (`lockresources`) | - | open | |
 | P3.A24 | "old or new, never mixed" holds per STAGE: a change arriving between a run's stages goes into the next submission | - | open | |
+| P3.A25 | the queue is picked at submission: once per run, under its locks before its first submission, for all its stages; once per eager submission, under its locks before it records (`pickchannel`, `DefaultQueues`: a queue it waits on, else an idle one, main first, else the least busy; priority limits the candidates to its class). No task, thread or current queue takes part. `SpreadQueues` and `queuepolicy!` for the specification. Tests: THR-12, ORD-04, INBOX-04 (default policy); ORD-01/08/13 and HOLD-15 under `spreadqueues` | - | open | |
 | P3.G90 | gate: the phase's green tests pass on every joined device type | - | open | |
 | P3.G91 | gate: a representative program exercises this completed slice through the final API against the separate frozen baseline | - | open | |
 | P3.G92 | gate: independent review of the phase's diff against plan, api.md, ledger: no forbidden move | - | open | |
@@ -734,7 +734,7 @@ Every comment and docstring checked against the code and the plan (plan,
 | P8.D22 | delete `ROCmAPI` | 32 hits, 4 files | open | |
 | P8.D23 | delete `WebGPUAPI` | 7 hits, 4 files | open | |
 | P8.D24 | delete `syncbackend` | 9 hits, 6 files | open | |
-| P8.D25 | delete `LavaBackend` | 265 hits, 107 files | open | |
+| P8.D25 | delete `LavaBackend` | 265 hits, 107 files | done | be46b47: `Device` is the KernelAbstractions backend and `LavaDevice` its Vulkan type; what remains in `test/` is historical prose in four test docstrings and the portability guard's pattern |
 | P8.D26 | delete `kibackend` | 11 hits, 5 files | open | |
 | P8.D27 | delete `todevice` | 41 hits, 21 files | open | |
 | P8.D28 | delete `defaultbackend` | 218 hits, 90 files | open | |

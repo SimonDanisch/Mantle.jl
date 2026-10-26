@@ -163,6 +163,8 @@ mutable struct TransientBuffer{T,N} <: TransientResource
     # transient raised SAM 2's encoder peak from 167 MB to 4.7 GB. `setindex!`
     # refuses undeclared transients.
     hostwritten::Bool
+    # Graph ownership is needed for declarative Readback(t); it is never packed.
+    graph::Any
 end
 
 # Stores start empty.
@@ -170,7 +172,7 @@ TransientBuffer{T,N}(dims::NTuple{N,Int}, first::Int, last::Int, block, offset::
                      hostwritten::Bool = false) where {T,N} =
     TransientBuffer{T,N}(dims, first, last, block, offset,
                          Tuple{UnitRange{Int},Vector{T}}[], ReentrantLock(), false,
-                         hostwritten)
+                         hostwritten, nothing)
 
 """
 A transient render target. The backend image exists from construction because the
@@ -248,6 +250,8 @@ mutable struct Graph{D}
     # Interning for `use(...; range = ...)`, keyed by value: `ids` is an IdDict, so
     # two equal slices would otherwise get two ids and no hazard between them.
     views::Dict{Tuple{Int,UnitRange{Int}},Any}
+    readbacks::Vector{Any}
+    readbacksealed::Bool
 end
 
 struct PassHandle

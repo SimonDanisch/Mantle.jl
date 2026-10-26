@@ -246,14 +246,14 @@ end
     end
 end
 
-# api.md 6, plan, phase 0: test_builder_is_a_value. Two builders on one channel, both open: no field of the device (its pool included) or of the channel references either.
+# api.md 6, plan, phase 0: test_builder_is_a_value. Two builders of one queue kind, both open: no field of the device (its pool included) or of any channel of that kind references either.
 @case "THR-03" 3 begin
     dev = testdevice()
-    ch = Mantle.channel(dev, Mantle.Main())           # the channel eager calls use (plan, Eager work)
-    b1, b2 = Mantle.Builder(dev, ch), Mantle.Builder(dev, ch)
+    b1, b2 = Mantle.Builder(dev, Mantle.Main()), Mantle.Builder(dev, Mantle.Main())
     @test b1 !== b2
     @test !thr_reaches(dev, b1) && !thr_reaches(dev, b2)
-    @test !thr_reaches(ch, b1) && !thr_reaches(ch, b2)
+    chs = Mantle.channels(dev, Mantle.Main(), 0)
+    @test !any(ch -> thr_reaches(ch, b1) || thr_reaches(ch, b2), chs)
 end
 
 # Recording consumes an already compiled plan. This checks the executable
@@ -391,4 +391,31 @@ end
     withtimeout(() -> wait(writer), 30)
     @test Array(a) == ones(Int32, n)
     Mantle.sweep!(d)                                  # the releases the finalizers queued
+end
+
+# plan, Queues (the queue is picked at submission), Eager work (a task's order is kept by the waits): a task's eager slow write of a is in flight when a second task makes an eager slow write of b: the second finds the first's queue busy and takes an idle one, so both finish in about the time of one; no task is tied to a queue. Then two tasks each add src into one shared array 1000 times, under the default policy and under spreadqueues: exact, so every call waited for the other task's last write on whichever queue it ran.
+@case "THR-12" 3 :multicompute begin
+    dev = testdevice()
+    a, b = MantleArray(dev, Int32, 1; unified = true), MantleArray(dev, Int32, 1; unified = true)
+    slowwrite!(dev, a, 1; ms = 400); slowwrite!(dev, b, 1; ms = 400); Mantle.waitidle(dev)   # compiled
+    alone = @elapsed (slowwrite!(dev, a, 2; ms = 400); Array(a))
+    both, d = counted() do
+        @elapsed begin
+            fetch(Threads.@spawn slowwrite!(dev, a, 3; ms = 400))   # returns once submitted: in flight
+            fetch(Threads.@spawn slowwrite!(dev, b, 3; ms = 400))   # finds that queue busy
+            Array(a); Array(b)                                     # unified: waits and copies, no submission
+        end
+    end
+    @test channelsused(d) == 2
+    @test both < 1.5alone
+    @test Array(a) == Array(b) == [3]
+    n = 4096
+    for spread in (false, true)
+        acc, src = MantleArray(dev, zeros(Int32, n)), MantleArray(dev, ones(Int32, n))
+        withqueues(spread) do
+            tasks = [Threads.@spawn(foreach(_ -> dispatch!(dev, thr_accumulate!, (acc, src), n), 1:1000)) for _ in 1:2]
+            withtimeout(() -> fetch.(tasks), 300)
+        end
+        @test all(==(2000), Array(acc))
+    end
 end

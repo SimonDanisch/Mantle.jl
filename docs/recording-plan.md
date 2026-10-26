@@ -520,13 +520,13 @@ fixed sequence of steps, each a function applied to a `CompileState`:
 | `dependencies!` | an edge "q before p" wherever two nodes conflict on a resource, reduced so each node lists only its direct predecessors (what a CUDA/HIP graph node takes); kept in the plan |
 | `compile!(s, node)` for every node | the node's compiled data: a `Kernel` per kernel node, compiled draws and traces, library setup; one method per final node type; loops were already expanded in core |
 | `costs!` | an estimated time per node from its `KernelInfo`, ndrange and declared bytes |
-| `schedule!` | node order and queue per node (Queues) |
+| `schedule!` | node order and queue kind per node (Queues) |
 | `hostcuts!` | independent nodes moved across host nodes, adjacent host nodes merged, copy nodes (compiled here) to host-visible memory for device arrays a host node reads, none for an array already in `Readback` memory; before `liveness!`, since it changes the order |
-| `presentspan!` | the span from the first swapchain write through present on one queue; independent work moved out, an unavoidable host/build cut rejected |
+| `presentspan!` | the span from the first swapchain write through present on one queue kind; independent work moved out, an unavoidable host/build cut rejected |
 | `liveness!`, `renderstores!`, `place!` | final lifetimes and render store operations, then transient placement in the plan's arena parts; only dead graph targets may discard; shared arenas, host nodes or not |
 | `sharing!` | edges between transients that share bytes (for CUDA/HIP graphs) |
 | `barriers!` | barriers and image layouts, keyed by memory (a transient by its arena bytes, so transients sharing bytes conflict), with state merged over both outcomes of every conditional launch |
-| `submissions!` | ordered segments, each with its queue, cut by the estimated budget, host nodes and present; waits between segments on different queues |
+| `submissions!` | ordered segments, each with its queue kind, cut by the estimated budget, host nodes and present; waits between segments of different kinds |
 | `summary!` | every resource the plan shares with other graphs or eager code, with all its accesses per segment; composites (a TLAS, a BLAS) included, their members expanded at submit (Ordering) |
 | `bindings!` | the argument block layout, the cell copy table, the prepare kernels' tables, descriptor sets, the residency list |
 
@@ -587,7 +587,8 @@ next compile. A plan is never re-recorded because of a measurement.
 ### Queues
 
 A device has queues of kinds (graphics+compute, compute, transfer, video
-decode, present). Core's policy:
+decode, present). Compile gives each segment a queue kind; which queue of
+that kind runs it is picked when the work is submitted. Core's policy:
 
 - Work only one kind can do goes there: video decode, present.
 - Host-device copies go to a transfer queue where the device has one and the
@@ -595,8 +596,28 @@ decode, present). Core's policy:
 - Parallelism inside a plan is barrier absence on one queue (Vulkan, Metal) or
   graph branches (CUDA, HIP). A second compute queue is used where independent
   branches' estimated overlap exceeds the cost of the waits between queues.
-- Independent graphs can run on different queues, with priorities (the
-  editor's frame above a background DNN).
+- A graph without graphics work records for the compute-capable kind with the
+  most queues: the compute kind on RADV, which has one graphics+compute queue
+  and four compute queues; the graphics+compute kind on NVIDIA, which has
+  sixteen.
+- **The queue is picked at submission.** A run picks one queue per kind its
+  segments use, under its locks, before its first submission; all its stages
+  use them. An eager call records after its pick, so every queue that can do
+  its work is a candidate. The pick: a queue the submission waits on anyway (a
+  graph waits on its previous run, so it stays on its queue), else an idle
+  queue, the main one first, else the least busy. On a device with queue
+  priorities, priority limits the candidates to the queues of its class. So
+  two tasks running independent work land on different queues, and no task is
+  ever named.
+- Every pick is correct: each wait names its channel (a `Token`), so the pick
+  decides only overlap and how many waits cross queues. A recording belongs to
+  a queue kind, not to a queue: a Vulkan command buffer to its queue family, a
+  Metal 4 command buffer to the device; a CUDA or HIP graph takes its stream
+  at launch.
+- The device's queue policy is a value: `DefaultQueues()`, above, or
+  `SpreadQueues()`, which sends every submission to the next queue of its
+  kind, so dependent work crosses queues wherever the device has more than
+  one. The specification sets it with `queuepolicy!` for its cross-queue cases.
 
 ### Ordering across graphs and queues
 
@@ -670,7 +691,7 @@ every resource a run names:
   plan that names it, so a run never walks the resources it names to find
   them.
 - **Tokens per segment.** Each segment of a run gets a token from the channel
-  it runs on. Claiming a token and submitting it happen under the channel
+  it runs on, the run's pick for the segment's kind (Queues). Claiming a token and submitting it happen under the channel
   lock in one step, so submissions reach each queue in token order (a
   timeline semaphore's signal value must increase with every signal). A run
   computes the waits of all its segments before it submits any, so its
@@ -760,11 +781,14 @@ every resource a run names:
 - **Host waits are GC-safe.** A blocking driver wait is a `@ccall gc_safe =
   true` (Julia 1.12, `base/c.jl:278-296`), so a thread waiting on the GPU does
   not hold up a GC another thread needs.
-- **Arenas:** graphs core expects to overlap get separate arena parts; the rest
-  share one. Tenancy is a table from graph id to that graph's peak, never
-  keeping a graph alive. Which graphs are expected to overlap comes from their
-  relative priorities (`Graph(priority = 0)` by default). This is a placement
-  policy hint, not a guarantee of overlap or preemption.
+- **Arenas:** graphs of equal priority (`Graph(priority = 0)` by default)
+  share an arena part. Every graph's transients start at offset 0 of the part,
+  so it costs the largest graph, not the sum, and the graphs' runs take turns:
+  a run holds the part until its last stage is submitted, and the GPU order
+  after that comes from the tokens. Graphs of different priority get separate
+  parts, so the editor's frame never waits for a background DNN's transients.
+  Tenancy is a table from graph id to that graph's peak, never keeping a graph
+  alive. Priority is no guarantee of overlap or preemption.
 
 ### Core types
 
@@ -779,7 +803,7 @@ end
 
 struct Recording{N}                 # one part of a segment: written once by record!, submitted every run
     native::N                       # VkCommandBuffer | ICB | CUgraphExec | hipGraphExec
-    channel::SubmitChannel
+    kind::QueueKind                 # each run submits it to the queue it picked for this kind
 end
 
 struct Submission{T,C}
@@ -811,7 +835,7 @@ Core's walk calls builder verbs; a device type implements them on its native
 object.
 
 ```julia
-b = Builder(device, channel)
+b = Builder(device, kind)                              # command objects of the queue kind (Vulkan: its family)
 emitdispatch!(b, node, cmd::CompiledDispatch, deps)   # direct or indirect, as compile decided
 emittrace!(b, node, cmd::CompiledTrace, deps)
 emitcopy!(b, node, cmd::CompiledCopy, deps)
@@ -948,16 +972,15 @@ and the same `dispatch!` as on a graph, and is submitted before it returns.
 ```julia
 function dispatch!(dev::Device, kernel, args, ndrange)
     k = kernel!(dev, kernel, argtypes(args))          # the Kernel at its CodeInstance
-    ch = channel(dev, Main())
     packed = acquire!(pool(dev), Unified(), argumentbytes(k))   # fallible: before any lock
     token = nothing
     try
-        token = submitapplying(uses(k, args); ch) do after   # internals.jl section 11: pending changes in front,
-            foreach(usable, resources(args))          # freed through the creator's handle: throws, under the lock
+        token = submitapplying(uses(k, args); work = ComputeWork()) do ch, after   # internals.jl section 11: pending
+            foreach(usable, resources(args))          # changes in front; ch picked under the locks, from the waits
             checkwritable(kernel, args)               # a write touch on a read-only array throws
             packarguments!(packed, k, args, after)    # each array's storage after the pending changes
             ext = launchextents(dev, k, resolve(ndrange, args))
-            b = Builder(dev, ch)
+            b = Builder(dev, queuekind(ch))
             emitdispatch!(b, nothing, CompiledDispatch(k, ext, packed), Deps((), ()))
             [finish(b)]
         end
@@ -990,8 +1013,18 @@ end
   `Readback` memory. `Array(x)` of a graph array throws, like `getindex`. Scalar
   indexing stays off by default; `allowscalar` is GPUArrays' interface and
   accepted as such.
-- Calls on one channel from two threads are ordered by the channel lock; each
-  thread's program order is kept.
+- **Deferred graph reads** use `Readback(graph_array)` (or `Readback(g, array)`
+  for an external buffer). Declaration returns a one-shot future. The graph
+  records its snapshot transfer at that point; `run!` schedules it with the
+  producing work. `fetch`, `wait` and `isready` add no submission. Fetch returns
+  an owning CPU array tied to that execution. Replay preserves an unfetched
+  preceding result before reusing staging; teardown preserves submitted results
+  and rejects pending requests. Fixed-shape outputs and their current API are
+  described in [api.md](api.md#graph-readback-futures).
+- Each submission picks its queue (Queues). A task's program order is kept by
+  the waits: a call waits for every earlier access it conflicts with, on any
+  queue. Independent calls from two tasks may run on two queues at once;
+  submissions to one queue are ordered by its channel lock.
 
 ### Windows and present
 
@@ -1481,7 +1514,8 @@ Declarations into one graph are serialized by the graph lock (a nested
 declaration of the same task reuses it). Compiled kernels live in
 the `Mantle.Kernel` at the kernel's `CodeInstance`, metadata filled once under
 the kernel's lock. Eager operations share no scratch; each uses its own
-temporaries.
+temporaries. No task is tied to a queue: concurrent tasks overlap because
+each submission picks an idle queue (Queues).
 
 ### What a device type implements
 
@@ -2065,7 +2099,10 @@ Green: `test/suite/areas/holds.jl`, `test/suite/areas/free.jl`.
 ### 3. Channels, recording and ordering
 
 Adds: core `SubmitChannel`/`Recording`/`Submission`, `Builder` and the emit
-verbs on core's walk, queue kinds and core's queue policy, tokens per segment
+verbs on core's walk, queue kinds per segment and core's queue policy, the
+queue picked per run and per eager submission (`pickchannel`, the device's
+`DefaultQueues()` or `SpreadQueues()` set by `queuepolicy!`), recordings
+per queue kind, tokens per segment
 and channel with claim and submit in one step, waits derived for the whole run
 before its accesses are recorded, the lock order with `finally`, GC-safe host
 waits, the graph lock as a non-reentrant semaphore and the only lock held
@@ -2081,18 +2118,21 @@ Deletes: the hold stack, `spare`/`thread`, `Closed`, the Vulkan
 `holdleaves!` at emit, `submitlist!`, `Stamp`/`stampof`/`claim!`/`unclaim!`/
 `crosswaits!`/`stamp!`/`syncbuf!`, the head barrier, `indirectbarrier!`,
 `openrecording` returning `nothing`, `openrun`/`closerun!`/`submitrun!`,
-`batchqueue` and the batch-queue verbs (Metal's uses stay until phase 9), `LavaBackend`'s upload queue,
+`batchqueue` and the batch-queue verbs (Metal's uses stay until phase 9; work
+beside the default queue is a graph of another priority or a submission that
+finds the main queue busy), `LavaDevice.compute_queue` and `external.jl`'s
+direct use of it,
 `Outstanding`, the names listed under "Core types" (Metal's
 `openrun`/`closerun!` stay until phase 9). Rewrites
 `test/test_hold_lifetime.jl`, `test_batch_queue_lifetime.jl`,
 `test_closed_command_buffers.jl`, `test_hold_trace.jl` and
 `test_holdleaves_stops_at_tlas.jl`.
 
-Green: `test/suite/areas/threads.jl`, `test/suite/areas/threads.jl`,
-`test/suite/areas/run.jl` for headless graphs, `test/suite/areas/run.jl`,
-`test/suite/areas/ordering.jl`, `test/suite/areas/threads.jl`, `test/suite/areas/host.jl` without
-its resize part (that part in phase 4), `test/suite/areas/run.jl`: a run's
-host time does not grow with the number of resources it names.
+Green: `test/suite/areas/threads.jl`, `test/suite/areas/run.jl` for headless
+graphs, `test/suite/areas/ordering.jl`, `test/suite/areas/inbox.jl`,
+`test/suite/areas/holds.jl` HOLD-15, `test/suite/areas/host.jl` without its
+resize part (that part in phase 4), `test/suite/areas/run.jl`: a run's host
+time does not grow with the number of resources it names.
 
 ### 4. Arguments and sizes
 
@@ -2424,9 +2464,12 @@ is still required. Measurements must not silently change observable semantics.
    specification limit: §4.
 10. Bounded repeated groups are core-unrolled and cut between iterations (§3).
     Native loop candidates must preserve iteration/termination/budget behavior.
-11. Graph(priority=0) accepts a relative integer priority. Core may choose native
-    queues/arena parts from it; no portable preemption or overlap guarantee.
-    Queue capability and actual latency qualification remain separate.
+11. Graph(priority=0) accepts a relative integer priority. Graphs of equal
+    priority share an arena part and take turns; graphs of different priority
+    get separate parts. The queue is picked per run and per eager submission
+    (Queues); on a device with queue priorities, priority limits it to the
+    queues of its class. No portable preemption or overlap guarantee. Queue
+    capability and actual latency qualification remain separate.
 12. Graph(profile=true) and nonblocking sampled timings(g): §10.
 13. sort!(group;by,lt,rev) rewrites the pass list. O(pieces) list work and RM-06's
     finite latency gate remain explicit; native GPU sorting is a later candidate.

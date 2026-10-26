@@ -458,11 +458,14 @@ pastfirst(pl::Plan) = between(pl)                    # set once stage 1 has subm
 # resources' last writes, so later readers on other queues wait for them, and
 # storage a move replaced is retired with this token only after every earlier
 # reader was waited for. `ownwaits` lets a run pass the waits it computed for
-# all its segments before recording any of them. Returns Again or WaitFor
+# all its segments before recording any of them. `target` is the channel a
+# run picked for the segment's kind, or an eager submission's EagerQueue, whose
+# channel is picked here from the waits, before anything is recorded
+# (internals.jl section 8). Returns Again or WaitFor
 # (nothing emitted), or the token and the records whose changes it applied (a
 # later segment of a run that touches one of them waits on this token;
 # internals.jl section 6).
-function submitwith!(ch, records, prepared, ownuses, ownparts; self = nothing, restores = true,
+function submitwith!(target, records, prepared, ownuses, ownparts; self = nothing, restores = true,
                      ownwaits = waitsfor(ownuses), present = nothing)
     taken = takepending(records, self)
     done(taken) || return taken                      # WaitFor
@@ -483,19 +486,21 @@ function submitwith!(ch, records, prepared, ownuses, ownparts; self = nothing, r
     # to reject a raced growth before any mapping or token is claimed.
     # NeedDestination escapes submitapplying to its caller; retrying there
     # with the same staging allocation would never make progress.
+    changeuses = [u for c in taken.changes for u in uses(c)]
+    waits = [waitsfor([changeuses; ownuses...]); ownwaits]
+    ch = pick(target, waits)                         # internals.jl section 8
     binds = Token[]
     foreach(s -> bindnow!(ch, s, binds), steps)      # pages first, through the sparse queue
-    pre = Builder(device(ch), ch)
+    pre = Builder(device(ch), queuekind(ch))
     foreach(s -> emitstep!(pre, s), steps)           # copies, stores, cell writes, record writes, builds, with barriers
-    cmds = recordown(ownparts, steps)                # internals.jl section 6; an eager call packs here
-    changeuses = [u for c in taken.changes for u in uses(c)]
+    cmds = recordown(ownparts, ch, steps)            # internals.jl section 6; an eager call packs here
     # The steps' accesses, and a non-run submitter's own (`ownuses`; a run
     # passes none: its accesses are its segments' tokens), are recorded as
     # eager accesses on the SyncStates and put into the inboxes of the other
     # plans naming those resources (internals.jl section 8). Their waits cover
     # the naming plans' last runs, read under those plans' sync locks.
     token = submit!(ch, [finish(pre); cmds...]; eager = [changeuses; ownuses...], self,
-                    waits = [waitsfor([changeuses; ownuses...]); ownwaits; binds], present)
+                    waits = [waits; binds], present)
     # No fallible work after acceptance: pre-reserve commit/retirement/notification
     # capacity before claim. A bookkeeping failure poisons/quarantines the domain.
     commit!(taken, steps, token)   # remove from the records; update the storage they changed; retire
@@ -1079,7 +1084,7 @@ mutable struct BuildRecording{C}            # C: the device type's native comman
     const structure::AccelStructure
     const mode::Union{Build,Update}
     const deps::Deps                         # the build node's barrier, recorded with it (the one barrier call site)
-    const channel::SubmitChannel
+    const kind::QueueKind                    # the segment's; a run submits it to its pick for the kind
     marked::Bool                             # set by a change under the structure's lock; true until first recorded
     cmd::Union{Nothing,C}                    # the device type's native command buffer, or nothing
     recordedmode::Union{Build,Update}        # what it recorded: an Update before any Build records a Build
@@ -1104,7 +1109,7 @@ function current!(c::BuildRecording, steps)
     st = afterstate(s, steps)
     mode = c.recordedmode = effectivemode(st, c.mode)
     c.recordedcount = commandcount(st, mode)
-    b = Builder(s.device, c.channel)         # command objects reserved by prepare! (B.4), so nothing here fails
+    b = Builder(s.device, c.kind)            # command objects reserved by prepare! (B.4), so nothing here fails
     # The node's barrier first, on the first prepare kernel (records kernels
     # of a TLAS, the zero-area fill of a BLAS); each later step its own.
     after = emitprepared!(b, preparekernels(s), c.deps)   # c.deps reaches the build if there is no kernel

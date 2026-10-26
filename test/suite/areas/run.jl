@@ -96,14 +96,6 @@ end
 """What `f()` throws on another task, or `nothing`; a deadlock fails the test."""
 thrown(f; timeout = 30) = thrownby(Threads.@spawn(f()); timeout)
 
-# submissions(g) lists stages (cut by host nodes), each with its segments (cut
-# by budget and queue). api.md 2.3 leaves the shape open; this is the one the
-# suite assumes.
-segmentcount(g) = sum(s -> length(s.segments), Mantle.submissions(g))
-
-"""The channels a run's submissions went to (diagnostics count them per channel)."""
-channelsused(d) = count(>(0), values(d.submissions))
-
 """Julia bytes `k` steady-state runs of `g` allocate (in a function: no global is boxed into the count)."""
 function runbytes(g, k)
     return @allocated for _ in 1:k

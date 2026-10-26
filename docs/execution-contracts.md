@@ -1004,3 +1004,23 @@ The public launch API does not expose source-cell addresses except lengthof.
 A backend must qualify the check against its compiler output rather than merely
 stamp every ordinary kernel with "no cell reads". THR-04 and KL-10 define the
 executable acceptance cases; debug checking is off on performance runs.
+
+## Graph-declared readback snapshots
+
+`Readback(array)` and `Readback(graph, array)` declare a snapshot at their graph
+position and return a one-shot future. The copy has an explicit source-read and
+destination-write dependency, so source liveness reaches the copy and later
+source writes follow it. Readback destinations do not alias transient storage.
+Vulkan's recorded copy includes a transfer-write to host-read visibility barrier;
+coherent host-cached staging is read only after the captured execution token.
+The shared-memory implementation uses a normal graph copy kernel.
+
+Each output has a reusable staging slot owned by its live plan. Each execution
+with requests publishes a snapshot carrying that run's token and a hold on the
+slot's Buffer. `fetch` waits for that token and makes an owning CPU array; no
+submission is made. Before replay overwrites a previous outstanding snapshot,
+core materializes it. `free!(plan)` remains nonblocking: it rejects unsubmitted
+requests and drops its slot hold, while submitted futures keep their storage
+until collection. Run failures reject requests rather than leaving waiters
+blocked. A moved native source binding is recompiled/recorded before replay;
+a changed logical shape is rejected by this fixed-shape implementation.

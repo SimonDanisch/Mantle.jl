@@ -28,8 +28,10 @@ naming their image because they carry a layout transition.
 function barrierhazards(ts::Vector{Transition})
     out = Tuple{Vector{Type},Type}[]
     for t in ts
-        key = (sort(t.waits; by = string), t.to)
-        any(==(key), out) || push!(out, key)
+        # Wait order does not change a hazard. Comparing the small sets avoids
+        # formatting and sorting type names for every transition in a model.
+        any(h -> h[2] === t.to && issetequal(h[1], t.waits), out) ||
+            push!(out, (t.waits, t.to))
     end
     out
 end

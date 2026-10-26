@@ -1269,3 +1269,32 @@ emitlaunch!(e::Emitter, ::Any, lp, argaddr, it, tlas, ::Nothing, name) =
     emit_dispatch!(e, lp.pipeline, argaddr, it.block_dims, tlas, name)
 emitlaunch!(e::Emitter, ::DeviceRange, lp, argaddr, it, tlas, indirect, name) =
     emit_dispatch!(e, lp.pipeline, argaddr, indirect, tlas, name)
+
+# Graph-declared readback: the transfer and host visibility barrier live in the
+# same recording/submission as the producing passes. Fetch only waits and copies.
+nativebuffercopy(::LavaDevice) = true
+
+readbackbinding(::LavaDevice, src) = (a = storage(src); (a.buf[], a.offset))
+samereadback(a::LavaArray, b::LavaArray) =
+    a.buf[] === b.buf[] && a.offset == b.offset && size(a) == size(b)
+
+function emitreadback!(e::Emitter, pl::Plan, pp::PassPlan)
+    src = storage(first_target(pp.pass))
+    r = pp.pass.dst
+    dst = r.buffer.store
+    r.recordedsource = readbackbinding(pl.graph.dev, r.source)
+    srcbuf = src.buf[]::VkManagedBuffer
+    dstbuf = (memoryof(dst)::BufferBlock).ref[]::VkManagedBuffer
+    cmd_copy_buffer!(e, srcbuf, dstbuf, sizeof(eltype(r)) * length(r);
+                     src_off=pool_offset(srcbuf) + src.offset,
+                     dst_off=pool_offset(dstbuf) + offset(dst))
+    memorybarrier!(e.cmd, e.ctx, VK_PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_HOST_BIT,
+                   VK_ACCESS_TRANSFER_WRITE_BIT, VK.ACCESS_HOST_READ_BIT)
+    return nothing
+end
+
+function hostspan(::LavaDevice, block::BufferBlock)
+    p = (block.ref[]::VkManagedBuffer).mapped_ptr
+    p == C_NULL && throw(ArgumentError("hostspan: buffer is not host mapped"))
+    return (p, block.bytes)
+end

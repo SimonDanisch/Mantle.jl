@@ -77,6 +77,7 @@ const BACKEND_SPECIFIC_FUNCS = Set{Symbol}([
     :feed!, :decodemore!, :remaining,      # hardware decoder objects only
     :buildgeometry!, :instancearray, :updatebatch!,  # BatchedTLAS native primitives
     :mipmapped,                           # graphics textures only
+    :emitreadback!, :readbackbinding,     # native buffer transfer, only where nativebuffercopy(dev); others record a copy kernel
 ])
 
 # Known missing implementations. New omissions and resolved entries both fail the guard.

@@ -97,8 +97,7 @@ end
 
 """
 A matte network as one graph with a host node between its stages
-(`output = 3 * (2 * input)`); `kw` goes to `Graph` (`priority`: keyword and
-values open, api.md 2.3).
+(`output = 3 * (2 * input)`); `kw` goes to `Graph` (`priority`, api.md 2.3).
 """
 function mattegraph(dev, input, output, host; kw...)
     g = Graph(dev; kw...)
@@ -157,8 +156,8 @@ end
 
 # ED-02: a DNN graph with a host node beside the frame graph, on separate
 # arena parts (examples.jl 33; plan, Ordering across graphs and queues,
-# "Arenas": core decides parts from the graphs' priorities, whose keyword is
-# open). While the DNN's run is held in
+# "Arenas": graphs of different priority get separate parts). While the
+# DNN's run is held in
 # its host function, holding its arena parts, frames still run and are
 # correct, and wait for nothing on the host. The DNN's result is exact after
 # its host function returns.
@@ -166,9 +165,9 @@ end
     dev = testdevice()
     input, output = MantleArray(dev, collect(Int32, 1:4096)), MantleArray(dev, Int32, 4096)
     gate = Gate()
-    matte = mattegraph(dev, input, output, blockinghost(gate); priority = 0)   # keyword open
+    matte = mattegraph(dev, input, output, blockinghost(gate); priority = 0)
     canvas, t = MantleArray(dev, Int32, ED_W, ED_H), MantleArray(dev, Int32[0])
-    frame = paintgraph(dev, canvas, t; priority = 1)                          # keyword open
+    frame = paintgraph(dev, canvas, t; priority = 1)                          # its own arena part
     run!(frame)
     letgo!(gate)
     run!(matte)                                      # compiles with the gate open

@@ -89,10 +89,6 @@ function countergraph(dev)
     return g, counter
 end
 
-# submissions(g) lists stages, each with its segments (shape open in api.md
-# 2.3; the one the suite assumes).
-segmentcount(g) = sum(s -> length(s.segments), Mantle.submissions(g))
-
 """A graph whose repeated group writes out[i] = i for i in 1:iterations."""
 function indexloop(dev, iterations)
     out = zeroed(dev, iterations)

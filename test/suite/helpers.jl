@@ -116,6 +116,32 @@ function counted(f, dev = testdevice())
     return v, Mantle.diagnostics(dev)
 end
 submitcount(d) = sum(values(d.submissions))   # not `submissions`: that is Mantle's, for a graph
+"""The channels that submitted something, from a Diagnostics (counted per channel)."""
+channelsused(d) = count(>(0), values(d.submissions))
+"""
+The segments of a compiled graph: `submissions(g)` lists stages (cut by host
+nodes), each with its segments (cut by budget and queue kind; api.md 2.3).
+"""
+segmentcount(g) = sum(s -> length(s.segments), Mantle.submissions(g))
+
+# ── Queue policy ──
+
+"""
+`f()` with `dev`'s queue policy set to `SpreadQueues()`: every submission
+takes the next queue of its kind, so dependent work crosses queues wherever
+the device has more than one (recording-plan.md, Queues; api.md 2.1
+`queuepolicy!`). The previous policy is restored afterwards.
+"""
+function spreadqueues(f, dev = testdevice())
+    old = Mantle.queuepolicy!(dev, Mantle.SpreadQueues())
+    try
+        return f()
+    finally
+        Mantle.queuepolicy!(dev, old)
+    end
+end
+"""`f()` under `spreadqueues` when `spread`, else under the default policy."""
+withqueues(f, spread::Bool, dev = testdevice()) = spread ? spreadqueues(f, dev) : f()
 
 """Memory figures, for leak cases: compare before and after, after a sweep."""
 function memory(dev = testdevice())

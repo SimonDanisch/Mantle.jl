@@ -4,8 +4,8 @@
 # (run!, lockgraph, holdparts!, runhost!).
 #
 # Arena parts in these cases: graphs on one device share the device-memory
-# arena part by default (plan, Memory: separate parts only for graphs core
-# expects to overlap, by priority). A transient no host node touches lives
+# arena part by default (plan, Ordering, "Arenas": equal priority shares a
+# part, a different priority gets its own). A transient no host node touches lives
 # in that part; one a host node reads or writes lives in the host-visible
 # part. `hostdevicepart!` gives a graph a tenancy in the device-memory part.
 

@@ -29,11 +29,6 @@ end
 islavapipe(name) = occursin("llvmpipe", lowercase(name))
 
 
-# submissions(g) lists stages (cut by host nodes), each with its segments (cut
-# by budget and queue). api.md 2.3 leaves the shape open; this is the one the
-# suite assumes.
-segmentcount(g) = sum(s -> length(s.segments), Mantle.submissions(g))
-
 """
 A chain of kernels over two device arrays of `n` Float32 whose estimated cost
 (8n bytes per kernel at `caps(dev).bandwidth`, bytes per second) is about

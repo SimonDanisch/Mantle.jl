@@ -487,8 +487,9 @@ run's own submission. A failure after the acquire hands the image back
 function run!(pl::Plan)
     checklive(pl, pl.slabs, length(pl.graph.transients))
     reclaim!(pool(pl.graph.dev), pl.graph.dev)
-    beforeframe!(pl.graph.dev, pl)
     try
+        preparereadbacks!(pl)
+        beforeframe!(pl.graph.dev, pl)
         # After the acquire, which is the last place a resize is noticed.
         # Refitting earlier can pair a new-size colour target with an old-size
         # depth target, a lost device on NVIDIA.
@@ -498,7 +499,8 @@ function run!(pl::Plan)
         # Re-record on the owning thread what a move or refit invalidated.
         pl.stale && (pl.stale = false; record!(pl))
         execute!(pl.graph.dev, pl)
-    catch
+    catch err
+        failreadbacks!(pl, err)
         abandonframe!(pl.graph.dev, pl)
         rethrow()
     end
@@ -560,6 +562,7 @@ function execute!(dev, pl::Plan)
     end
     am = pl.args
     am === nothing || setargtoken!(am, tok)
+    commitreadbacks!(pl, tok)
     pl.stamped && (pl.profiler.pending = true)
     return nothing
 end
@@ -730,6 +733,8 @@ function emitwork!(e, pl::Plan, pp::PassPlan)
         end
     elseif p.kind === :copy
         emitcopy!(e, pl, pp)
+    elseif p.kind === :readback
+        emitreadback!(e, pl, pp)
     else
         h = beginrender!(e, pl, pp)
         try

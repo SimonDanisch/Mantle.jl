@@ -699,6 +699,7 @@ foreachbackend(joinpath(@__DIR__, "test_dropped_resources.jl"))
 # many submissions a call makes, what `error()` in a kernel means, the pool's own
 # trim policy, and a refused allocation that is `nothing`.
 foreachbackend(joinpath(@__DIR__, "test_submission_count.jl"))
+foreachbackend(joinpath(@__DIR__, "test_readback.jl"))
 foreachbackend(joinpath(@__DIR__, "test_kernel_error.jl"))
 foreachbackend(joinpath(@__DIR__, "test_pool_trim_policy.jl"))
 foreachbackend(joinpath(@__DIR__, "test_tolerated_alloc_failure.jl"))

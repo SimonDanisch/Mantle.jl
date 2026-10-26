@@ -42,6 +42,7 @@ marked internal.
 | `devices()` | Enumerates registered device types: Vulkan physical devices as `LavaDevice`s where available (including installed lavapipe), Apple GPUs as `MetalDevice`s on macOS, plus `CudaDevice`s and `ROCmDevice`s once `using CUDA`/`using AMDGPU` loaded their extensions. Driver objects are created on a device's first use, not here. |
 | `LavaDevice`, `MetalDevice`, `CudaDevice`, `ROCmDevice` | Subtypes of `abstract type Device <: KA.Backend`. One Julia object per hardware device and driver; one GPU through two drivers is two devices with two pools. |
 | `KA.get_backend(a)` | `device(a)` for an array on a device; its `GraphDevice{D}` location for an array on a graph, so a KernelAbstractions launch over it declares a kernel node (section 2.2). |
+| `queuepolicy!(dev, policy)` | Internal, for the specification. Sets how `dev`'s submissions pick their queue and returns the previous policy: `DefaultQueues()` (the default: a queue the submission waits on, else an idle one, else the least busy) or `SpreadQueues()` (every submission takes the next queue of its kind, so dependent work crosses queues). Changes placement only, never results (plan, Queues). |
 | `using Lavapipe_jll` | Makes lavapipe's ICD visible; must happen before the first `Device()`/`devices()` (the registry creates the Vulkan instance then). An extension. |
 
 On a host with no hardware GPU for the platform default, Device() throws
@@ -77,6 +78,7 @@ the array's resource, not types.
 | `a[r] = data` | A store, scheduled: the call copies the data once into an upload region (host-visible system memory acquired for it, not the array's storage) and enqueues the request with its byte range in the parent (a view's offset applied). The submission that applies it writes it into the storage the array has at that point of the sequence: within the device type's inline limit (`caps(dev)`: 64 KiB at 4-byte offsets and sizes on Vulkan) with `emitstore!`, beyond it by a copy from the upload region (`emitcopy!`); no staging is allocated at apply. A store pended before a resize is copied along with the old contents; one after it writes the new storage. `length(data) == length(r)` or `DimensionMismatch`. A later store covering an earlier pending one replaces it. |
 | `copyto!(a, data)` | A store into `a[1:length(data)]`. |
 | `copy!(a, data)` | Base's `copy!`: a resize to `length(data)` that keeps no old contents and a store, enqueued together. On a view only with the view's length. |
+| `Readback(a)`, `Readback(g, a)` | Declare a deferred CPU snapshot in graph `g`; return a one-shot `ReadbackFuture`. The one-argument form finds the owner of a transient or `viewof` view. External buffers name `g` explicitly. The transfer runs as part of `run!`; `fetch`, `wait` and `isready` submit no GPU work. Declare outputs before compiling; subsequent requests reuse that output's recording and bind to its next execution. See [graph readback futures](#graph-readback-futures). |
 | `Array(a)`, `copyto!(host, a)` | A host read: its own submission (the pending changes of `a`, a copy into Readback memory), a wait for that token, a memcpy. For a kernel-written length the cell is copied in the same submission. Throws for a graph array. |
 | `show(io, MIME"text/plain"(), a)` on a graph array | A metadata summary (element type, requested shape when host-known, graph); reads no contents, submits nothing and never reads back a kernel-written length. Displaying the value at the REPL is allowed. |
 | `size(a)`, `length(a)` | The real length, as Julia's array API defines it. For a length a kernel writes: waits for that kernel and reads the length back from its cell; launches never need it, they use the length on the device. During the declaration of a graph that writes it, no run has produced it yet, so it throws. |
@@ -110,10 +112,10 @@ from a later `size(a)` after waiting.
 
 | call | contract |
 |---|---|
-| `Graph(dev; rewrites = (), profile = false, priority = 0)` | An empty graph on `dev`. Rewriters run only if listed (`FuseEpilogues()`, `MergeRegions(attribute)`). Priority is a relative scheduling hint, with no preemption guarantee; profiling is opt-in (execution-contracts.md §10). |
-| `run!(g)` | The first call compiles, records and runs; later calls run. Every independent root segment waits on the GPU for all previous-run tokens of g. The host waits only with the graph lock and the run's arena-part holds held, never with a sync-state, channel, pool or window lock: for another graph's run that holds a shared arena part, for a host node's inputs, for the swapchain acquire, and in `acquire!`'s pressure steps (plan, Ordering, Run). A `GPURef` store never makes it wait: it is a scheduled change like any other. Returns `Submitted()` or `Skipped()` (a minimized window), both public. Throws for a freed graph, when called from a host function of `g`, and when the calling task holds an arena part of `g`'s plan. |
+| `Graph(dev; rewrites = (), profile = false, priority = 0)` | An empty graph on `dev`. Rewriters run only if listed (`FuseEpilogues()`, `MergeRegions(attribute)`). Graphs of equal priority share an arena part and their runs take turns; graphs of different priority get separate parts and, on a device with queue priorities, queues of their class. No preemption or overlap guarantee. Profiling is opt-in (execution-contracts.md §10). |
+| `run!(g)` | The first call compiles, records and runs; later calls run. Each run picks one queue per queue kind its segments use, from what it waits on and what is in flight (plan, Queues). Every independent root segment waits on the GPU for all previous-run tokens of g. The host waits only with the graph lock and the run's arena-part holds held, never with a sync-state, channel, pool or window lock: for another graph's run that holds a shared arena part, for a host node's inputs, for the swapchain acquire, and in `acquire!`'s pressure steps (plan, Ordering, Run). A `GPURef` store never makes it wait: it is a scheduled change like any other. Returns `Submitted()` or `Skipped()` (a minimized window), both public. Throws for a freed graph, when called from a host function of `g`, and when the calling task holds an arena part of `g`'s plan. |
 | `free!(g)` | Releases the plan and drops the graph's holds, once; also done by the graph's finalizer. `run!` and declaring afterwards throw. Called from a host function of `g` it throws before it marks `g` freed, so the finalizer still releases it. |
-| `submissions(g)` | A vector of stages, cut by host nodes; each has `.segments`, cut by budget and queue. A segment has `.channel` and `.after` (its predecessor segments in this run). |
+| `submissions(g)` | A vector of stages, cut by host nodes; each has `.segments`, cut by budget and queue kind. A segment has `.kind` (its queue kind; each run picks the queue) and `.after` (its predecessor segments in this run). |
 | `timings(g)` | Nonblocking snapshot of completed sampled GPU intervals and sampling counters; profile=false creates no timer objects. execution-contracts.md §10 fixes lifecycle and availability. |
 | `naivebytes(g)`, `peakbytes(g)` | Transient bytes without and with placement. |
 
@@ -391,7 +393,7 @@ failure contract. Normal WSI status is a structured result, not device loss.
 | `caps(dev)` | core, at compile and at declaration | An immutable record of facts the device type reports; core decides from them (required schema in execution-contracts.md §6). Fields: `sparseresidency`; `accelbyaddress`; the device's limits; the largest single allocation; the sparse page size and the device's sparse address space (core's `reservesize` and `sparsethreshold`); the driver's job timeout and whether the device drives a display (core's submission budget); the roofline inputs of `costs!` and `schedule!`: throughput per element type, memory bandwidth, whether a transfer queue exists, the cost of a wait between queues (internals.jl section 4: `caps(dev).throughput[T]`, `.bandwidth`, `.transfer`, `.crossqueuecost`); the inline store limit and alignment (`.inlinestore`, `.inlinealign`: 65536 and 4 on Vulkan, `vkCmdUpdateBuffer`); the capability flags for geometry stages, graphics, mesh pipelines, procedural traversal, ray-tracing pipelines and tessellation (Appendix A, `supports_*`). |
 | `config(dev, f)` | `kernel!`, before `compilekernel` | Immutable compiler/feature/ABI/group/math/specialization configuration of kernel f; execution-contracts.md §6. |
 | `countsource(dev)` | core, at record and run | `CountRecorded()` (Vulkan) or `CountFromMemory()` (Metal): where a TLAS or BLAS build gets its count. |
-| `queuekinds(dev)` | core's queue policy | The queue kinds the device has (graphics+compute, compute, transfer, sparse binding, video decode, present). |
+| `queuekinds(dev)` | core's queue policy | The queue kinds the device has (graphics+compute, compute, transfer, sparse binding, video decode, present), with the number of queues of each and their priority classes. |
 | `memoryclasses(dev)`, `budget(dev, heap)` | core allocator before acquire | Native memory-class/heap facts and available-byte estimate per heap with provenance. Core budget(dev) aggregates distinct device-local heaps. Unified/host/opaque accounting and pageable copies follow execution-contracts.md §12. |
 | `instancerecordtype(dev)` | the TLAS records kernel | `VkAccelerationStructureInstanceKHR` or `MTLIndirectAccelerationStructureInstanceDescriptor`. |
 
@@ -457,7 +459,7 @@ native pipeline per device. A device verb contains no second cache.
 
 | verb | contract |
 |---|---|
-| `Builder(dev, ch)` | Command objects from the device's free list. A value that never escapes the call that made it: `record!`, an eager call, a submission's change prefix, or the re-recording of a `BuildRecording` or a window-sized segment. |
+| `Builder(dev, kind)` | Command objects of the queue kind (Vulkan: its queue family) from the device's free list; any queue of that kind can run them. A value that never escapes the call that made it: `record!`, an eager call, a submission's change prefix, or the re-recording of a `BuildRecording` or a window-sized segment. |
 | `emitdispatch!(b, node, cmd::CompiledDispatch, deps)` | The barrier in `deps`, then the launch as core decided: direct, indirect, or fixed-capacity with entry predication. A `when!` flag gates its indirect count/range or its entry predicate; no host flag read. |
 | `emittrace!(b, node, cmd::CompiledTrace, deps)` | As `emitdispatch!`. |
 | `emitcopy!(b, node, cmd::CompiledCopy, deps)` | As `emitdispatch!`. Also a change's copy (`node = nothing`, `deps = Deps((), ())`): an upload region to storage, a cell copy, a move, a restore. |
@@ -620,6 +622,7 @@ a sync-state, channel, pool or window lock.
 | A write through an array and a read through a view, `reshape` or storage of it in one graph get a barrier: one resource per array state, not per object | `test/suite/areas/views.jl` (negative control: an object-keyed resource map, which finds three resources and no barrier) |
 | Cross-graph order through namers and inboxes: a stage that writes a resource waits for the complete last runs of the other plans naming it, a stage that reads one from its inbox for those of its writers | `test/suite/areas/ordering.jl` (negative control: `ordering = Unordered()`) |
 | Any thread compiles, records, runs, frees | `test/suite/areas/threads.jl` (THR-01/THR-02) |
+| Every queue pick gives the same results; independent work from two tasks overlaps on two queues | `test/suite/areas/ordering.jl`, `test/suite/areas/inbox.jl` under `SpreadQueues()`; `test/suite/areas/threads.jl` (THR-12) |
 | Host nodes: stages, re-entry throws, a throwing host function leaves the device usable | `test/suite/areas/host.jl` |
 | A window resize costs no device-wide wait and no recompile within capacity; beyond the capacity the graph recompiles at its next run | `test/suite/areas/windows.jl` |
 | Launch kernels never read cells (except head, prepare, the TLAS offsets and records kernels, `lengthof` writers) | compiled-origin cellaccesses audit; KL-10, with native compiler-output qualification (§14) |
@@ -858,7 +861,7 @@ of today's names.
 | `librarygemm` | goes: selection table |
 | `makeimage` | becomes `placeimage` behind `Image(dev, T, dims...)` |
 | `makeprofiler` | Graph(profile=true), timings(g), shared diagnostics (execution-contracts.md §10) |
-| `makerecording` | goes: `Builder(dev, ch)` |
+| `makerecording` | goes: `Builder(dev, kind)` |
 | `materialize!` | goes: transients placed by place! |
 | `maxalloc` | becomes a field of `caps(dev)`: the largest single allocation, which the pool reads (section 4.1) |
 | `mergeconstraints` | core: constraints of a kind |
@@ -944,3 +947,41 @@ of today's names.
 | `Window` | user: `Window(dev, w, h)` |
 | `withpredicate` | folds into builder verbs: core supplies the indirect count/range or capacity entry predicate for `when!` |
 | `workgroupsize` | goes: KernelInfo's group size |
+
+## Graph readback futures
+
+```julia
+result = Readback(graph_array)           # declare; no execution
+plan = record!(Plan(g; budget=Inf))
+run!(plan)                              # work and transfer in one submission
+value = fetch(result)                   # owning Array; no submission
+next_result = Readback(graph_array)     # same recorded output, next execution
+run!(plan)
+next_value = fetch(next_result)
+free!(plan)
+```
+
+`isready(result)` is false before execution and becomes true when its submitted
+run has completed (or its request has failed). `wait(result)` waits for the CPU
+snapshot and returns the future. `fetch(result)` returns the same owning array
+on repeated calls. A task may wait before the graph runs. Freeing an unexecuted
+plan or a failed run wakes its waiting futures with an error. Submitted futures
+retain their execution token and storage and remain fetchable after teardown.
+
+A future captures the values at its declaration point. A later write to the
+source is ordered after that copy. Before replay reuses the staging slot, any
+unfetched preceding result is copied to CPU memory; replay can therefore wait
+for its predecessor. Already returned arrays remain valid. No GPU submission
+comes from fetching or preserving an earlier result.
+
+The current implementation supports dense arrays of fixed shape. Declare a
+snapshot after a `repeat!` loop, outside its body. A source shape change requires
+a new graph. Multiple snapshots of one source within a graph can be fetched,
+but requesting that source again is ambiguous and throws. Native buffer moves
+refresh the recorded transfer's binding. The zero-argument `Readback()` remains
+the allocator memory-kind request; it allocates no result future.
+
+Vulkan records a buffer copy into host-cached coherent readback memory followed
+by a transfer-to-host visibility barrier. The shared-memory path records a copy
+kernel into a shared readback buffer. The future and its lifetime rules are
+owned by core.

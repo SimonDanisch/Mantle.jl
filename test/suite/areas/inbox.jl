@@ -9,7 +9,8 @@
 # before it writes or reads, the other is fast, and kernels are compiled by a
 # first run before the measured one.
 #
-# A second queue: Graph(dev; priority = 1) (plan, open decision 11).
+# Two queues: independent work finds a busy queue and takes an idle one
+# (plan, Queues).
 
 function inbox_fill!(a, v)
     i = KI.get_global_id().x
@@ -130,12 +131,12 @@ end
     @test Array(out) == [5]
 end
 
-# plan, Ordering (who waits for what: only where uses conflict): an eager read of a while reader C (second queue) spins 500 ms reading a: read after read, so the eager call waits for nothing.
+# plan, Ordering (who waits for what: only where uses conflict), plan, Queues (the queue is picked at submission): an eager read of a while reader C spins 500 ms reading a: read after read, so the eager call waits for nothing and finds C's queue busy, so it takes an idle one.
 @case "INBOX-04" 3 :multicompute begin
     dev = testdevice()
     a, out = MantleArray(dev, Int32[3, 3]), MantleArray(dev, Int32[0])
     b = MantleArray(dev, Int32, 2; unified = true)
-    c = Graph(dev; priority = 1); dispatch!(c, inbox_slowread!, (out, a, inbox_spin(500)), 1)
+    c = Graph(dev); dispatch!(c, inbox_slowread!, (out, a, inbox_spin(500)), 1)
     run!(c); dispatch!(dev, inbox_copy!, (b, a), 2); Mantle.waitidle(dev)   # compiled
     run!(c)
     @test (@elapsed (dispatch!(dev, inbox_copy!, (b, a), 2); Array(b))) < 0.25

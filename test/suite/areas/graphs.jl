@@ -39,9 +39,8 @@ function gr_ends!(out, t)
 end
 
 # submissions(g) lists stages (cut by host nodes), each with its segments (cut
-# by budget and queue). api.md 2.3 leaves the shape open; this is the one the
-# suite assumes.
-segmentcount(g) = sum(s -> length(s.segments), Mantle.submissions(g))
+# by budget and queue kind). api.md 2.3 leaves the shape open; this is the one the
+# suite assumes (helpers.jl: segmentcount).
 stagecount(g) = length(Mantle.submissions(g))
 
 """Three kernels through two transients: out = (src + 1) * 3 - 2. Returns the graph, out and the expected contents."""

@@ -171,6 +171,7 @@ array over the bytes.
 constraintof(::MetalDevice, ::Buffers, ts) = Metal.SharedStorage
 constraintof(::MetalDevice, ::Images, ts) = Metal.PrivateStorage
 constraintof(::MetalDevice, ::Persistent, ts) = Metal.SharedStorage
+constraintof(::MetalDevice, ::Mantle.Readback, ts) = Metal.SharedStorage
 
 """
 How accessible a storage mode is, as an order for [`compatible`](@ref) and
@@ -197,7 +198,7 @@ One device allocation for the pool to suballocate. `max(bytes, 1)` because
 Metal rejects a zero-length buffer and the pool may ask for an empty block.
 Throws `OutOfMemoryError` when Metal returns no buffer.
 """
-function rawalloc(d::MetalDevice, ::Union{Buffers,Persistent}, bytes::Int, storage)
+function rawalloc(d::MetalDevice, ::Union{Buffers,Persistent,Mantle.Readback}, bytes::Int, storage)
     mode = storage === nothing ? Metal.SharedStorage : storage
     buf = MTL.MTLBuffer(d.dev, max(bytes, 1); storage = mode)
     buf === nothing && throw(OutOfMemoryError())

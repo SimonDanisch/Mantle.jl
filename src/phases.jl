@@ -219,9 +219,9 @@ function run!(::Schedule, c)
 
     # Passes touching each resource, so its last use is known. Counting usages
     # would double-count a pass that binds a resource twice and hide the last use.
-    ids(p) = unique(first(u) for u in usages(p))
+    ids = [unique(first(u) for u in usages(p)) for p in ps]
     touches = Dict{Int,Int}()
-    for p in ps, id in ids(p)
+    for resources in ids, id in resources
         touches[id] = get(touches, id, 0) + 1
     end
     seen = Dict{Int,Int}()
@@ -231,7 +231,7 @@ function run!(::Schedule, c)
     end
 
     maxalloc = max(1, maximum(eachindex(ps); init = 0) do i
-        sum(id -> get(bytesof, id, 0), ids(ps[i]); init = 0)
+        sum(id -> get(bytesof, id, 0), ids[i]; init = 0)
     end)
     mshift = memory_shift(policy(c))
     oshift = order_shift(policy(c))
@@ -250,9 +250,14 @@ function run!(::Schedule, c)
         for k in eachindex(ready)
             i = ready[k]
             inloop === nothing || ps[i].loop === inloop || continue
+            ord = clamp(n - i, 0, 0xffff)
+            # Under Overlap, declaration order occupies the high bits. A
+            # candidate already behind there cannot win on memory, so avoid
+            # walking its resources again each time another pass is scheduled.
+            oshift > mshift && ord < (bestscore >> oshift) && continue
             alloc = 0
             freed = 0
-            for id in ids(ps[i])
+            for id in ids[i]
                 b = get(bytesof, id, 0)
                 b == 0 && continue
                 get(seen, id, 0) == 0 && (alloc += b)
@@ -265,7 +270,6 @@ function run!(::Schedule, c)
                   clamp((SCORE_MAX * freed) ÷ maxalloc, 0, SCORE_MAX)
             # Clamped because the fields are OR'd: a term spilling its 16 bits
             # corrupts the one above it.
-            ord = clamp(n - i, 0, 0xffff)                # earlier declaration scores higher
             score = (mem << mshift) | (ord << oshift)
             if score > bestscore
                 best, bestscore = k, score
@@ -281,7 +285,7 @@ function run!(::Schedule, c)
             left[l] -= 1
             inloop = left[l] == 0 ? nothing : l
         end
-        for id in ids(ps[i])
+        for id in ids[i]
             seen[id] = get(seen, id, 0) + 1
         end
         for j in dependents[i]
@@ -509,6 +513,11 @@ one, whose first write would otherwise race the old tenant's last access."""
 function run!(::Aliasing, c)
     a = analysis(c)
     ts = transients(c)
+    # The resource vector is heterogeneous. Read its metadata once, outside the
+    # pairwise walk, so every overlap check is integer arithmetic.
+    starts = Int[t.first for t in ts]
+    stops = Int[t.last for t in ts]
+    ends = Int[a.offsets[i] + nbytes(ts[i]) for i in eachindex(ts)]
     # Per allocation, sorted by offset: a transient's bytes meet only those that
     # start inside it. Offsets in different allocations (another arena, or another
     # part `Place` spilled) never overlap.
@@ -522,25 +531,19 @@ function run!(::Aliasing, c)
         for (p, i) in enumerate(idx)
             for q in (p + 1):length(idx)
                 j = idx[q]
-                a.offsets[j] < a.offsets[i] + nbytes(ts[i]) || break
-                aliasbegin!(a, ts, i, j)
-                aliasbegin!(a, ts, j, i)
+                a.offsets[j] < ends[i] || break
+                a.offsets[i] < ends[j] || continue
+                if stops[j] < starts[i]
+                    push!(get!(Vector{Tuple{Int,Int}}, a.alias_begins, starts[i]), (i, j))
+                elseif stops[i] < starts[j]
+                    push!(get!(Vector{Tuple{Int,Int}}, a.alias_begins, starts[j]), (j, i))
+                end
             end
         end
     end
     # Sorted: barriers are emitted in this order, which must not follow Dict order.
     foreach(sort!, values(a.alias_begins))
     return c
-end
-
-"""Transient `i` begins where `j`'s bytes were, after `j` is dead: a handover."""
-function aliasbegin!(a, ts, i::Int, j::Int)
-    y, x = ts[i], ts[j]
-    x.last < y.first || return nothing
-    a.offsets[i] < a.offsets[j] + nbytes(x) && a.offsets[j] < a.offsets[i] + nbytes(y) ||
-        return nothing
-    push!(get!(() -> Tuple{Int,Int}[], a.alias_begins, y.first), (i, j))
-    return nothing
 end
 
 """Transitions per pass, and which of them still need a barrier emitted."""
@@ -573,22 +576,27 @@ function run!(::Barriers, c)
     # covers, a whole-resource usage for all of them.
     slices = sliceindex(g)
     segs = Dict{Int,Vector{Int}}()
-    let byparent = Dict{Int,Vector{UnitRange{Int}}}()
-        for ((pid, r), _) in g.views
-            push!(get!(byparent, pid, UnitRange{Int}[]), r)
+    let byparent = Dict{Int,Vector{Tuple{UnitRange{Int},Int}}}()
+        for ((pid, r), v) in g.views
+            push!(get!(Vector{Tuple{UnitRange{Int},Int}}, byparent, pid), (r, resourceid(g, v)))
         end
-        for (pid, ranges) in byparent
+        for (pid, slices) in byparent
+            ranges = first.(slices)
+            # Hashing a UnitRange visits its elements. Most segments are views
+            # already interned by the graph; find them by their endpoints.
+            existing = Dict((first(r), last(r)) => id for (r, id) in slices)
             parent = g.ids.by_id[pid]
             n = length(parent)
             cuts = sort!(unique!(vcat([1, n + 1], first.(ranges), last.(ranges) .+ 1)))
             spans = [cuts[k]:(cuts[k + 1] - 1) for k in 1:(length(cuts) - 1)]
             filter!(!isempty, spans)
             ids = map(spans) do s
-                resourceid(g, get!(() -> BufferRange(parent, s), g.views, (pid, s)))
+                get!(existing, (first(s), last(s))) do
+                    resourceid(g, get!(() -> BufferRange(parent, s), g.views, (pid, s)))
+                end
             end
             segs[pid] = ids                      # the whole buffer is every segment
-            for r in ranges
-                sid = resourceid(g, g.views[(pid, r)])
+            for (r, sid) in slices
                 segs[sid] = [ids[k] for (k, s) in enumerate(spans) if first(s) >= first(r) &&
                                                                       last(s) <= last(r)]
             end
