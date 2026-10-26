@@ -119,9 +119,11 @@ samereadback(a::ResourceView, b::ResourceView) =
 
 # A shared-memory backend uses an ordinary recorded copy kernel. Vulkan lowers
 # the same declaration to a native transfer into host-cached staging instead.
-@kernel function graph_readback_copy!(dst, src)
-    i = @index(Global, Linear)
+function graph_readback_copy!(dst, src)
+    i = KI.get_global_id().x
+    i <= length(dst) || return nothing    # ndrange is rounded up to whole work-groups
     @inbounds dst[i] = src[i]
+    return nothing
 end
 # A native transfer is a device capability; graph declaration, access direction
 # and lifetime stay in core. Shared-memory backends use the ordinary copy kernel.
