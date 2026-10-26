@@ -181,6 +181,10 @@ runscalls(::Device) = false
     resetkernelcompiles!(device)
 
 Report/reset compiled-kernel cache hits and misses. Devices without counters return zeros.
+
+A kernel is compiled once: it is kept by its code, not by the session, so the same code is not
+compiled again later in the session (an edit undone) nor in a later one. Every backend's compiler
+keeps what it compiles in CompilerCaching's object cache, and counts what it finds there as a hit.
 """
 kernelcompiles(::Device) = (; hits = 0, misses = 0)
 resetkernelcompiles!(::Device) = nothing

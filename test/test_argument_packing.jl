@@ -68,6 +68,22 @@ end
 @inline gatherat(ops::Tuple, i) =
     (@inbounds(first(ops)[i]), gatherat(Base.tail(ops), i)...)
 
+# Four bytes of padding after `scale`. `unsafe_store!` of such a struct leaves them
+# undefined, in practice whatever the stack held, so the same values packed twice
+# gave different bytes: a plan re-recorded once its passes were timed (`measure!`)
+# held arguments that had changed though nothing in them had.
+struct Padded
+    scale::Float32
+    n::Int64
+end
+
+function scalepadded!(out, p::Padded)
+    i = KI.get_global_id().x
+    i <= p.n || return
+    @inbounds out[i] = p.scale * Float32(i)
+    return
+end
+
 function combine!(out, n::Int, ops::Tuple, f)
     i = KI.get_global_id().x
     i <= n || return
@@ -244,4 +260,29 @@ end
         end
         M.free!(pl3)
     end
+
+    # ── the same values pack to the same bytes ───────────────────────────────
+    gp = M.Graph(dev)
+    outp = M.Transient.Buffer(gp, Float32, n)
+    padded = Padded(0.3125f0, n)
+    M.dispatch!(gp, scalepadded!, (outp, padded), n; name = "scalepadded")
+    plp = M.Plan(gp)
+    M.record!(plp)
+    d = only(d for pp in plp.passes for d in pp.dispatches)
+    packed() = copy(unsafe_wrap(Array, plp.args.ptr + d.argoff, M.argsize(d)))
+    first_pack = packed()
+    # Where the struct landed: its two fields, eight bytes apart.
+    at = findfirst(1:(length(first_pack) - 15)) do o
+        reinterpret(Float32, first_pack[o:o+3])[1] == padded.scale &&
+            reinterpret(Int64, first_pack[o+8:o+15])[1] == padded.n
+    end
+    @test at !== nothing
+    @test all(iszero, first_pack[at+4:at+7])
+    # Re-recorded from `run!`, as `measure!` and an images arena's growth do.
+    M.invalidate!(plp)
+    M.run!(plp)
+    M.waitidle(dev)
+    @test packed() == first_pack
+    @test Array(M.storage(outp)) == [0.3125f0 * i for i in 1:n]
+    M.free!(plp)
 end

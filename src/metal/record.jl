@@ -220,11 +220,9 @@ function pack_recorded!(ptr::Ptr{UInt8}, args::Vector{RecordedArg}, adapted::Tup
     Mantle.eachpassedarg(adapted) do slot, a, passing
         passing isa Mantle.DeviceAllocation && return nothing   # binds itself
         rec = args[slot]
-        T = typeof(a)
-        r = Ref(a)
-        GC.@preserve r unsafe_copyto!(ptr + rec.offset,
-            convert(Ptr{UInt8}, Base.unsafe_convert(Ptr{T}, r)), rec.nbytes)
-        pl === nothing || Mantle.notepacked!(pl, T, ptr + rec.offset, target, rec.offset)
+        ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), ptr + rec.offset, 0, rec.nbytes)
+        Mantle.storebits!(ptr + rec.offset, a)
+        pl === nothing || Mantle.notepacked!(pl, typeof(a), ptr + rec.offset, target, rec.offset)
         return nothing
     end
     return nothing

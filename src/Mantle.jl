@@ -220,7 +220,7 @@ export GraphicsPipeline, Rasterizer
 export DrawIndirectCommand
 export MeshPipeline, meshconfig, objectconfig
 export supports_mesh_pipeline
-export RayTracingPipeline, AdaptedAccel
+export RayTracingPipeline, AdaptedAccel, tracescall
 # Implemented by a scene to add non-triangle geometry to traversal.
 export procedural_miss, procedural_candidate, procedural_commit, procedural_bary
 export candidate_primitive_index, candidate_object_ray, commit_intersection!

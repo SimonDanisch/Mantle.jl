@@ -61,6 +61,26 @@ function passedslots(types)
 end
 
 """
+    storebits!(p, x) -> nothing
+
+Store isbits `x` at `p`, field by field where it has padding, so the padding keeps
+the bytes `p` held. `unsafe_store!` of a padded struct leaves them undefined, in
+practice whatever the stack held: packing the same values twice wrote different
+bytes, and a re-recorded plan's arguments changed though nothing in them had.
+"""
+@generated function storebits!(p::Ptr{UInt8}, x::T) where {T}
+    sizeof(T) == 0 && return :(nothing)
+    (isprimitivetype(T) || !Base.datatype_haspadding(T)) &&
+        return :(unsafe_store!(Ptr{$T}(p), x); nothing)
+    stores = [:(storebits!(p + $(Int(fieldoffset(T, i))), getfield(x, $i)))
+              for i in 1:fieldcount(T)]
+    return quote
+        $(stores...)
+        nothing
+    end
+end
+
+"""
     eachpassedarg(f, args) -> Int
 
 Call `f(slot, arg, passing)` for each passed argument and return the slot count.

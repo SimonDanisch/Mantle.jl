@@ -164,7 +164,7 @@ end
         inline_offset = (inline_offset + 7) & ~7
         ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t),
               mapped_ptr + inline_offset, 0, byval_size)
-        unsafe_store!(Ptr{T}(mapped_ptr + inline_offset), x)
+        storebits!(mapped_ptr + inline_offset, x)
         unsafe_store!(Ptr{UInt64}(mapped_ptr + offset),
                       arg_buf_bda + UInt64(inline_offset))
         recpatchfields!(batch, T, mapped_ptr + inline_offset)

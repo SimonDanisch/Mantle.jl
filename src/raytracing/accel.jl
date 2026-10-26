@@ -15,6 +15,20 @@ struct AdaptedAccel{H, T, O, Tri, S, P, I} <: Raycore.AbstractAdaptedAccel
     instances::I
 end
 
+"""
+    tracescall(accel) -> Bool
+
+Whether a ray query from a kernel through `accel` is a function call already: Metal's
+traversal is a linked function its in-band `scene` binding feeds, Vulkan's an inline ray
+query, which binds the TLAS out of band (`scene` is `nothing`), and a software BVH is
+plain code. A caller outlines its own trace around an inline query to give the query a
+register frame of its own; around a call that is a second call boundary, and Hikari's
+shadow trace rendered 1.6x slower outlined on an M1 Pro.
+"""
+tracescall(accel) = false
+tracescall(::AdaptedAccel{<:Any, <:Any, <:Any, <:Any, Nothing}) = false
+tracescall(::AdaptedAccel) = true
+
 """Project traversal fields to device values, `scene` through the backend's
 `sceneconvert`, in field order. The cyclic native `hwtlas` owner is dropped, never adapted."""
 @inline function adaptaccel(to, accel::AdaptedAccel, sceneconvert)

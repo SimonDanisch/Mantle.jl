@@ -580,6 +580,8 @@ end
 # `KernelInterface.HostMeshOutput` runs what a mesh stage runs and shows the
 # vertices, indices and per-primitive values a frame can only imply.
 include(joinpath(@__DIR__, "test_lowering.jl"))
+# Whether a ray query through an accel is a call already; no device needed.
+include(joinpath(@__DIR__, "test_tracescall.jl"))
 
 # The isubd example's pass A (adaptive refinement) against a CPU reference written
 # independently of it (`examples/isubd/reference.jl`, vendored from
@@ -799,6 +801,9 @@ foreachbackend(joinpath(@__DIR__, "test_aabb_blas_overlap.jl"))
 _VULKAN_OK && foreachbackend(joinpath(@__DIR__, "vulkan", "test_aabb_blas_device.jl"))
 foreachbackend(joinpath(@__DIR__, "test_atomics_and_dispatch.jl"))
 foreachbackend(joinpath(@__DIR__, "test_float_conversion_exact.jl"))
+foreachbackend(joinpath(@__DIR__, "test_bit_intrinsics.jl"))
+foreachbackend(joinpath(@__DIR__, "test_odd_integers.jl"))
+foreachbackend(joinpath(@__DIR__, "test_punned_store_into_array.jl"))
 foreachbackend(joinpath(@__DIR__, "test_integer_division.jl"))
 foreachbackend(joinpath(@__DIR__, "test_gpuarrays.jl"))
 foreachbackend(joinpath(@__DIR__, "test_int32_cartesian_miscompile.jl"))
@@ -809,6 +814,7 @@ foreachbackend(joinpath(@__DIR__, "test_spirv_pattern_correctness.jl"))
 foreachbackend(joinpath(@__DIR__, "test_struct_broadcast.jl"))
 foreachbackend(joinpath(@__DIR__, "test_vector_pointer_access.jl"))
 foreachbackend(joinpath(@__DIR__, "test_element_rebuild_store.jl"))
+foreachbackend(joinpath(@__DIR__, "test_lane_reductions.jl"))
 foreachbackend(joinpath(@__DIR__, "test_native_integer_widths.jl"))
 foreachbackend(joinpath(@__DIR__, "test_constant_pointer_icmp.jl"))
 
@@ -865,6 +871,7 @@ foreachbackend(joinpath(@__DIR__, "test_dispatch_allocation.jl"))
 foreachbackend(joinpath(@__DIR__, "test_free_during_recording.jl"))
 foreachbackend(joinpath(@__DIR__, "test_gpu_memory_safety.jl"))
 foreachbackend(joinpath(@__DIR__, "test_kernel_cache.jl"))
+foreachbackend(joinpath(@__DIR__, "test_kernel_persistence.jl"))
 foreachbackend(joinpath(@__DIR__, "test_multitypeset_surgical.jl"))
 # Recording a plan big enough to allocate while it is being written.
 foreachbackend(joinpath(@__DIR__, "test_no_pool_trim_while_recorded.jl"))
