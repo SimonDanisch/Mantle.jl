@@ -584,6 +584,33 @@ A device type reports facts; core decides. Measured node times, where
 profiling is on (`Graph(dev; profile = true)`, execution-contracts.md §10), only calibrate the
 next compile. A plan is never re-recorded because of a measurement.
 
+Cuts fall between nodes and between loop iterations; a launch itself is cut
+only where its caller asks for it. Core does not reshape work to fit a
+watchdog, because every cut costs time on a device that would have run the
+launch whole. A launch that cannot finish in time is an error the user sees:
+
+- **At compile.** A launch whose estimate exceeds `caps(dev).jobtimeout` throws
+  `LaunchTooLong` with the launch's origin, its estimate and the timeout. The
+  roofline estimate is the fastest the work can run, so it throws only for a
+  launch that cannot finish in time.
+- **At run time.** A lost device throws `DeviceLost` listing the launches of
+  the last submissions on each of its channels, with their estimates and the
+  timeout. Drivers report a watchdog kill late (RADV at the next submission),
+  so the error names what ran rather than one guilty launch. A host wait for a
+  submission gives up two job timeouts after the submission before it on its
+  channel passed, and the device counts as lost: where the driver never
+  reports the kill, the user gets the same error instead of a wait that never
+  returns.
+- **Opting in.** `dispatch!(…; split = true)` lets core cut that launch: where
+  its estimate exceeds the budget, it runs as consecutive ranges of workgroups,
+  each within the budget and cut from the next like separate nodes. The kernel
+  sees the launch's full grid and its own place in it; the entry wrapper adds
+  each range's first workgroup. A kernel that relies on the workgroups of one
+  launch running at the same time must not opt in; no device type promises
+  that.
+
+Where a device reports no job timeout (`Inf`), neither check applies.
+
 ### Queues
 
 A device has queues of kinds (graphics+compute, compute, transfer, video
@@ -825,9 +852,11 @@ end
   (Memory), so an array dropped while the GPU still uses it is released only
   after that use.
 - A token is a channel and a value. Token verbs, per channel:
-  `passed(ch, value)`, `waitfor(ch, value)`; core's `passed(::Token)` and
-  `waitfor(::Token)` wrap them. The last token handed out is core data (the
-  channel's `next`), not a verb.
+  `passed(ch, value)`, `waitfor(ch, value, timeout)` (false when the value has
+  not passed after `timeout` seconds); core's `passed(::Token)` and
+  `waitfor(::Token)` wrap them, the latter with the deadline of "Submission
+  split: estimated". The last token handed out is core data (the channel's
+  `next`), not a verb.
 
 ### Record
 
@@ -2432,8 +2461,10 @@ an actual queue-mapping path is available. CUDA/HIP's baseline argument ABI is a
 pointer to immutable plan slots, with capacity launches and device predication
 where indirect launch is absent. Native alternatives are measured candidates.
 Loops are bounded core-unrolled DAGs, cut between iterations; no host count read.
-A submission budget is an estimate; indivisible arbitrary kernels have no hard
-watchdog guarantee. WSI calls may block. Legacy Vulkan presentation remains
+A submission budget is an estimate; a launch is cut only where its caller
+opts in (`split = true`), so an arbitrary kernel has no watchdog guarantee: an
+estimate past the job timeout throws `LaunchTooLong` at compile, and a lost
+device throws `DeviceLost` naming the launches it ran. WSI calls may block. Legacy Vulkan presentation remains
 supported using acquisition history, with a practical idle-based shutdown whose
 specification-level limitation is explicit; strict lifetime qualification needs
 maintenance1. Do not report these as unconditional speed/lifetime guarantees.

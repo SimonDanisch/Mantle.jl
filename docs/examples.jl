@@ -278,8 +278,12 @@ resize!(verts, 2000)            # within verts' capacity of 4096: a cell write (
 run!(gc)
 
 # 28. Submissions are cut by an estimated cost against the device's budget, at
-#     compile. Nothing is measured and re-recorded.
+#     compile. Nothing is measured and re-recorded. A launch runs whole: one
+#     that cannot finish within the device's job timeout throws LaunchTooLong
+#     at compile, unless `split = true` lets core cut it into workgroup ranges
+#     in separate submissions (the kernel still sees the whole grid).
 submissions(gq)
+dispatch!(gq, longscan!, (lat,), length(lat); split = true)
 
 # 29. Two graphs sharing an array: decode's run waits for encode's complete
 #     last run, found through that array. No full barrier, no extra

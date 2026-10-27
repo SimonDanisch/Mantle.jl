@@ -148,6 +148,7 @@ mutable struct KernelNode{K,A,R,W,O} <: Node  # dispatch!(location, kernel, args
     const group::Union{Nothing,Int,Tuple}   # requested workgroup dimensions, retained through compile
     const when::W                           # nothing, or a when! flag: indirect count / capacity predication (section 2)
     const origin::O                         # an Origin
+    const split::Bool                       # dispatch!(…; split = true): costs! may cut it into workgroup ranges
     compiled::Union{Nothing,CompiledNode}
 end
 mutable struct TraceNode{P,T,A,R,W,O} <: Node  # trace!(g, pipeline, accel, args, ndrange)
@@ -305,8 +306,8 @@ end
 # of that group; on a device it runs now (section 11). An operation's method
 # calls it and does not know which.
 dispatch!(l::Union{GraphDevice,Group}, kernel, args::Tuple, ndrange;
-          group = nothing, origin = Origin(kernel, args)) =
-    declare!(l, KernelNode(kernel, args, ndrange, group, nothing, origin, nothing))
+          group = nothing, origin = Origin(kernel, args), split = false) =
+    declare!(l, KernelNode(kernel, args, ndrange, group, nothing, origin, split, nothing))
 # The KA adapter
 # resolves the size fixed in k's type when no launch-time override is given;
 # compile consults config(dev, f) only if neither supplied a size.
@@ -520,7 +521,7 @@ when!(g::Graph, flag::Union{GPURef{Bool},MantleArray{Bool,1}}, kernel::Function,
     when!(g.location, flag, kernel, args, ndrange; kw...)
 when!(l::Union{GraphDevice,Group}, flag::Union{GPURef{Bool},MantleArray{Bool,1}}, kernel::Function, args::Tuple, ndrange;
       origin = Origin(kernel, args)) =
-    declare!(l, KernelNode(kernel, args, ndrange, nothing, flag, origin, nothing))   # named through the node, like its arguments
+    declare!(l, KernelNode(kernel, args, ndrange, nothing, flag, origin, false, nothing))   # named through the node, like its arguments
 # A draw's visibility is a store into its flag, never a new plan. The
 # mechanism repeat!'s loop head uses: on Vulkan/Metal a when! launch/draw
 # uses an indirect command/range whose count is multiplied by the flag
@@ -758,7 +759,35 @@ function kernel!(dev, f, types; group = nothing)
 end
 
 # ── costs!: estimated, never measured-then-re-recorded ──
-costs!(s) = foreach(p -> (p.compiled.cost = estimate(s.device, p)), s.nodes)
+# A launch runs whole. One that cannot finish within the job timeout is a
+# compile error, unless its caller opted in to cutting it: then, where it
+# exceeds the budget, it becomes workgroup ranges. The estimate is a lower
+# bound (the work at full throughput and bandwidth), so the error fires only
+# for a launch that cannot finish in time. jobtimeout = Inf checks nothing.
+function costs!(s)
+    budget, timeout = submissionbudget(caps(s.device)), caps(s.device).jobtimeout
+    for p in copy(s.nodes)
+        p.compiled.cost = estimate(s.device, p)
+        if cuttable(p) && p.compiled.cost > budget
+            cutranges!(s, p, budget)
+        elseif p.compiled.cost > timeout
+            throw(LaunchTooLong(p.origin, p.compiled.cost, timeout))
+        end
+    end
+end
+cuttable(p::KernelNode) = p.split               # a library candidate with `partition` is cut into its
+cuttable(p) = false                             #   tiles the same way (execution-contracts.md §3)
+# The launch becomes consecutive ranges of its workgroups along its last axis,
+# each estimated within the budget: one KernelNode per range, with the
+# launch's kernel, arguments, uses and origin and the range's `firstgroup`,
+# which the entry wrapper adds to the workgroup id, so the kernel sees the
+# full grid. The ranges take the launch's place in the order; submissions!
+# cuts between them as between any nodes.
+function cutranges!(s, p, budget)
+    groups = numgroups(p)                           # along the last axis of the ndrange
+    n = min(groups, ceil(Int, p.compiled.cost / budget))
+    replace!(s, p => [rangenode(p, r) for r in Iterators.partition(1:groups, cld(groups, n))])
+end
 estimate(dev, p) = estimate(caps(dev), p) * calibration(dev, p)
 estimate(c::Caps, p) = max(work(p) / c.throughput[eltype(p)], bytes(p) / c.bandwidth)
     # work: 2MNK for a mul!, else from KernelInfo and the ndrange (the capacity for a kernel-written length)
@@ -1902,7 +1931,22 @@ Token(ch::SubmitChannel, value) = Token(channelstate(ch), ch, value)
 Base.:(==)(a::Token, b::Token) = a.state === b.state && a.value == b.value
 Base.hash(t::Token, h::UInt) = hash((objectid(t.state), t.value), h)
 passed(t::Token) = (checkhealthy(t.state.domain); passed(t.channel, t.value))    # device-type verb: passed(ch, value)
-waitfor(t::Token) = (checkhealthy(t.state.domain); waitfor(t.channel, t.value))  # device-type verb: waitfor(ch, value)
+# A wait gives up two job timeouts after the submission before `t` on its
+# channel passed: by then the watchdog has killed it, whether or not the driver
+# says so, and the device counts as lost. Earlier submissions get the same
+# deadline, each from its own predecessor; with jobtimeout = Inf nothing times out.
+function waitfor(t::Token)
+    checkhealthy(t.state.domain)
+    limit = 2 * caps(device(t.channel)).jobtimeout
+    for u in outstanding(t.channel, t)              # the channel's unpassed submissions up to and including t
+        waitfor(t.channel, u.value, limit) ||      # device-type verb: waitfor(ch, value, timeout) -> Bool
+            lost!(t.state.domain, t.channel)        # poisons the domain; throws DeviceLost
+    end
+end
+# DeviceLost lists the launches of each channel's last submissions (a short
+# ring kept at submit) with their estimates and the job timeout: drivers
+# report a watchdog kill late (RADV at the next submission), so the error
+# names candidates rather than one culprit.
 waitfor(ts) = foreach(waitfor, ts)               # a collection of tokens
 # A host wait is a driver call made with `@ccall gc_safe = true` (Julia 1.12,
 # base/c.jl:278), so a thread waiting on the GPU does not hold up a GC another
@@ -2646,7 +2690,10 @@ end
 # evicted one, are applied in front of the launch by the same submission
 # (submitapplying). A write to a read-only array throws first, as in a graph
 # (checkwritable, section 2).
-function dispatch!(dev::Device, kernel, args::Tuple, ndrange; origin = nothing)
+# As in a graph, the launch runs whole: an estimate past the job timeout throws
+# LaunchTooLong before anything is acquired, unless `split = true`, which
+# submits its workgroup ranges (costs!, section 4) as consecutive calls.
+function dispatch!(dev::Device, kernel, args::Tuple, ndrange; origin = nothing, split = false)
     checkwritable(kernel, args)                           # before anything is compiled or acquired
     k = kernel!(dev, kernel, argtypes(args))
     packed = acquire!(pool(dev), Unified(), argumentbytes(k))   # fallible: before any lock
