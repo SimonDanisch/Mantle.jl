@@ -100,10 +100,11 @@ function alloc_index_buffer(bq::SubmitChannel{<:VulkanQueue}, data::AbstractVect
 end
 Adapt.adapt_storage(::KA.CPU, a::LavaArray) = Array(a)
 
-# `@Const` leaves a device array as is: its BDA pointer can already be read-only.
+# `@Const` wraps a device array in `Lava.Const`, whose loads Lava declares
+# NonWritable; `readonlyargs` adapts the arguments a dispatch only reads the same way.
 # KA 0.10 rebuilds reshaped and permuted wrappers around the adapted parent
 # without re-validating, so no throwing `reshape` constructor reaches the device.
-Adapt.adapt_storage(::KA.ConstAdaptor, a::LavaDeviceArray) = a
+Adapt.adapt_storage(::KA.ConstAdaptor, a::LavaDeviceArray) = Lava.Const(a)
 
 # `adapt(LavaArray, x)` names a type, not a device, so it allocates on the
 # process default device. ambient-allocation-ok
@@ -306,26 +307,39 @@ end
     block_dims = plan.block_dims
     ws_3d      = plan.ws_3d
 
+    # Before the one-shot, so a kernel the access walk refuses opens no command buffer.
+    touches = katouches(obj, args, plan)
     # One command buffer per launch, never joining an open batch, which would
     # depend on task-global state; batching is what a declared graph is for.
     oneshot!(bq; tag = :launch) do e
-        emitlaunch!(e, obj, args, ka_ctx, block_dims, ws_3d, tlas)
+        emitlaunch!(e, obj, args, touches, ka_ctx, block_dims, ws_3d, tlas)
     end
     return nothing
 end
 
-# Shared by both launch paths: hold every leaf of the closure and arguments in
-# the one-shot, then adapt (which holds nothing) and launch.
-@inline function emitlaunch!(e, obj, args, ka_ctx, block_dims, ws_3d, tlas)
+# Hold every leaf of the closure and arguments in the one-shot, then adapt (which
+# holds nothing) and launch.
+@inline function emitlaunch!(e, obj, args, touches, ka_ctx, block_dims, ws_3d, tlas)
     owner = e.owner
     holdleaves!(owner, obj.f)
     holdleaves!(owner, args)
     adaptor = LavaAdaptor(owner)
     converted_f = Adapt.adapt(adaptor, obj.f)
     converted_args = argmap(a -> Adapt.adapt(adaptor, a), args)
-    all_args = (converted_f, ka_ctx, converted_args...)
-    ka_launch!(e, converted_f, all_args, block_dims, ws_3d, tlas)
+    # Which arguments `readonlyargs` wraps is decided per call (two may share a
+    # buffer), so its result has no inferable type: one dynamic call into the launch,
+    # taken only when there is something to wrap.
+    any(isreadonly, touches) &&
+        return launchwith!(e, converted_f, ka_ctx,
+                           readonlyargs(nothing, touches, args, converted_args),
+                           block_dims, ws_3d, tlas)
+    launchwith!(e, converted_f, ka_ctx, converted_args, block_dims, ws_3d, tlas)
 end
+
+# `::F`: a function argument only passed on is not specialised on, and an abstract
+# `f` boxes the argument tuple.
+@noinline launchwith!(e, f::F, ka_ctx, args::Tuple, block_dims, ws_3d, tlas) where {F} =
+    ka_launch!(e, f, (f, ka_ctx, args...), block_dims, ws_3d, tlas)
 
 # Vulkan dispatches are at most 3-D: `pad_to_3d` maps the block grid onto
 # `ctx.max_wg_dims`, splitting large dimensions across Y and Z. Extra workgroups
@@ -439,7 +453,7 @@ The kernel-independent half of `build_launch_plan!`, inferred once. The
         deviceof(bq), f, tt, wg; enable_ray_query=ray_query)
     base = compiled.push_info.arg_buffer_size
     p = LaunchPlan(compiled, pipeline, offsets, byval_sizes, base,
-                   base + compute_inline_extra_from_byval(byval_sizes),
+                   base + compute_inline_extra_from_byval(byval_sizes, base),
                    world, wg, ray_query)
     v = get!(() -> Any[], launch_plan_cache(deviceof(bq)), key)
     filter!(q -> (q::LaunchPlan).world === world, v)  # superseded worlds are dead
@@ -546,7 +560,7 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
     compiled, pipeline, offsets, byval_sizes = get_compiled_kernel_and_pipeline(
         deviceof(bq), converted_f, tt, ws_3d; enable_ray_query)
 
-    inline_extra = compute_inline_extra_from_byval(byval_sizes)
+    inline_extra = compute_inline_extra_from_byval(byval_sizes, compiled.push_info.arg_buffer_size)
     total_size = compiled.push_info.arg_buffer_size + inline_extra
 
     # Keep the pre-adapt arrays reachable while their addresses are packed.

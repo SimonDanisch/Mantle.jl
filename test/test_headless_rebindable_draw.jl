@@ -53,6 +53,7 @@ const HR_PIPE = Mantle.Rasterizer(; vertex = Mantle.VertexShader(hr_vertex),
     Mantle.copy!(g, "read", out, img)
     plan = Mantle.Plan(g)
     @test !Mantle.recordable(plan)
+    @test !Mantle.ordered_entry(Mantle.Compile(plan))
     pixels() = unique(Array(Mantle.storage(out)))
 
     Mantle.run!(plan)

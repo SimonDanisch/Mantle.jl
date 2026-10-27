@@ -509,6 +509,7 @@ mutable struct Compile{D} <: Compilation
     graph::Graph{D}
     alias::Bool
     policy::Policy
+    ordered_entry::Bool
     analysis::Analysis
     prepass::IdDict{Pass,Vector{Transition}}
     passes::Vector{PassPlan}                          # Pipelines

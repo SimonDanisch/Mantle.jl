@@ -21,12 +21,57 @@ kernelinterpreter(::LavaDevice, kernel, tt) = Lava.kernelinterpreter(kernel, tt)
 function kakernelaccesssignature(dev::LavaDevice, kernel, argT::Tuple, ndrange, group)
     obj  = kernelfor(kernel, group, backend(dev))
     iter = get_or_build_iter_plan(obj, dispatchrange(ndrange), callgroup(obj, group), dev)
-    tt   = (typeof(iter.ka_ctx), argT...)
+    return kaaccesssignature(obj, iter, argT)
+end
+
+"""The signature a built KA kernel's accesses are inferred at, for iteration plan `iter`."""
+function kaaccesssignature(obj, iter::IterPlan, argT::Tuple)
+    tt     = (typeof(iter.ka_ctx), argT...)
     interp = Lava.kernelinterpreter(obj.f, Tuple{tt...}; workgroup_size = iter.ws_3d)
     return interp, obj.f, tt
 end
 
+"""
+    cachedtouches(dev, sig, skip) -> view or nothing
+
+What the walk already found for `sig`, past its first `skip` entries (the kernel
+function, and a KA kernel's iteration context). An eager launch asks on every call,
+and building the interpreter and walk again only to reach this entry allocated more
+than the rest of the launch (`test_dispatch_allocation.jl`).
+"""
+function cachedtouches(dev::LavaDevice, @nospecialize(sig::Type), skip::Int)
+    t = get(summaries!(accesscache(dev)), sig, nothing)
+    return t === nothing ? nothing : view(t, (skip + 1):length(t))
+end
+
+"""
+What an eagerly launched KA kernel does to each of `args` at iteration plan `iter`.
+The graph path asks `argument_usage` with the kernel's constructor; an eager launch
+only has the built kernel.
+"""
+function katouches(obj::KA.Kernel{LavaDevice}, args::Tuple, iter::IterPlan)
+    dev = obj.backend
+    argT = map(a -> devicetype(dev, a), args)
+    cached = cachedtouches(dev, Tuple{typeof(obj.f), typeof(iter.ka_ctx), argT...}, 2)
+    cached === nothing || return cached
+    interp, body, tt = kaaccesssignature(obj, iter, argT)
+    t = accessof(interp, body, tt; cache = accesscache(dev))
+    return view(t, 3:length(t))
+end
+
+"""
+What an eagerly launched KernelInterface kernel does to each of `args`. A view either
+way: the launch's closure captures it, and a union-typed capture is boxed.
+"""
+function kitouches(dev::LavaDevice, kern::K, args::Tuple, ndrange) where {K}
+    cached = cachedtouches(dev, Tuple{K, map(a -> devicetype(dev, a), args)...}, 1)
+    cached === nothing || return cached
+    t = argument_usage(dev, kern, args, ndrange, nothing)
+    return view(t, 1:length(t))
+end
+
 isdevicearray(::LavaArray) = true
+resource_identity(a::LavaArray)=a.buf.rc
 
 """
 The union of what a trace's shaders do to `args`; every shader takes them

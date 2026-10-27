@@ -193,6 +193,11 @@ struct Compact <: Policy end
 dependencies forced by shared memory. The default."""
 struct Overlap <: Policy end
 
+# The same global memory dependency covers prior accesses to every buffer, not
+# just the resource whose hazard caused it. Preserve exact usage keys rather
+# than guessing that a read-only execution dependency also flushes writes.
+replay_hazard_key(t::Transition) = (Tuple(sort(t.waits; by = string)), t.to)
+
 """Bit offset of each objective in the packed score; a policy is a choice of offsets."""
 memory_shift(::Compact) = 16
 memory_shift(::Overlap) = 0
@@ -364,7 +369,7 @@ function transientfor(c, byid, id)
     t === nothing || return t
     r = get(c.graph.ids.by_id, id, nothing)
     r isa BufferRange || return nothing
-    return get(byid, get(c.graph.ids.ids, r.parent, 0), nothing)
+    return get(byid, get(c.graph.ids, r.parent, 0), nothing)
 end
 
 """Intervals come from the passes that use each transient, in scheduled order. With
@@ -549,6 +554,29 @@ end
 """Transitions per pass, and which of them still need a barrier emitted."""
 struct Barriers <: Phase end
 
+# A dispatch's arguments are simultaneous accesses, not a sequence of GPU
+# commands. In particular `(out, (out,))` declares write and read separately.
+# Advancing state through those two entries used to lose the write before the
+# following pass. Join storage directions after expanding overlapping ranges.
+join_pass_storage(::Type,::Type)=nothing
+join_pass_storage(::Type{Storage{K,A}},::Type{Storage{K,B}}) where {K,A,B} =
+    Storage{K,Access{reads(A)||reads(B),writes(A)||writes(B)}}
+
+function barrier_pass_usages(p,segments_of)
+    out=Pair{Int,Type}[]
+    last=Dict{Int,Int}()
+    for (id,U) in p.usages,sid in segments_of(id)
+        at=get(last,sid,0)
+        merged=at==0 ? nothing : join_pass_storage(out[at].second,U)
+        if merged===nothing
+            push!(out,sid=>U);last[sid]=length(out)
+        else
+            out[at]=sid=>merged
+        end
+    end
+    out
+end
+
 """Resolve and build every pipeline a draw needs, once."""
 struct Pipelines <: Phase end
 
@@ -565,7 +593,11 @@ through the device's [`syncbackend`](@ref); `passbarriers` lowers the result."""
 function run!(::Barriers, c)
     g = c.graph
     be = syncbackend(g.dev)
+    replay=ordered_entry(c)
     states = Dict{Int,ResourceState}()
+    coalesce=replay&&global_buffer_barriers(be)
+    visible=Dict{Any,Int}()
+    lasttouch=Dict{Int,Int}()
 
     # A resource starts in the state of its last usage in this schedule: frame
     # N+1's first use follows frame N's last and may overlap it in flight. Seeding
@@ -604,22 +636,33 @@ function run!(::Barriers, c)
     end
     segments_of(id) = get(segs, id, (id,))
 
+    passes=ordered(c)
+    usages=[barrier_pass_usages(p,segments_of) for p in passes]
     final = Dict{Int,Type}()
-    for p in ordered(c), (id, U) in p.usages, sid in segments_of(id)
+    for pu in usages, (sid,U) in pu
         final[sid] = U
     end
 
-    # A replayed plan starts each segment where the previous run left it.
-    state(id) = get!(() -> ResourceState(resourcekind(g.ids.by_id[id]), final[id]), states, id)
+    # A replayed plan starts each segment where the previous run left it,
+    # unless the recording's full entry dependency has already ordered that use.
+    state(id) = get!(states,id) do
+        kind=resourcekind(g.ids.by_id[id])
+        replay&&kind isa BufferKind ? ResourceState(kind) : ResourceState(kind,final[id])
+    end
 
-    for (i, p) in enumerate(ordered(c))
+    for (i, p) in enumerate(passes)
         pre = Transition[]
-        for (id, U) in p.usages, sid in segments_of(id)
+        alias_last=Dict{Int,Int}()
+        for (sid,U) in usages[i]
+            # A recorded update pass emits no stores: they are submitted in
+            # front, then covered by the recording's full head dependency.
+            replay&&p.kind===:update&&resourcekind(g.ids.by_id[sid]) isa BufferKind&&continue
             transition!(pre, be, sid, state(sid), U)
         end
 
-        # Nothing is coalesced across resources: a buffer barrier orders only its
-        # buffer and a layout change is per image. `pre` is already minimal.
+        # The portable answer is per-resource. Native GLOBAL
+        # buffer dependencies can coalesce covered hazards below; images still
+        # require their own layout transitions.
         needed = pre
 
         # The aliasing handover, which `transition!` cannot see because the two
@@ -638,9 +681,39 @@ function run!(::Barriers, c)
             end
             isempty(waits) && continue
             push!(needed, Transition(0, first(waits), waits, to))
+            if coalesce
+                alias_last[length(needed)]=maximum((get(lasttouch,sid,0)
+                    for (a,o) in handovers if a==newi
+                    for sid in segments_of(resourceid(g,c.graph.transients[o])));init=0)
+            end
+        end
+
+        if coalesce
+            kept=Transition[]
+            for (j,t) in enumerate(needed)
+                # Image barriers still carry per-image layout/state. Only
+                # buffers and arena-memory handovers have global cache scope.
+                buffer=t.resource==0||resourcekind(g.ids.by_id[t.resource]) isa BufferKind
+                source=t.resource==0 ? alias_last[j] : get(lasttouch,t.resource,0)
+                if !buffer||source>get(visible,replay_hazard_key(t),0)
+                    push!(kept,t)
+                end
+            end
+            # Barriers precede this pass, so they cover accesses through i-1,
+            # not the writes the pass itself is about to issue.
+            for t in kept
+                (t.resource==0||resourcekind(g.ids.by_id[t.resource]) isa BufferKind)||continue
+                visible[replay_hazard_key(t)]=i-1
+            end
+            needed=kept
         end
 
         c.prepass[p] = needed
+        if coalesce
+            for (sid,_) in usages[i]
+                lasttouch[sid]=i
+            end
+        end
     end
     c
 end

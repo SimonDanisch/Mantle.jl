@@ -118,13 +118,15 @@ end
 Append every device buffer reachable from `x` to `acc`. Resources and backend
 arrays are leaves; other values are walked field by field. A `ResourceView`
 yields the slice of its parent it covers, interned per graph so repeated views
-are one resource.
+are one resource. Native array parents conservatively name their whole storage
+owner: scalar/vector views can use different element widths over those bytes.
 """
 resourceleaves!(acc, g, v::ResourceView, seen::Base.IdSet{Any}, depth::Int) =
-    (push!(acc, slice(g, v.parent, elementrange(v))); acc)
+    (push!(acc, isdevicearray(v.parent) ? v.parent : slice(g, v.parent, elementrange(v))); acc)
 
 resourceleaves!(acc, g, x::Resource, seen::Base.IdSet{Any}, depth::Int) = (push!(acc, x); acc)
-resourceleaves!(acc, g, x::BufferRange, seen::Base.IdSet{Any}, depth::Int) = (push!(acc, x); acc)
+resourceleaves!(acc, g, x::BufferRange, seen::Base.IdSet{Any}, depth::Int) =
+    (push!(acc,isdevicearray(x.parent) ? x.parent : x); acc)
 resourceleaves!(acc, g, @nospecialize(x)) = resourceleaves!(acc, g, x, Base.IdSet{Any}(), 0)
 
 # `Attribute(p, x)` already declared it as `Vertices`; declaring it again would
@@ -507,7 +509,7 @@ function refit!(pl::Plan)
     let am = pl.args
         am === nothing || retire!(pool(pl.graph.dev), pl.graph.dev, am.store)
     end
-    install!(pl, compile!(Compile(pl.graph; pl.alias, pl.policy)))
+    install!(pl, compile!(Compile(pl)))
     return true
 end
 
@@ -741,12 +743,17 @@ resourcekind(::BufferRange) = BufferKind()
 Elements `range` of `x` as a resource of its own, interned per
 `(resource, range)` in the graph. Kernels still receive the whole buffer; the
 slice only scopes barriers, so passes over disjoint slices are not ordered.
+For native backend arrays, tracking remains at whole-allocation granularity.
 """
 function slice(g::Graph, x, range::UnitRange{Int})
     # Not `length(storage(x))`: a transient has no storage until placement.
     n = length(x)
     (first(range) >= 1 && last(range) <= n) || throw(ArgumentError(
         "slice(): range $range is outside the buffer's 1:$n."))
+    # Native arrays may reinterpret one allocation with different element
+    # widths/offsets. Track the whole owner until native byte-range views are
+    # represented explicitly; element ranges from different dtypes cannot mix.
+    isdevicearray(x) && return BufferRange(x,range)
     pid = resourceid(g, x)
     get!(g.views, (pid, range)) do
         BufferRange(x, range)
@@ -887,9 +894,17 @@ rootresource(v::BufferRange) = rootresource(v.parent)
 
 rootresource(a::Attr) = rootresource(a.resource)
 
-Compile(g::Graph; alias = true, policy = Overlap()) =
-    Compile(g, alias, policy, Analysis(),
+Compile(g::Graph; alias = true, policy = Overlap(), ordered_entry = false) =
+    Compile(g, alias, policy, ordered_entry, Analysis(),
             IdDict{Pass,Vector{Transition}}(), PassPlan[], Set{Any}())
+
+# Core selects synchronization from native facts and the actual plan route,
+# independently of scheduling policy. Walked plans retain first-use barriers.
+Compile(pl::Plan) = Compile(pl.graph; pl.alias, pl.policy,
+    ordered_entry = buffer_head_ordered(pl.graph.dev) &&
+                    recordsplans(pl.graph.dev) && recordable(pl.graph.dev, pl))
+ordered_entry(::Compilation) = false
+ordered_entry(c::Compile) = c.ordered_entry
 
 # Compilation hooks beyond the generic `Compilation` field accessors: usages,
 # slice-aware overlap, and the memory pool.
@@ -915,8 +930,8 @@ function overlapping(g::Graph, a::Int, b::Int)
     (ra isa BufferRange || rb isa BufferRange) || return false
     # `get`, not `resourceid`: a query must not intern ids while the compiler
     # indexes by id. Parents are registered before their slices.
-    pa = ra isa BufferRange ? get(g.ids.ids, ra.parent, 0) : a
-    pb = rb isa BufferRange ? get(g.ids.ids, rb.parent, 0) : b
+    pa = ra isa BufferRange ? get(g.ids, ra.parent, 0) : a
+    pb = rb isa BufferRange ? get(g.ids, rb.parent, 0) : b
     (pa == 0 || pb == 0) && return false
     pa == pb || return false
     # A whole-resource usage covers every slice of it.
@@ -928,7 +943,7 @@ end
 function overlapgroup(g::Graph, id::Int)
     r = get(g.ids.by_id, id, nothing)
     r isa BufferRange || return id
-    p = get(g.ids.ids, r.parent, 0)
+    p = get(g.ids, r.parent, 0)
     # An unregistered parent overlaps nothing, so the slice is its own group.
     return p == 0 ? id : p
 end
@@ -1056,7 +1071,7 @@ Plan(g::Graph; alias::Bool = true,
     let pl = Plan(g, hostwritten!(g), alias, policy, Float64(budget), profile)
         bindreadbacks!(pl)
         c = try
-            compile!(Compile(g; alias, policy))
+            compile!(Compile(pl))
         catch err
             freereadbacks!(pl, err)
             rethrow()

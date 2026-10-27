@@ -148,7 +148,7 @@ The destination of the last transition `plan` makes on `r`, in scheduled order:
 the layout `r` rests in between runs. `nothing` when the plan never touches `r`.
 """
 function restingusage(pl::Plan, r)
-    id = get(pl.graph.ids.ids, r, nothing)
+    id = get(pl.graph.ids, r, nothing)
     id === nothing && return nothing
     rest = nothing
     for pp in pl.passes, t in pp.pre
