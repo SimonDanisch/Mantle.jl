@@ -31,7 +31,6 @@ include(joinpath(@__DIR__, "freshprocess.jl"))
 @testset "a buffer may outlive a device reset" begin
     status, out = infreshprocess(raw"""
         dev = Mantle.Device(BACKEND)
-        b = Mantle.backend(dev)
         # Where the backend is among the usable ones: asked again after the reset,
         # that place answers with the default device of its API.
         place = findfirst(==(BACKEND), Mantle.eachbackend())
@@ -40,10 +39,10 @@ include(joinpath(@__DIR__, "freshprocess.jl"))
             # finalizer, the first through the backend, the second through the
             # pool. Locals of this block, so dropping them below drops the last
             # reference.
-            d = KA.allocate(b, Float32, 1000)
+            d = KA.allocate(dev, Float32, 1000)
             fill!(d, 1.0f0)
             buf = Mantle.Buffer(dev, ones(Float32, 1000))
-            KA.synchronize(b)
+            KA.synchronize(dev)
             @test Array(d) == fill(1.0f0, 1000)
             # A region its finalizer freed waits in the pool's lock-free inbox until
             # the next allocation, and the reset must cope with it there (an `Inbox`
@@ -68,10 +67,9 @@ include(joinpath(@__DIR__, "freshprocess.jl"))
             GC.gc()
             GC.gc()
             # And the new device computes, which rules out "retired everything".
-            b2 = Mantle.backend(new)
-            e = KA.allocate(b2, Float32, 64)
+            e = KA.allocate(new, Float32, 64)
             fill!(e, 3.0f0)
-            KA.synchronize(b2)
+            KA.synchronize(new)
             @test Array(e) == fill(3.0f0, 64)
             f = Mantle.Buffer(new, fill(2f0, 64))
             Mantle.waitidle(new)

@@ -33,7 +33,6 @@ include("ka.jl")
 include("raytracing.jl")
 # After raytracing.jl: needs `MetalTLAS`.
 include("hwtlas.jl")
-include("procedural.jl")
 
 include("graphics.jl")
 
@@ -52,7 +51,7 @@ include("record.jl")
 # is released through a driver that is already gone.
 function Mantle.initbackend!(::MetalAPI)
     register_backend!(; name = :metal, priority = 90) do
-        Metal.functional() ? Metal.MetalBackend() : nothing
+        Metal.functional() ? Device(MetalAPI()) : nothing
     end
     atexit() do
         for r in METAL.live

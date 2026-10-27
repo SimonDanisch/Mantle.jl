@@ -2,8 +2,8 @@
 using AMDGPU, Mantle, Test
 
 AMDGPU.device!(first(AMDGPU.devices()))
-global MANTLE_TEST_BACKEND = Mantle.backend(Mantle.Device(Mantle.ROCmAPI()))
-@assert MANTLE_TEST_BACKEND isa AMDGPU.ROCBackend
+global MANTLE_TEST_BACKEND = Mantle.Device(Mantle.ROCmAPI())
+@assert nameof(typeof(MANTLE_TEST_BACKEND)) === :ROCmDevice
 println((backend=typeof(MANTLE_TEST_BACKEND),device=AMDGPU.device()))
 
 @testset "explicit ROCm qualification" begin

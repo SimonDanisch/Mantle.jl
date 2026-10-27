@@ -121,16 +121,12 @@ function devicearray(backend, data::AbstractArray)
     return a
 end
 
-devicearray(d::Device, data::AbstractArray) = devicearray(backend(d), data)
-
 """devicearray(x, T, dims...; unified) -> AbstractGPUArray
 
 Allocate uninitialized storage on a device/backend; forward allocation keywords."""
 devicearray(x, ::Type{T}, dims::Dims; kw...) where {T} =
-    KernelAbstractions.allocate(backend(x), T, dims; kw...)
+    KernelAbstractions.allocate(x, T, dims; kw...)
 
 devicearray(x, ::Type{T}, dims::Integer...; kw...) where {T} =
     devicearray(x, T, Dims(dims); kw...)
 
-"""Forward device adaptation to the backend belonging to that device."""
-Adapt.adapt_storage(d::Device, x) = Adapt.adapt_storage(backend(d), x)

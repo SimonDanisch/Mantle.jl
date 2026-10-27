@@ -163,13 +163,8 @@ end
 Whether `backend` can rasterize: render passes, graphics pipelines, vertex and
 fragment stages. `false` by default so a backend opts in. Callers that can
 degrade ask; RayMakie takes its direct-readback path when it is `false`.
-
-The untyped default would answer `false` for a device nobody wrote a method for,
-so the `::Device` method routes to the device's backend. A backend may still
-define a more specific method for its device.
 """
 supports_graphics(backend) = false
-supports_graphics(dev::Device) = supports_graphics(backend(dev))
 
 """
     supports_geometry_stage(backend) -> Bool
@@ -183,10 +178,6 @@ as Metal's `compile_draw` does; [`supports_mesh_pipeline`](@ref) asks that.
 supports_geometry_stage(backend) = false
 @doc (@doc supports_geometry_stage) supports_tessellation(backend) = false
 
-# Route a device to its backend's answer; see `supports_graphics`.
-supports_geometry_stage(dev::Device) = supports_geometry_stage(backend(dev))
-supports_tessellation(dev::Device) = supports_tessellation(backend(dev))
-
 """
     supports_mesh_pipeline(backend) -> Bool
 
@@ -196,7 +187,6 @@ Whether this backend can run a [`MeshPipeline`](@ref) (Metal mesh pipelines,
 geometry body. `false` by default.
 """
 supports_mesh_pipeline(backend) = false
-supports_mesh_pipeline(dev::Device) = supports_mesh_pipeline(backend(dev))
 
 """
     use_bindings!(handle, compiled, bindings)

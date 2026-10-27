@@ -87,8 +87,7 @@ naming the format. `data[x, y]`: the first index is horizontal, as in GLMakie an
 the Vulkan backend. `Shared` storage, not a buffer-backed linear texture.
 `mipmap = true` regenerates the full mip chain from level 0 at every upload.
 """
-function Mantle.Texture2D(be::Metal.MetalBackend, data::AbstractMatrix{T}; mipmap::Bool = false) where {T}
-    d = Device(be)
+function Mantle.Texture2D(d::MetalDevice, data::AbstractMatrix{T}; mipmap::Bool = false) where {T}
     w, h = size(data)          # first index is x, second is y
     desc = MTL.MTLTextureDescriptor(mtlsampledformat(T), w, h, mipmap)
     desc.usage = MTL.MTLTextureUsageShaderRead
@@ -150,7 +149,7 @@ end
 How a texture is sampled; the same keywords as the Vulkan backend.
 `filter` is `:nearest` or `:linear`, `wrap` is `:repeat`, `:clamp` or `:mirror`.
 """
-function Mantle.Sampler(::Metal.MetalBackend; filter::Symbol = :linear,
+function Mantle.Sampler(d::MetalDevice; filter::Symbol = :linear,
                         wrap::Symbol = :repeat)
     f = filter === :nearest ? MTL.MTLSamplerMinMagFilterNearest :
         filter === :linear  ? MTL.MTLSamplerMinMagFilterLinear :
@@ -166,7 +165,7 @@ function Mantle.Sampler(::Metal.MetalBackend; filter::Symbol = :linear,
     desc.sAddressMode = a
     desc.tAddressMode = a
     desc.normalizedCoordinates = true
-    return MetalSampler(MTL.MTLSamplerState(Metal.device(), desc))
+    return MetalSampler(MTL.MTLSamplerState(d.dev, desc))
 end
 
 """
@@ -191,9 +190,8 @@ end
 Allocate an offscreen target. `color_format` is a Julia element type lowered by
 `mtlformat` (default `BGRA8Unorm`); depth is `Depth32Float`.
 """
-function Mantle.Framebuffer(be::Metal.MetalBackend, width::Integer, height::Integer;
+function Mantle.Framebuffer(d::MetalDevice, width::Integer, height::Integer;
                             depth::Bool = true, color_format = nothing)
-    d = Device(be)
     dev = d.dev
     cfmt = color_format === nothing ? MTL.MTLPixelFormatBGRA8Unorm :
                                       mtlformat(color_format)
@@ -490,8 +488,7 @@ function compile_pipeline(d::MetalDevice, p::Mantle.GraphicsPipeline,
                           vert_bufs::Type, frag_bufs::Type)
     # Geometry pipelines normally go through `compile_draw`, which lowers them
     # onto a mesh pipeline (`metal/mesh.jl`); this compiles native stages only.
-    be = Metal.MetalBackend()
-    p.geometry === nothing || Mantle.supports_geometry_stage(be) ||
+    p.geometry === nothing || Mantle.supports_geometry_stage(d) ||
         error("`compile_pipeline` compiles each stage of the pipeline as itself, " *
               "and this backend has no geometry stage to compile one into. Apple's " *
               "replacement is the mesh pipeline, which this backend DOES run: go " *
@@ -500,7 +497,7 @@ function compile_pipeline(d::MetalDevice, p::Mantle.GraphicsPipeline,
               "pipeline that comes out. Ask `supports_geometry_stage(backend)` " *
               "only if you need to know which of the two ran.")
     (p.tess_control === nothing && p.tess_eval === nothing) ||
-        Mantle.supports_tessellation(be) ||
+        Mantle.supports_tessellation(d) ||
         error("this backend has no tessellation; ask " *
               "`supports_tessellation(backend)` before building a pipeline " *
               "with it.")
@@ -698,7 +695,7 @@ function Mantle.readback_framebuffer(fb::MetalFramebuffer)
     return px
 end
 
-supports_graphics(::Metal.MetalBackend) = true
+supports_graphics(::MetalDevice) = true
 
 # The render-pass verbs declared in `graphics/commands.jl`, driven by core's
 # `runrenderpass!`.
@@ -926,8 +923,7 @@ Mantle.indexbuffer(d::MetalDevice, indices::AbstractVector{UInt32}) =
 An array of `data` on Metal, in the pool's buffer storage mode rather than the
 private default of `KernelAbstractions.allocate` (see `indexbuffer`).
 """
-Mantle.devicearray(be::Metal.MetalBackend, data::AbstractArray) =
-    buffercopy(Mantle.todevice(be), data)
+Mantle.devicearray(d::MetalDevice, data::AbstractArray) = buffercopy(d, data)
 
 # The storage mode is a type parameter of `MtlArray`, not a keyword.
 function buffercopy(d::MetalDevice, data::AbstractArray{T,N}) where {T,N}

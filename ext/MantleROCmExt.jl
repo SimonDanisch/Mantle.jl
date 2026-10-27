@@ -13,6 +13,7 @@ function in this module instead of adding a method.
 module MantleROCmExt
 
 import AMDGPU
+import Adapt
 import GPUArrays
 import KernelAbstractions as KA
 import KernelInterface as KI
@@ -126,14 +127,20 @@ Mantle.devices(::ROCmAPI) =
      for (i, d) in enumerate(AMDGPU.devices())]
 
 Mantle.defaultdevice!(d::ROCmDevice) = (ROCM_DEVICE[] = d; adopt!(d))
+# The Mantle device of AMDGPU.jl's backend, which is what `KA.get_backend` of a
+# `ROCArray` returns.
 Mantle.Device(::AMDGPU.ROCBackend) = Mantle.Device(ROCmAPI())
+# A backend's `==` is "the same device" (see the Metal backend); `isequal` stays
+# identity, so hashing asks nothing of AMDGPU.jl's type.
+Base.:(==)(b::AMDGPU.ROCBackend, d::ROCmDevice) = Mantle.Device(b) === d
+Base.:(==)(d::ROCmDevice, b::AMDGPU.ROCBackend) = b == d
+Base.isequal(::AMDGPU.ROCBackend, ::ROCmDevice) = false
+Base.isequal(::ROCmDevice, ::AMDGPU.ROCBackend) = false
 Mantle.pool(d::ROCmDevice) = d.pool
-Mantle.backend(::ROCmDevice) = AMDGPU.ROCBackend()
 Mantle.accesscache(d::ROCmDevice) = d.accesses
 Mantle.devicebuffertype(::ROCmDevice, ::Type{T}, N::Int) where {T} =
     AMDGPU.Device.ROCDeviceArray{T,N,1}
-Mantle.argtype(d::ROCmDevice, y) =
-    Core.Typeof(KI.argconvert(Mantle.kibackend(d), y))
+Mantle.argtype(d::ROCmDevice, y) = Core.Typeof(KI.argconvert(d, y))
 Mantle.isdevicearray(::AMDGPU.Device.ROCDeviceArray) = true
 
 function Mantle.kernelinterpreter(d::ROCmDevice, f, tt)
@@ -344,6 +351,7 @@ end
 Mantle.argsize(::ROCmCompiledDispatch) = 0
 Mantle.indirectindex(::ROCmCompiledDispatch) = 0
 Mantle.devicesized(::ROCmCompiledDispatch) = false
+Mantle.workgroupsize(d::ROCmCompiledDispatch) = UInt32(prod(d.groupsize))
 
 # ── calls ────────────────────────────────────────────────────────────────────
 #
@@ -364,7 +372,6 @@ The occupancy limit must be shaped to the ndrange; reading the size
 2.1's encoder.
 """
 function kicompile(c::Mantle.Compile{ROCmDevice}, dev::ROCmDevice, d::Mantle.Dispatch)
-    be = Mantle.kibackend(dev)
     args = map(a -> Mantle.resolve(dev, a), d.args)
     nd = Mantle.dispatchrange(d.ndrange)
     kern = Mantle.kikernel(d.kernel, dev, args)
@@ -391,7 +398,7 @@ function Mantle.compile_dispatch(c::Mantle.Compile{ROCmDevice}, d::Mantle.Dispat
     # A call (no ndrange): core's `bake` returns a `Mantle.Call`, capturable here.
     Mantle.iscall(d) && return Mantle.bake(c, d)
     # A plain-function kernel goes through KernelInterface.
-    Mantle.buildskernel(d.kernel, Mantle.backend(dev)) || return kicompile(c, dev, d)
+    Mantle.buildskernel(d.kernel, dev) || return kicompile(c, dev, d)
     obj = Mantle.kernelfor(d, dev)
     args = map(a -> Mantle.resolve(dev, a), d.args)
     nd = Mantle.dispatchrange(d.ndrange)
@@ -940,6 +947,44 @@ end
 
 Mantle.caps(b::AMDGPU.ROCBackend) = Mantle.caps(Mantle.Device(b))
 
+# ── KernelInterface ──────────────────────────────────────────────────────────
+#
+# A `ROCmDevice` is a KernelInterface backend, as every `Device` is. AMDGPU.jl
+# implements the vocabulary for its `ROCBackend`, which works on the task's
+# current stream; the device answers each verb as that backend after making its
+# own stream current (`adopt!`), so a launch, an allocation or a copy goes to the
+# device's stream from any task.
+
+const ROC = AMDGPU.ROCBackend()
+
+KI.allocate(d::ROCmDevice, ::Type{T}, dims::Tuple) where {T} = (adopt!(d); KI.allocate(ROC, T, dims))
+KI.synchronize(d::ROCmDevice) = Mantle.waitidle(d)
+KI.copyto!(d::ROCmDevice, dest, src) = (adopt!(d); KI.copyto!(ROC, dest, src))
+KI.versioninfo(io::IO, ::ROCmDevice) = KI.versioninfo(io, ROC)
+KI.supports_shuffle(::ROCmDevice, ::Type{T}) where {T} = KI.supports_shuffle(ROC, T)
+KI.argconvert(::ROCmDevice, x) = KI.argconvert(ROC, x)
+KI.kernel_function(d::ROCmDevice, f::F, tt::TT = Tuple{}; kwargs...) where {F,TT} =
+    (adopt!(d); KI.kernel_function(ROC, f, tt; kwargs...))
+KI.record_event(d::ROCmDevice) = (adopt!(d); KI.record_event(ROC))
+KI.wait_event(d::ROCmDevice, ev::AMDGPU.HIP.HIPEvent) = (adopt!(d); KI.wait_event(ROC, ev))
+for f in (:functional, :supports_float64, :supports_atomics, :supports_unified,
+          :supports_subgroups, :shfl_types, :sub_group_reduce_add_types)
+    @eval KI.$f(::ROCmDevice) = KI.$f(ROC)
+end
+# Device queries read the current device, which `adopt!` makes this one.
+for f in (:max_work_group_size, :max_work_group_dims, :max_num_groups, :sub_group_size,
+          :multiprocessor_count)
+    @eval KI.$f(d::ROCmDevice) = (adopt!(d); KI.$f(ROC))
+end
+
+# AMDGPU.jl's KernelAbstractions extension tells the compiler a static workgroup
+# size; the same kernel built on the device asks it the same way.
+KA.compiler_options(obj::KA.Kernel{ROCmDevice,W,N,F}) where {W,N,F} =
+    KA.compiler_options(KA.Kernel{AMDGPU.ROCBackend,W,N,F}(ROC, obj.f))
+
+# `Adapt.adapt(dev, x)` uploads to the device.
+Adapt.adapt_storage(d::ROCmDevice, x) = (adopt!(d); Adapt.adapt_storage(ROC, x))
+
 # A library call is a pass declared with the three-argument `dispatch!`, which
 # states the written operand; `mul!` on a `ROCArray` then reaches rocBLAS:
 #     dispatch!(p, mul!, (use(p, C; write = true), use(p, A; read = true),
@@ -960,7 +1005,7 @@ function __init__()
         end
     end
     register_backend!(; name = :rocm, priority = 50) do
-        AMDGPU.functional() ? AMDGPU.ROCBackend() : nothing
+        AMDGPU.functional() ? Mantle.Device(ROCmAPI()) : nothing
     end
 end
 

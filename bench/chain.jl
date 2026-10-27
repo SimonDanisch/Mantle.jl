@@ -48,7 +48,7 @@ function build_chain(dev, win, n)
     # loop), so a `GPURef`: the draw holds its device address.
     mvp = M.GPURef(dev, camera(0.0f0))
 
-    fb = M.Framebuffer(M.backend(dev), W, H; depth = false)   # the portable spelling; the type is the backend's
+    fb = M.Framebuffer(dev, W, H; depth = false)
 
     g = M.Graph(dev)
 

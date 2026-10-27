@@ -49,7 +49,7 @@ end
     status, out = infreshprocess(raw"""
         dev = Mantle.reset_device!(Mantle.Device(BACKEND); debug = DebugConfig(validation = true))
         Mantle.validating(dev) || exit(3)
-        be = Mantle.backend(dev)
+        be = dev
         toolarge = Mantle.maxalloc(dev) < typemax(Int) ? Mantle.maxalloc(dev) + 1 :
                                                          2 * Mantle.capacity(dev)
         @testset "refused, quietly" begin

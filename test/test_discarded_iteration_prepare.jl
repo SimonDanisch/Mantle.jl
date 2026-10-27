@@ -74,7 +74,7 @@ end
     for slot in slots
         fill!(Mantle.slotgrid(pl.args.indirect[slot]), sentinel)
     end
-    KA.synchronize(Mantle.backend(dev))
+    KA.synchronize(dev)
 
     Mantle.run!(pl)
     Mantle.waitfor!(pl)

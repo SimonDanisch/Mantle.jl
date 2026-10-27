@@ -69,6 +69,3 @@ function caps(d::MetalDevice)
     return d.caps
 end
 
-# The backend's one device per process: a new `MetalDevice` here would bring a
-# second `Pool` and `MTLCommandQueue`, unordered against the first.
-caps(b::Metal.MetalBackend) = caps(Device(b))

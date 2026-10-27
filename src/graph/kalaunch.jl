@@ -69,7 +69,7 @@ end
 Wait for submitted device work before the host reads memory it wrote.
 Defaults to `KernelAbstractions.synchronize`.
 """
-awaitwrites(dev::Device) = KernelAbstractions.synchronize(backend(dev))
+awaitwrites(dev::Device) = KernelAbstractions.synchronize(dev)
 
 """
 Eager `kernel(args...; ndrange = DeviceRange(count; max))` on a KA backend
@@ -111,41 +111,31 @@ function buildskernel(f, backend)
 end
 
 """
-    kibackend(dev) -> backend
-
-The backend object that compiles `KernelInterface` kernels for `dev`:
-`backend(dev)` unless the device uses a separate KI type (ROCm). Without KI
-support [`kikernel`](@ref) refuses macro-free kernels.
-"""
-kibackend(dev) = backend(dev)
-
-"""
     kisupported(dev, f) -> Bool
 
 Whether `dev` can compile the macro-free kernel `f`.
 """
 function kisupported(dev, f)
-    be = kibackend(dev)
-    applicable(KI.argconvert, be, f) || return false
-    converted = KI.argconvert(be, f)
-    return hasmethod(KI.kernel_function, Tuple{typeof(be), typeof(converted), Type})
+    applicable(KI.argconvert, dev, f) || return false
+    converted = KI.argconvert(dev, f)
+    return hasmethod(KI.kernel_function, Tuple{typeof(dev), typeof(converted), Type})
 end
 
 """
     kikernel(f, dev, args) -> KI.Kernel
 
 The compiled kernel for a macro-free `f`, specialised on the `KI.argconvert`ed
-argument types, which is what the backend passes at launch.
+argument types, which is what the backend passes at launch. Without KI support
+the device refuses macro-free kernels.
 """
 function kikernel(f, dev, args)
-    be = kibackend(dev)
     kisupported(dev, f) || error(
         "Mantle: `dispatch!` was given `$f`, which is a macro-free kernel, and " *
-        "$(typeof(be)) implements no `KI.kernel_function`. The backend answers " *
+        "$(typeof(dev)) implements no `KI.kernel_function`. The backend answers " *
         "`KernelAbstractions` and not `KernelInterface`, so it can run an " *
         "`@kernel` but cannot compile a plain function.")
-    tt = Base.to_tuple_type(map(a -> Core.Typeof(KI.argconvert(be, a)), args))
-    return KI.kernel_function(be, KI.argconvert(be, f), tt)
+    tt = Base.to_tuple_type(map(a -> Core.Typeof(KI.argconvert(dev, a)), args))
+    return KI.kernel_function(dev, KI.argconvert(dev, f), tt)
 end
 
 """
@@ -174,7 +164,7 @@ Build the dispatch's KA kernel and refuse a kernel that captures variables: a
 plan resolves arguments once, so a captured array would go stale.
 """
 function kernelfor(d::Dispatch, dev::Device)
-    obj = kernelfor(d.kernel, d.group, backend(dev))
+    obj = kernelfor(d.kernel, d.group, dev)
     isempty(fieldnames(typeof(obj.f))) ||
         throw(ArgumentError("dispatch!: the kernel closes over $(fieldnames(typeof(obj.f))). " *
                             "A plan resolves its arguments once, so a captured device array " *
@@ -233,7 +223,6 @@ devicesized(::Call) = false
 
 function bake(c::Compile, d::Dispatch)
     dev = c.graph.dev
-    be = backend(dev)
     args = argmap(a -> resolve(dev, a), d.args)
     # Refused here for every backend, per `runscalls`.
     if iscall(d)
@@ -247,9 +236,9 @@ function bake(c::Compile, d::Dispatch)
     end
     # A `KI.Kernel` takes the same `ndrange`/`workgroupsize` keywords as a
     # `KA.Kernel`, so `Launch` serves both.
-    buildskernel(d.kernel, be) || return Launch(kikernel(d.kernel, dev, args), args,
-                                                bakedrange(c, d.ndrange), d.group, dev)
-    let k = kernelfor(d.kernel, d.group, be)
+    buildskernel(d.kernel, dev) || return Launch(kikernel(d.kernel, dev, args), args,
+                                                 bakedrange(c, d.ndrange), d.group, dev)
+    let k = kernelfor(d.kernel, d.group, dev)
         Launch(k, args, bakedrange(c, d.ndrange), callgroup(k, d.group), dev)
     end
 end
@@ -321,13 +310,11 @@ end
 for a `Launch`, which binds its arguments directly."""
 argsize(d::CompiledDraw) = d.argsize
 argsize(d::CompiledDispatch) = d.argsize
-argsize(d::CompiledTrace) = d.argsize
 argsize(::Launch) = 0
 
 """The indirect-command slot a compiled dispatch owns; zero when host-sized and
 for a `Launch`."""
 indirectindex(d::CompiledDispatch) = d.indirect
-indirectindex(d::CompiledTrace) = d.indirect
 indirectindex(::Launch) = 0
 
 # A `DeviceRange` dispatch reads an indirect command that a core prepare kernel
@@ -406,8 +393,6 @@ function multi_prepare_indirect_kernel(inds, sizes, wss, gate)
     return nothing
 end
 
-# A trace's indirect command counts rays, not workgroups.
-workgroupsize(::CompiledTrace) = UInt32(1)
 
 """
     drawviewport(pass, draw) -> viewport or nothing

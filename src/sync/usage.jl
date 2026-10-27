@@ -127,30 +127,7 @@ unordered(::Type{<:Unordered}) = true
 inner(::Type{Unordered{U}}) where {U} = U
 inner(::Type{U}) where {U<:Usage} = U
 
-"""
-A shader access made by a ray-tracing pipeline: the same read or write at the
-ray-tracing stage. Lowered as plain `Storage`, its barriers would name the
-compute/vertex/fragment stages, which on NVIDIA (ray tracing is its own stage; AMD
-runs it as compute) orders nothing and occasionally loses the device.
-[`trace!`](@ref) applies it to every shader usage of its pass ([`traced`](@ref));
-`Unordered` is outermost when both apply.
-"""
-struct Traced{U<:Usage} <: Usage end
-
 for f in (:kindof, :reads, :writes, :discards)
     @eval $f(::Type{Unordered{U}}) where {U} = $f(U)
-    @eval $f(::Type{Traced{U}}) where {U} = $f(U)
 end
 
-"""
-    traced(U) -> Type
-
-`U` as a ray-tracing pipeline makes it: storage, uniform and sampled accesses
-become [`Traced`](@ref). Indirect counts, predicates, copies and the acceleration
-structure are not shader accesses and stay as they are.
-"""
-traced(::Type{Unordered{U}}) where {U} = Unordered{traced(U)}
-traced(::Type{S}) where {S<:Storage} = Traced{S}
-traced(::Type{Uniform}) = Traced{Uniform}
-traced(::Type{Sampled}) = Traced{Sampled}
-traced(::Type{U}) where {U<:Usage} = U

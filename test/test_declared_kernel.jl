@@ -154,10 +154,8 @@ end
         # refusal is the behaviour under test here. (The host was such a backend
         # until it ran plain functions itself, one work item at a time.)
         #
-        # `kisupported` and not a `hasmethod` written out here, because a device
-        # can have two backend objects and only `kibackend` knows which one KI
-        # speaks to: asked of `backend(dev)`, this branch was taken on ROCm,
-        # whose KI backend is a different type in another module.
+        # `kisupported` and not a `hasmethod` written out here, so the branch asks
+        # the device exactly what `kikernel` asks it.
         err = try
             M.Plan(let g = M.Graph(dev)
                 out = M.Transient.Buffer(g, Float32, n)
@@ -309,14 +307,13 @@ end
 
 @testset "an immediate launch resolves a Buffer — $(nameof(typeof(BE)))" begin
     dev = M.Device(BE)
-    kb = M.kibackend(dev)
-    hasmethod(KI.launch, Tuple{KI.Kernel{typeof(kb), typeof(addone!)},
+    hasmethod(KI.launch, Tuple{KI.Kernel{typeof(dev), typeof(addone!)},
                                Dims{3}, Dims{3}, Tuple}) || return
     n = 40
     a = M.Buffer(dev, Float32, (n,))
     copyto!(M.storage(a), Float32.(1:n))
     out = M.Buffer(dev, Float32, (n,))
-    KI.Kernel(kb, addone!)(out, a, n; ndrange = n, workgroupsize = 32)
+    KI.Kernel(dev, addone!)(out, a, n; ndrange = n, workgroupsize = 32)
     M.waitidle(dev)
     @test Array(M.storage(out)) == Float32.(2:(n + 1))
     M.free!(a)

@@ -32,7 +32,7 @@ end
 
 @testset "every kind of call, back to back" begin
     dev = Mantle.Device(TESTBACKEND)
-    be = Mantle.backend(dev)
+    be = dev
     n = 256
 
     # An ad hoc launch…

@@ -147,7 +147,7 @@ end
 
 function check_extent_refusal(ctx)
     dev = ctx
-    be = Mantle.backend(dev)
+    be = dev
     huge = 1 << (Sys.WORD_SIZE-2)
     @testset "invalid native shapes never submit or allocate" begin
         before = Mantle.submissions(dev)

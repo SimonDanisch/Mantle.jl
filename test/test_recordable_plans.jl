@@ -43,13 +43,13 @@ end
         M.record!(pl)
         @test M.recorded(pl) == M.recordable(dev, pl)
         M.run!(pl)
-        KA.synchronize(M.backend(dev))
+        KA.synchronize(dev)
         px = Array(M.storage(out))
         @test all(p -> Float32(p.r) ≈ 0.25f0 && Float32(p.g) ≈ 0.5f0, px)
         fill!(M.storage(out), RGBA{Float16}(0, 0, 0, 0))
-        KA.synchronize(M.backend(dev))
+        KA.synchronize(dev)
         M.run!(pl)
-        KA.synchronize(M.backend(dev))
+        KA.synchronize(dev)
         @test Array(M.storage(out)) == px
         M.free!(pl)
     end
@@ -69,7 +69,7 @@ end
     for v in (3f0, 7f0, 11f0, 13f0)
         src[:] = fill(v, n)
         M.run!(pl)
-        KA.synchronize(M.backend(dev))
+        KA.synchronize(dev)
         @test all(==(v), Array(M.storage(dst)))
     end
     @test M.recorded(pl)
@@ -91,7 +91,7 @@ end
     for v in (3f0, 7f0, 11f0, 13f0)
         src[1:n] = fill(v, n)
         M.run!(pl)
-        KA.synchronize(M.backend(dev))
+        KA.synchronize(dev)
         @test all(==(v), Array(M.storage(dst)))
     end
     M.free!(pl)
@@ -111,7 +111,7 @@ end
     src[33:96] = fill(7f0, 64)
     @test M.isdirty(src)
     M.run!(pl)
-    KA.synchronize(M.backend(dev))
+    KA.synchronize(dev)
     got = Array(M.storage(dst))
     @test all(==(3f0), got[1:32])
     @test all(==(7f0), got[33:96])

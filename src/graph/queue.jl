@@ -17,9 +17,6 @@ Whether `allocate_batch_queue!` is supported (independent of graphics support);
 otherwise allocation throws `ArgumentError`.
 """
 supports_batch_queue(backend) = false
-# Backends answer for their backend type; a device forwards so it does not hit
-# the untyped `false`.
-supports_batch_queue(dev::Device) = supports_batch_queue(backend(dev))
 
 """
     batchqueue(device) -> channel

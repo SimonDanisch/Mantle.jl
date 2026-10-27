@@ -8,7 +8,7 @@ Written against Metal first, where three things in that chain fail silently
 rather than loudly, and each has an assertion below that every backend has to
 pass:
 
-  * residency — on Metal a TLAS bound through an argument buffer is not
+  * residency — on Metal a TLAS a kernel names only by its resource ID is not
     automatically resident, and a non-resident structure reports every ray as a
     miss. `test_trace_closest_hit.jl` traces one kernel against the hardware
     structure and the software BVH and asserts they agree ray by ray, which is
@@ -184,16 +184,16 @@ xshift(x) = Mat4f(1,0,0,0, 0,1,0,0, 0,0,1,0, x,0,0,1)
         @test Adapt.adapt(be, t) isa Mantle.AdaptedAccel
     end
 
-    @testset "the ray-tracing pipeline answer is the backend's, on every handle" begin
-        # Hikari picks its trace path off this, asking whichever of the backend,
-        # the TLAS or the adapted accel it holds. A triangles-only accel answers
-        # what its backend does; an untyped default answering a handle no backend
-        # wrote a method for would be a wrong answer, not a missing one.
+    @testset "the procedural traversal answer is the backend's, on every handle" begin
+        # A caller asks whichever of the backend, the TLAS or the adapted accel it
+        # holds. An untyped default answering a handle no backend wrote a method
+        # for would be a wrong answer, not a missing one.
         t = Mantle.HWTLAS{Raycore.Triangle{UInt32}}(be)
-        @test Mantle.supports_rt_pipeline(t) == Mantle.supports_rt_pipeline(be)
+        @test Mantle.supports_procedural_traversal(t) == Mantle.supports_procedural_traversal(be)
         push!(t, GeometryBasics.normal_mesh(Sphere(Point3f(0), 1f0)))
         Raycore.sync!(t)
-        @test Mantle.supports_rt_pipeline(Adapt.adapt(be, t)) == Mantle.supports_rt_pipeline(be)
+        @test Mantle.supports_procedural_traversal(Adapt.adapt(be, t)) ==
+              Mantle.supports_procedural_traversal(be)
     end
 
     @testset "a recorded plan traces what a direct launch traces" begin

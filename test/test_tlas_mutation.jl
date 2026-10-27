@@ -42,12 +42,11 @@ end
     @test_throws ArgumentError push!(t, mesh, transforms; instance_ids=UInt32[1])
     @test t.builds == 0 && isempty(t.instances) && isempty(t.blas_list)
 
-    first = push!(t, mesh, records; n=1, sbt_offset=UInt32(7))
+    first = push!(t, mesh, records; n=1)
     @test t.builds == 1 && t.dirty
     @test Raycore.n_instances(t) == 1
     @test Raycore.n_geometries(t) == 1
     @test Raycore.instance_buffer(t, first) == records
-    @test Mantle.batchof(t.instances, first).sbt_offset == 7
     blas = only(t.blas_list)
     second = push!(t, blas, transforms; instance_ids=UInt32[21,22])
     @test Raycore.n_geometries(t) == 1

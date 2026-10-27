@@ -111,7 +111,8 @@ emitpreparebarrier!(e) = nothing
 """
     workgroupsize(compiled) -> UInt32
 
-Return invocations per workgroup. Traces use one because their indirect counts are rays.
+Invocations per workgroup of a compiled dispatch: what turns its device-written
+item count into the workgroup count of its indirect command.
 """
 function workgroupsize end
 
@@ -503,7 +504,7 @@ const BACKEND_VOCABULARY = (
     :staged_gemm_tile, :videodecodes, :decode_h264_gpu, :h264decoder, :feed!, :decodemore!, :remaining, :build_blas_aabb, :copytexels!,
     :isoutofmemory,
     # devices, memory, resources
-    :Device, :backend, :kibackend, :batchqueue, :capacity, :caps, :maxalloc, :pool,
+    :Device, :batchqueue, :capacity, :caps, :maxalloc, :pool,
     # Core answers these for `SubmitChannel`; a backend answers for its own channel
     # type (Metal.jl's `BatchedCommandQueue`).
     :todevice, :reclaim!,
@@ -534,7 +535,7 @@ const BACKEND_VOCABULARY = (
     :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel, :mipmapped,
     :supports, :supports_graphics, :supports_geometry_stage,
     :supports_tessellation, :supports_mesh_pipeline, :supports_batch_queue,
-    :supports_rt_pipeline, :supports_procedural_traversal, :supports_hwtlas, :supports_float64, :supports_int64_atomics,
+    :supports_procedural_traversal, :supports_hwtlas, :supports_float64, :supports_int64_atomics,
     :supportspredicate,                       # only whether fixed-size gated work can be discarded
     # Device lifecycle, validation and allocation probes (runtime/lifecycle.jl).
     :debugenv, :validating, :validationmessages!, :submissions, :retired, :tryallocate,
@@ -598,9 +599,14 @@ const BACKEND_VOCABULARY = (
     # and stage-wrapper signatures.
     :argtype, :devicebuffertype, :isdevicearray, :accesscache, :kerneltouches,
     :kernelinterpreter, :kakernelaccesssignature,
-    :vertextouches, :fragmenttouches, :shadertouches,
+    :vertextouches, :fragmenttouches,
     # ray tracing
     :build_accel!, :build_blas, :refit_tlas!,
+    # the ray query core's traversal loops (`query_record`, `query_transparent`) drive: device code
+    :query_begin, :query_begin_transparent, :query_next!, :candidate_is_box,
+    :candidate_primitive_index, :candidate_object_ray, :candidate_ids, :candidate_triangle,
+    :commit_triangle!, :commit_intersection!, :committed_kind, :committed_ids,
+    :committed_barycentrics, :query_end!,
     # Native batch hooks apply only to hardware BatchedTLAS implementations.
     :buildgeometry!, :geometryref, :instancearray, :updatebatch!,
 )

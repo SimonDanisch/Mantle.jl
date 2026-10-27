@@ -37,7 +37,7 @@ function check_pipeline_publication(ctx, other=nothing)
             @test draw.pipeline.color_formats == [format]
         end
 
-        fb = Mantle.Framebuffer(Mantle.backend(dev), 8, 8; depth=false, color_format=RGBA{Float32})
+        fb = Mantle.Framebuffer(dev, 8, 8; depth=false, color_format=RGBA{Float32})
         Mantle.draw!(dev, description, Mantle.OffscreenTarget(fb), 3)
         Mantle.flush!(dev)
         @test all(p -> p.g > 0.99f0 && p.r < 0.01f0, Mantle.readback_framebuffer(fb))

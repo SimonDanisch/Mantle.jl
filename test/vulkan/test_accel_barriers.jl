@@ -10,7 +10,7 @@ function check_accel_barriers(ctx)
         @test_skip Mantle.supports_hwtlas(dev)
         return nothing
     end
-    be = Mantle.backend(dev)
+    be = dev
     @testset "a BLAS built from offset device views refits in place" begin
         vertices = [(0f0, 0f0, 0f0), (1f0, 0f0, 0f0), (0f0, 1f0, 0f0)]
         moved = [(x, y, 2f0) for (x, y, _) in vertices]

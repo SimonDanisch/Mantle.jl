@@ -2,20 +2,6 @@
 # `vk_context()` lazily builds the process-default `LavaDevice`;
 # `LavaDevice(; select, debug)` builds others.
 
-"""
-    RTPipelineProperties
-
-Ray tracing pipeline properties of the physical device. `LavaDevice.rt_pipeline_properties`
-is `nothing` without the RT extensions.
-"""
-struct RTPipelineProperties
-    shader_group_handle_size::UInt32
-    shader_group_base_alignment::UInt32
-    shader_group_handle_alignment::UInt32
-    max_ray_recursion_depth::UInt32
-    max_ray_hit_attribute_size::UInt32
-end
-
 # The two kinds of GPU work, both closed: no command buffer is open when a
 # Mantle call returns. A `Recording` is a plan's, written once at `record!` and
 # submitted every run; a `OneShot` is written, sealed and submitted within one
@@ -276,8 +262,6 @@ mutable struct LavaDevice <: Device
     # Queue 1 of the primary family, or the primary queue when the family has
     # only one. Used by the external-image copy.
     compute_queue::VK.Queue
-    # Ray tracing (nothing if not available)
-    rt_pipeline_properties::Union{Nothing, RTPipelineProperties}
     # `nothing` without `VK_EXT_debug_utils`.
     debug_messenger::Any
     # The messenger's ring and its `pUserData`; see `ValidationRing`.
@@ -303,13 +287,9 @@ mutable struct LavaDevice <: Device
     # Byte alignment for BDAs passed as `pScratchData` in AS builds
     # (`bda_alignment_for(ctx, true)`).
     as_scratch_align::UInt64
-    # VK_KHR_ray_query enabled.
+    # Acceleration structures and VK_KHR_ray_query enabled.
     ray_query_available::Bool
-    # VK_NV_ray_tracing_invocation_reorder (SER, NVIDIA-only) enabled: the
-    # emitter may declare ShaderInvocationReorderNV and raygen may use
-    # `lava_rt_hit_object_*` / `lava_rt_reorder_thread_*`.
-    ser_available::Bool
-    # The two flags above as passed to every compile this context runs: what a
+    # The flag above as passed to every compile this context runs: what a
     # module compiled for this device may declare.
     features::TargetFeatures
     # VK_EXT_conditional_rendering enabled. `repeat!` needs it to let a
@@ -398,7 +378,7 @@ mutable struct LavaDevice <: Device
         end
         ctx.extra_queues = eltype(fieldtype(LavaDevice, :extra_queues))[]
         ctx.free_queue_indices = Int[]
-        ctx.features = TargetFeatures(; ser = ctx.ser_available, ray_query = ctx.ray_query_available)
+        ctx.features = TargetFeatures(; ray_query = ctx.ray_query_available)
         # Registered before anything can allocate against it, so the exit hook
         # marks it lost (`LIVE_CONTEXTS`).
         push!(LIVE_CONTEXTS, WeakRef(ctx))
@@ -816,7 +796,8 @@ function LavaDevice(; select = nothing, debug::DebugConfig = DebugConfig())
     video_qf_idx === nothing ||
         push!(queue_ci, VK.DeviceQueueCreateInfo(video_qf_idx, Float32[1.0]))
 
-    rtexts = ("VK_KHR_acceleration_structure", "VK_KHR_ray_tracing_pipeline",
+    # Hardware tracing is a ray query from an ordinary shader; no ray-tracing pipeline.
+    rtexts = ("VK_KHR_acceleration_structure", "VK_KHR_ray_query",
               "VK_KHR_deferred_host_operations")
     has_rt = all(has, rtexts)
     # Pipeline executable properties (registers, scratch, ISA) for profiling: opt-in
@@ -836,7 +817,7 @@ function LavaDevice(; select = nothing, debug::DebugConfig = DebugConfig())
         "VK_KHR_shader_maximal_reconvergence", "VK_KHR_shader_subgroup_uniform_control_flow",
         "VK_KHR_shader_subgroup_rotate", "VK_EXT_mesh_shader",
         "VK_KHR_external_memory_fd", "VK_EXT_external_memory_host"])
-    has_rt && append!(extensions, rtexts, filter(has, ["VK_KHR_ray_query", "VK_NV_ray_tracing_invocation_reorder"]))
+    has_rt && append!(extensions, rtexts)
     exec_props && push!(extensions, "VK_KHR_pipeline_executable_properties")
     any(has, ("VK_KHR_external_memory_fd", "VK_EXT_external_memory_host")) &&
         push!(extensions, "VK_KHR_external_memory")
@@ -880,15 +861,9 @@ function LavaDevice(; select = nothing, debug::DebugConfig = DebugConfig())
          :shader_shared_float_32_atomics, :shader_shared_float_32_atomic_add))
     if has_rt
         feature!(VK.PhysicalDeviceAccelerationStructureFeaturesKHR, (); required = (:acceleration_structure,))
-        feature!(VK.PhysicalDeviceRayTracingPipelineFeaturesKHR, (:ray_tracing_pipeline_trace_rays_indirect,);
-                 required = (:ray_tracing_pipeline,))
+        feature!(VK.PhysicalDeviceRayQueryFeaturesKHR, (); required = (:ray_query,))
     end
     enabled(ext, T, f, want = fieldnames(T)) = has(ext) && getfield(feature!(T, want), f)
-    has_ray_query = has_rt && enabled("VK_KHR_ray_query", VK.PhysicalDeviceRayQueryFeaturesKHR, :ray_query)
-    # SER (NVIDIA): `reorderThreadWithHitObjectNV` regroups divergent closest-hit
-    # shading into coherent warps.
-    has_ser = has_rt && enabled("VK_NV_ray_tracing_invocation_reorder",
-        VK.PhysicalDeviceRayTracingInvocationReorderFeaturesNV, :ray_tracing_invocation_reorder)
     # The feature, not only the extension: lavapipe on macOS lists the extension
     # with `cooperative_matrix` off.
     has_coopmat = enabled("VK_KHR_cooperative_matrix", VK.PhysicalDeviceCooperativeMatrixFeaturesKHR,
@@ -928,20 +903,6 @@ function LavaDevice(; select = nothing, debug::DebugConfig = DebugConfig())
     video_decode_queue = video_qf_idx === nothing ? nothing :
         VK.get_device_queue(device, video_qf_idx, 0)
 
-    rt_props = nothing
-    if has_rt
-        props2 = VK.get_physical_device_properties_2(phys_dev,
-            VK.PhysicalDeviceRayTracingPipelinePropertiesKHR)
-        rtp = props2.next
-        rt_props = RTPipelineProperties(
-            rtp.shader_group_handle_size,
-            rtp.shader_group_base_alignment,
-            rtp.shader_group_handle_alignment,
-            rtp.max_ray_recursion_depth,
-            rtp.max_ray_hit_attribute_size,
-        )
-    end
-
     # Vulkan has no usage flag for AS scratch, so `LavaArray(...; scratch=true)`
     # gets this alignment through `bda_alignment_for`.
     as_scratch_align = UInt64(1)
@@ -954,7 +915,7 @@ function LavaDevice(; select = nothing, debug::DebugConfig = DebugConfig())
 
     has_validation = !isempty(layers)
     if has_rt
-        @info "Lava: initialized Vulkan device with RT" device=dev_name queue_family=qf_idx handle_size=rt_props.shader_group_handle_size max_recursion=rt_props.max_ray_recursion_depth validation=has_validation gpu_assisted=gpu_assisted sync_val=sync_val debug_utils=has_debug_utils
+        @info "Lava: initialized Vulkan device with RT" device=dev_name queue_family=qf_idx validation=has_validation gpu_assisted=gpu_assisted sync_val=sync_val debug_utils=has_debug_utils
     else
         @info "Lava: initialized Vulkan device (no RT)" device=dev_name queue_family=qf_idx validation=has_validation gpu_assisted=gpu_assisted sync_val=sync_val debug_utils=has_debug_utils
     end
@@ -992,10 +953,10 @@ function LavaDevice(; select = nothing, debug::DebugConfig = DebugConfig())
     # queues; `allocate_batch_queue!` hands out from 2.
     ctx = LavaDevice(queue; instance, physical_device = phys_dev, device,
         queue_family_index = qf_idx, device_name = dev_name, compute_queue,
-        rt_pipeline_properties = rt_props, debug_messenger, validation,
+        debug_messenger, validation,
         next_queue_index = 2, max_queue_count = n_queues, device_lost = false,
         memory_properties = mem_props, max_wg_dims = max_wg, as_scratch_align,
-        ray_query_available = has_ray_query, ser_available = has_ser,
+        ray_query_available = has_rt,
         conditional_rendering_available = has_cond_render, coopmat_available = has_coopmat,
         coopmat_shapes, coopmat2 = coopmat2_caps, coopvec_available = has_coopvec,
         maximal_reconvergence_available = has_max_reconv,

@@ -19,7 +19,7 @@ function settle()
 end
 
 @testset "Metal: a dropped HWTLAS gives its memory back" begin
-    be = Metal.MetalBackend()
+    be = Mantle.Device(Mantle.MetalAPI())
     dev = Metal.device()
     dropped_hwtlas(be)
     settle()

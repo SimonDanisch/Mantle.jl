@@ -17,8 +17,8 @@ function free_names(path::AbstractString)
     # A signature BINDS its parameters. Without this the extractor reported
     # three whole syntactic classes as free references to backend names:
     # `Item(id, live, size)`'s positional `id` (the backend has ObjectiveC's),
-    # `RayTracingPipeline(; raygen, closest_hit, …)`'s bare keywords (the
-    # backend has Raycore's `closest_hit` and `any_hit`), and the module path in
+    # a constructor's bare keywords (the backend has Raycore's `closest_hit` and
+    # `any_hit`), and the module path in
     # `using KernelInterface: …`. All four offenders on 2026-09-08 were these.
     # A call in expression position is untouched, which is the case that matters.
     bindparam(a) = a isa Expr && a.head === :parameters ? foreach(bindparam, a.args) :

@@ -86,6 +86,10 @@ const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
     :begin_pass!, :begin_render_pass!, :beginframe!, :bind_textures,
     # These native graphics/RT operations are not implemented by the ROCm backend.
     :build_blas_aabb, :build_blas, :copytexels!,
+    :query_begin, :query_begin_transparent, :query_next!, :candidate_is_box,
+    :candidate_primitive_index, :candidate_object_ray, :candidate_ids, :candidate_triangle,
+    :commit_triangle!, :commit_intersection!, :committed_kind, :committed_ids,
+    :committed_barycentrics, :query_end!,
     :build_accel!, :colorimage, :compile_draw, :currentimage,
     :depthimage, :destroyrecording!, :deviceof, :draw_in_pass!,
     :draw_indexed_in_pass!, :draw_indirect_in_pass!, :emitkernel!, :end_pass!,
@@ -96,7 +100,7 @@ const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
     :screenshot, :set_viewport!, :setviewport!,
     :stages, :storebytes!, :submit!,
     :use_bindings!,
-    :vertextouches, :fragmenttouches, :shadertouches,
+    :vertextouches, :fragmenttouches,
     # Joined 2026-10-10 with the portable lifecycle (`runtime/lifecycle.jl`):
     # answered by Vulkan and Metal, not by the ROCm extension, which no worker
     # here can load to test an answer against.
@@ -238,7 +242,8 @@ end
         @info "0.6 Metal not loaded; nothing to check"
     else
         d = Mantle.Device(Mantle.MetalAPI())
-        Mantle.caps(Mantle.backend(d))          # the second entry point
+        # The second entry point: Metal.jl's backend, which an array reports.
+        Mantle.caps(Mantle.KA.get_backend(Mantle.devicearray(d, Float32, 4)))
         # A second cache not existing at all is the passing state.
         second = isdefined(Mantle, :_DEVICE) ? getglobal(Mantle, :_DEVICE)[] : nothing
         second === nothing && (second = d)

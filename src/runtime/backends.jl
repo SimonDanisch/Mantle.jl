@@ -26,7 +26,7 @@ function devices end
 
 Install dev as its API's Device(api) default. The previous device and its resources
 remain usable. This does not change backend priority: defaultbackend() still
-queries registered probes in order. Use backend(dev) to select that exact backend."""
+queries registered probes in order. Pass dev itself to use that exact device."""
 function defaultdevice! end
 
 """selectdevice(select, infos) -> Int
@@ -66,8 +66,8 @@ end
 
 """defaultbackend() -> backend
 
-Return the first usable registered backend by priority. Throw if none is available;
-there is no implicit CPU fallback. Use backend(dev) for an explicitly chosen device."""
+Return the first usable registered backend by priority, a `Device`. Throw if none is
+available; there is no implicit CPU fallback."""
 function defaultbackend()
     for e in BACKEND_PROBES
         b = e.probe()

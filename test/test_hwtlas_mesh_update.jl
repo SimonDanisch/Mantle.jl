@@ -184,17 +184,14 @@ end
 # per instance and a batch field is one value.
 #
 # Traced: the probe returns the custom index, which is the field a shader reads,
-# and a mask a refit zeroed would make its instance unhittable. The SBT offset
-# only selects a hit group in a ray-tracing pipeline's shader binding table,
-# which a ray query never consults, so a trace cannot see it.
+# and a mask a refit zeroed would make its instance unhittable.
 @testset "HW HWTLAS — a refit preserves per-instance ids and masks" begin
     hwtlas = Mantle.HWTLAS{Tri}(TESTBACKEND)
     ids = UInt32[7, 11, 23]
     xs = Float32[0, 3, 6]
     handle = push!(hwtlas, sphere_mesh(16),
                    [tlastranslation(x, 0, 0) for x in xs];
-                   instance_ids = ids, instance_mask = UInt8(0x0f),
-                   sbt_offset = UInt32(2))
+                   instance_ids = ids, instance_mask = UInt8(0x0f))
     # …and beside it an instance no ray hits: mask 0 matches no ray's cull mask.
     push!(hwtlas, sphere_mesh(16), tlastranslation(9f0, 0f0, 0f0);
           instance_id = UInt32(99), instance_mask = UInt8(0x00))

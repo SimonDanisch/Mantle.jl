@@ -41,7 +41,7 @@ if WINDOWED
     # framebuffer size is the other answer, and it is four times the pixels.
     sx, sy = GLFW.GetWindowContentScale(gw)
     GLFW.SetWindowSize(gw, round(Int, W / sx), round(Int, H / sy))
-    win = Mantle.attach!(Mantle.MetalWindow(BGRA{N0f8}, W, H; vsync = false), gw)
+    win = Mantle.attach!(Mantle.MetalWindow(dev, BGRA{N0f8}, W, H; vsync = false), gw)
     # `attach!` adopts whatever the layer could actually be given, so this is a
     # real check and not a restatement of the line above.
     size(win) == (W, H) || error("the drawable is $(size(win)), the graph renders $((W, H))")

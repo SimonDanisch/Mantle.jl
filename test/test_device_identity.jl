@@ -58,28 +58,22 @@ end
         @test Mantle.Device(api) === default
         @test Mantle.Device(TESTBACKEND) === dev
 
-        # ── identity: the second device's backend resolves to the second device
-        bo = Mantle.backend(other)
-        @test Mantle.Device(bo) === other
-        @test Mantle.Device(bo) !== dev
-        @test Mantle.Device(Mantle.backend(dev)) === dev    # the first, still pinned
-
         # ── allocation lands on the named device, never the default
         devof(x) = Mantle.Device(KA.get_backend(x))
-        @test devof(KA.allocate(bo, Float32, 8)) === other
-        @test devof(Adapt.adapt(bo, rand(Float32, 4))) === other
-        @test devof(similar(KA.allocate(bo, Float32, 8))) === other
+        @test devof(KA.allocate(other, Float32, 8)) === other
+        @test devof(Adapt.adapt(other, rand(Float32, 4))) === other
+        @test devof(similar(KA.allocate(other, Float32, 8))) === other
 
         # ── a backend's identity is its device
-        @test Mantle.backend(dev) == TESTBACKEND
-        @test bo != TESTBACKEND
+        @test dev == TESTBACKEND
+        @test other != TESTBACKEND
 
         # ── a framebuffer built from the second device's backend is the second
         #    device's: a draw on that device renders into it and reads back. Had
         #    it fallen through to the default, the draw would name an image of
         #    another device.
         if Mantle.supports_graphics(other)
-            fb = Mantle.Framebuffer(bo, 16, 16; depth = false, color_format = RGBA{Float32})
+            fb = Mantle.Framebuffer(other, 16, 16; depth = false, color_format = RGBA{Float32})
             pipe = Mantle.GraphicsPipeline(; vertex = Mantle.VertexShader(Mantle.blit_vertex),
                                              fragment = Mantle.FragmentShader(di_fragment),
                                              blend = Mantle.Opaque(), cull = Mantle.NoCull(),
@@ -109,7 +103,7 @@ end
 
         # ── a cross-device copy stages through the host instead of faulting
         let
-            a = KA.allocate(bo, Float32, 16); fill!(a, 3f0)
+            a = KA.allocate(other, Float32, 16); fill!(a, 3f0)
             b = KA.allocate(TESTBACKEND, Float32, 16); fill!(b, 0f0)
             copyto!(b, a)
             KA.synchronize(TESTBACKEND)

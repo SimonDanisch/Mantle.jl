@@ -19,7 +19,7 @@ kernelinterpreter(::LavaDevice, kernel, tt) = Lava.kernelinterpreter(kernel, tt)
 # `group` (a 1-D and a 2-D ndrange give different `CompilerMetadata`), and the
 # kernel is inferred at the plan's workgroup size.
 function kakernelaccesssignature(dev::LavaDevice, kernel, argT::Tuple, ndrange, group)
-    obj  = kernelfor(kernel, group, backend(dev))
+    obj  = kernelfor(kernel, group, dev)
     iter = get_or_build_iter_plan(obj, dispatchrange(ndrange), callgroup(obj, group), dev)
     tt   = (typeof(iter.ka_ctx), argT...)
     interp = Lava.kernelinterpreter(obj.f, Tuple{tt...}; workgroup_size = iter.ws_3d)
@@ -27,30 +27,6 @@ function kakernelaccesssignature(dev::LavaDevice, kernel, argT::Tuple, ndrange, 
 end
 
 isdevicearray(::LavaArray) = true
-
-"""
-The union of what a trace's shaders do to `args`; every shader takes them
-(`rt_stages`).
-"""
-function kerneltouches(dev::LavaDevice, pipe::RayTracingPipeline, args::Tuple, ndrange, group)
-    argT = map(a -> devicetype(dev, a), args)
-    merged = fill(NOTOUCH, length(args))
-    for sh in shaders(pipe)
-        ts = accessof(Lava.kernelinterpreter(sh, Tuple{argT...}), sh, argT;
-                      cache = accesscache(dev))
-        for i in eachindex(merged)
-            merged[i] = merged[i] | ts[i + 1]
-        end
-    end
-    return merged
-end
-
-"""What each shader does to what it closed over, in `shaders` order."""
-function shadertouches(dev::LavaDevice, pipe::RayTracingPipeline, args::Tuple)
-    argT = map(a -> devicetype(dev, a), args)
-    return [accessof(Lava.kernelinterpreter(sh, Tuple{argT...}), sh, argT; cache = accesscache(dev))[1]
-            for sh in shaders(pipe)]
-end
 
 # Draw stages are compiled as wrappers (`resolve_shader_pair`) that add the
 # varyings and outputs, so accesses are inferred on the wrapper; the user

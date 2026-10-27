@@ -86,22 +86,6 @@ struct DrawCall
 end
 
 """
-One hardware ray-tracing launch, declared like a dispatch: a pipeline, its
-arguments and a ray count. The arguments live at a fixed offset in the plan's
-`ArgMemory`, written once at `record!`, so a tracing plan can be recorded; packing
-them at run time from per-run scratch would leave a recorded plan pointing at
-memory the queue has reused.
-"""
-struct Trace
-    pipeline::Any
-    accel::Any
-    args::Tuple
-    # A count, in the same two shapes `Dispatch` takes it: a plain number, or a
-    # `DeviceRange` over a count only the GPU knows.
-    ndrange::Any
-end
-
-"""
     Loop
 
 One [`repeat!`](@ref) loop. Its body passes are compiled once and run `count`
@@ -338,22 +322,6 @@ struct CompiledDispatch{L,K,A<:Tuple,I,N,R,O,G}
     # The plan indirect command holding this dispatch's workgroup counts, 0 for a
     # host ndrange. Fixed at compile, like `argoff`.
     indirect::Int
-end
-
-"""
-A [`Trace`](@ref) resolved by the backend, shaped like [`CompiledDispatch`](@ref).
-Core reads only `argsize`, to reserve the argument slot. `accel` and `args` are held
-as given and resolved to storage once at `record!`; a value that changes between
-runs is a [`GPURef`](@ref), packed as its address.
-"""
-struct CompiledTrace{P,C,A<:Tuple,R}
-    compiled::P
-    accel::C
-    args::A
-    ndrange::R
-    argoff::Int
-    argsize::Int
-    indirect::Int            # as `CompiledDispatch.indirect`; 0 for a host ndrange
 end
 
 """

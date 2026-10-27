@@ -53,7 +53,7 @@ function litcount(dev, ib, n; N = 64)
     Mantle.copy!(g, "read", out, img)
     plan = Mantle.record!(Mantle.Plan(g))
     Mantle.run!(plan)
-    KernelAbstractions.synchronize(Mantle.backend(dev))
+    KernelAbstractions.synchronize(dev)
     lit = count(!=(0xff000000), Array(Mantle.storage(out)))
     Mantle.free!(plan)
     return lit

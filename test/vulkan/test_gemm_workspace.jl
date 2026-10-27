@@ -3,7 +3,7 @@ include(joinpath(@__DIR__,"..","split_workspace_helpers.jl"))
 
 function check_workspace_retirement(ctx)
     dev = ctx
-    backend = Mantle.backend(dev)
+    backend = dev
     @testset "unreferenced split workspace returns its pool regions" begin
         regions = with_split_programs(backend) do state
             regions = map(a->a.buf[].region::Mantle.Region,state.workspaces)

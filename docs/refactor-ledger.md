@@ -738,7 +738,7 @@ Every comment and docstring checked against the code and the plan (plan,
 | P8.D23 | delete `WebGPUAPI` | 7 hits, 4 files | open | |
 | P8.D24 | delete `syncbackend` | 9 hits, 6 files | open | |
 | P8.D25 | delete `LavaBackend` | 265 hits, 107 files | done | be46b47: `Device` is the KernelAbstractions backend and `LavaDevice` its Vulkan type; what remains in `test/` is historical prose in four test docstrings and the portability guard's pattern |
-| P8.D26 | delete `kibackend` | 11 hits, 5 files | open | |
+| P8.D26 | delete `kibackend` | 11 hits, 5 files | done | with `backend`: Metal's and ROCm's devices answer KernelInterface themselves, forwarding to Metal.jl and AMDGPU.jl, so every device is its own KI backend and `defaultbackend()` returns a `Device` on every backend |
 | P8.D27 | delete `todevice` | 41 hits, 21 files | open | |
 | P8.D28 | delete `defaultbackend` | 218 hits, 90 files | open | |
 | P8.D29 | delete `availablebackends` | 6 hits, 4 files | open | |

@@ -454,14 +454,14 @@ import Vulkan
     # The Vulkan lowering of what a render pass declares. The behaviour each one
     # leads to (a kept target keeps its pixels, a depth test decides) is asserted
     # on every backend in `test_window.jl`; these are the tables underneath.
-    @testset "a traced usage adds the ray-tracing stage and nothing else" begin
+    # A ray query traces from an ordinary shader, so reading the structure is a
+    # shader-stage access. The ray-tracing stage needs the ray-tracing pipeline
+    # feature, which no device is asked for: naming it is a validation error.
+    @testset "reading an acceleration structure waits on the shader stages" begin
         RT = S2(Vulkan.PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR)
-        T = Traced{Storage{BufferKind,ReadWrite}}
-        S = Storage{BufferKind,ReadWrite}
         for d in (Src(), Dst())
-            @test (Mantle.stages(be, T, d) & RT) == RT
-            @test (Mantle.stages(be, S, d) & RT) == S2(0)
-            @test Mantle.access(be, T, d) == Mantle.access(be, S, d)
+            @test Mantle.stages(be, TraceRead, d) == Mantle.stages(be, Storage{BufferKind,ReadOnly}, d)
+            @test (Mantle.stages(be, TraceRead, d) & RT) == S2(0)
         end
     end
 
@@ -581,7 +581,6 @@ end
 # vertices, indices and per-primitive values a frame can only imply.
 include(joinpath(@__DIR__, "test_lowering.jl"))
 # Whether a ray query through an accel is a call already; no device needed.
-include(joinpath(@__DIR__, "test_tracescall.jl"))
 
 # The isubd example's pass A (adaptive refinement) against a CPU reference written
 # independently of it (`examples/isubd/reference.jl`, vendored from
@@ -819,7 +818,6 @@ foreachbackend(joinpath(@__DIR__, "test_native_integer_widths.jl"))
 foreachbackend(joinpath(@__DIR__, "test_constant_pointer_icmp.jl"))
 
 foreachbackend(joinpath(@__DIR__, "test_trace_closest_hit.jl"))
-foreachbackend(joinpath(@__DIR__, "test_rt_pipeline.jl"))
 foreachbackend(joinpath(@__DIR__, "test_math_intrinsics.jl"))
 foreachbackend(joinpath(@__DIR__, "test_workgroup_struct_accesschain.jl"))
 foreachbackend(joinpath(@__DIR__, "test_kernel_print.jl"))
@@ -844,6 +842,8 @@ foreachbackend(joinpath(@__DIR__, "test_hwtlas_refit_stress.jl"))
 # The software structure, `Raycore.TLAS`, returns the hit the hardware one does:
 # the same scene traced through both, before and after a kernel-written refit.
 foreachbackend(joinpath(@__DIR__, "test_tlas_same_hit.jl"))
+# ...and the same recorded hits through see-through instances (`transparent_hits`).
+foreachbackend(joinpath(@__DIR__, "test_transparent_hits.jl"))
 foreachbackend(joinpath(@__DIR__, "test_instance_writer_kernel.jl"))
 foreachbackend(joinpath(@__DIR__, "test_instance_masks.jl"))
 foreachbackend(joinpath(@__DIR__, "test_blas_refit.jl"))
@@ -894,7 +894,6 @@ foreachbackend(joinpath(@__DIR__, "test_pending_stores.jl"))
 foreachbackend(joinpath(@__DIR__, "test_repeat.jl"))
 foreachbackend(joinpath(@__DIR__, "test_gated_loop_batches.jl"))
 foreachbackend(joinpath(@__DIR__, "test_repeat_inner_3d.jl"))
-foreachbackend(joinpath(@__DIR__, "test_traced_usages.jl"))
 foreachbackend(joinpath(@__DIR__, "test_waitidle_submits.jl"))
 foreachbackend(joinpath(@__DIR__, "test_graphics_pipeline.jl"))
 foreachbackend(joinpath(@__DIR__, "test_video_decode.jl"))

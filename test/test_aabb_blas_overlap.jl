@@ -55,16 +55,14 @@ Mantle.procedural_miss(::BoxElems) = BoxHit(Inf32, UInt32(0))
 # Object space is world space here (one instance, identity transform). Commit only
 # for a `t` that improves on `best`, as the protocol requires: the first box that
 # contains the point commits 0, and nothing improves on that.
-function Mantle.procedural_candidate(e::BoxElems, best::BoxHit)
-    cell = Mantle.candidate_primitive_index()
-    o, _ = Mantle.candidate_object_ray()
+function Mantle.procedural_candidate(e::BoxElems, best::BoxHit, q)
+    cell = Mantle.candidate_primitive_index(q)
+    o, _ = Mantle.candidate_object_ray(q)
     @inbounds inside = e.lo_x[cell] <= o[1] <= e.hi_x[cell] &&
                        e.lo_y[cell] <= o[2] <= e.hi_y[cell] &&
                        e.lo_z[cell] <= o[3] <= e.hi_z[cell]
     if inside && 0f0 < best.t
-        Mantle.commit_intersection!(0f0)
-        # `cell % UInt32`, not `UInt32(cell)`: the checked conversion's error path
-        # needs kernel state, which a Metal visible function does not have.
+        Mantle.commit_intersection!(q, 0f0)
         return BoxHit(0f0, cell % UInt32)
     end
     return best

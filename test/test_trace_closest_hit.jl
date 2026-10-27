@@ -120,7 +120,7 @@ end
 
     accel = Adapt.adapt(TESTBACKEND, hw)
     # The adapted form is core's type and still knows its structure, which is
-    # what `supports_rt_pipeline(::AdaptedAccel)` and Hikari's trace pass read.
+    # what `supports_procedural_traversal(::AdaptedAccel)` reads.
     @test accel isa Mantle.AdaptedAccel
     @test accel.hwtlas === hw
 

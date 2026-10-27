@@ -80,8 +80,7 @@ function KA.copyto!(::LavaDevice, A, B)
 end
 
 # `Adapt.adapt(device, x)` uploads to the device; `Adapt.adapt(LavaArray, x)`
-# uses the process default device. Concrete because core routes
-# `adapt_storage(::Device, x)` to the device's backend, which a device is.
+# uses the process default device.
 Adapt.adapt_storage(d::LavaDevice, a::Array) = LavaArray(a; bq = d.default_bq)
 Adapt.adapt_storage(::LavaDevice, x) = x
 

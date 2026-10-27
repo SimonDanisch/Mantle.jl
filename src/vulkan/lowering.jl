@@ -38,7 +38,8 @@ stages(::VulkanAPI, ::Type{Sampled}, _) = stage(SHADER_STAGES)
 stages(::VulkanAPI, ::Type{<:Storage}, _) = stage(SHADER_STAGES)
 stages(::VulkanAPI, ::Type{CopySrc}, _) = stage(VK.PIPELINE_STAGE_2_COPY_BIT)
 stages(::VulkanAPI, ::Type{CopyDst}, _) = stage(VK.PIPELINE_STAGE_2_COPY_BIT)
-stages(::VulkanAPI, ::Type{TraceRead}, _) = stage(VK.PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR)
+# A ray query reads the structure from whichever shader stage traces.
+stages(::VulkanAPI, ::Type{TraceRead}, _) = stage(SHADER_STAGES)
 stages(::VulkanAPI, ::Type{TraceBuild}, _) = stage(VK.PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR)
 stages(::VulkanAPI, ::Type{<:ColorAttachment}, _) = stage(VK.PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)
 
@@ -88,13 +89,6 @@ end
 stages(be::VulkanAPI, ::Type{Unordered{U}}, d) where {U} = stages(be, U, d)
 access(be::VulkanAPI, ::Type{Unordered{U}}, d) where {U} = access(be, U, d)
 layout(be::VulkanAPI, ::Type{Unordered{U}}, d) where {U} = layout(be, U, d)
-
-# `Traced` changes only the stage, to RAY_TRACING_SHADER; access and layout are
-# the inner usage's.
-stages(::VulkanAPI, ::Type{Traced{U}}, _) where {U} =
-    stage(VK.PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR)
-access(be::VulkanAPI, ::Type{Traced{U}}, d) where {U} = access(be, U, d)
-layout(be::VulkanAPI, ::Type{Traced{U}}, d) where {U} = layout(be, U, d)
 
 # A discarding load op reads nothing back, so the read bit is dropped.
 access(::VulkanAPI, ::Type{ColorAttachment{Discard}}, _) where {Discard} =

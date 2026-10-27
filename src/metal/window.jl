@@ -20,15 +20,14 @@ mutable struct MetalWindow{T} <: Mantle.Window
 end
 
 """
-    MetalWindow(T, width, height; vsync = true, srgb = false, handle = nothing)
+    MetalWindow(dev, T, width, height; vsync = true, srgb = false, handle = nothing)
 
-A presentation surface of element type `T` (lowered by `mtlformat`, e.g.
+A presentation surface on `dev` of element type `T` (lowered by `mtlformat`, e.g.
 `BGRA{N0f8}`), sized in pixels.
 """
-function MetalWindow(::Type{T}, width::Integer, height::Integer;
+function MetalWindow(d::MetalDevice, ::Type{T}, width::Integer, height::Integer;
                      vsync::Bool = true, srgb::Bool = false, handle = nothing) where {T}
-    dev = Metal.device()
-    layer = MTL.CAMetalLayer(dev, width, height; format = mtlformat(T; srgb), vsync)
+    layer = MTL.CAMetalLayer(d.dev, width, height; format = mtlformat(T; srgb), vsync)
     return MetalWindow{T}(handle, layer, Int(width), Int(height), nothing, true, nothing)
 end
 
@@ -69,7 +68,7 @@ in points, so the request is divided by the content scale. Throws if the layer's
 drawable size differs from the request. `color_format` is the portable keyword
 the Vulkan backend also takes.
 """
-function Mantle.Window(::Metal.MetalBackend, width::Integer, height::Integer;
+function Mantle.Window(d::MetalDevice, width::Integer, height::Integer;
                        title::AbstractString = "", vsync::Bool = false,
                        color_format::Type = BGRA{N0f8}, srgb::Bool = false)
     GLFW.WindowHint(GLFW.CLIENT_API, GLFW.NO_API)
@@ -79,7 +78,7 @@ function Mantle.Window(::Metal.MetalBackend, width::Integer, height::Integer;
     GLFW.DefaultWindowHints()
     sx, sy = GLFW.GetWindowContentScale(gw)
     GLFW.SetWindowSize(gw, round(Int, width / sx), round(Int, height / sy))
-    w = attach!(MetalWindow(color_format, width, height; vsync, srgb), gw)
+    w = attach!(MetalWindow(d, color_format, width, height; vsync, srgb), gw)
     # `attach!` adopts the layer's actual size; passes that stride a buffer by
     # hand rely on the requested extent.
     size(w) == (Int(width), Int(height)) || error(

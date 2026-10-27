@@ -266,7 +266,7 @@ Declare the (M,K)-layout product with bias and epilogue fused into its store.
 function gemv_dispatch!(g, C, x, W, M::Int, K::Int;
                         name::AbstractString = "gemv", kw...)
     dispatchlaunches!(g, gemv_ncontig_launches(C, x, W, M, K,
-                          caps(backend(g.dev)).workgrouplimit; kw...); name)
+                          caps(g.dev).workgrouplimit; kw...); name)
     return C
 end
 

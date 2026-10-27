@@ -259,15 +259,6 @@ end
 # coopmat workgroup sized in `subgroup` units has twice the threads the kernel indexes.
 
 """
-    CompiledRTPipeline
-
-Supertype of the backend's compiled ray-tracing pipeline, so `DeviceCaches` can
-name it: `LavaRTPipeline` holds a `LavaDevice`, which holds `DeviceCaches`. Not in
-core, which never names a compiled RT pipeline.
-"""
-abstract type CompiledRTPipeline end
-
-"""
     DeviceCaches
 
 Everything a `LavaDevice` caches. Fields rather than module-level globals: a
@@ -299,15 +290,6 @@ mutable struct DeviceCaches
     # Keyed on the shaders a pipeline is made of (`pipeline_cache_key`); the
     # shaders live with their compiled code (`GfxShaders`).
     gfx_pipelines::CompilationCache{Tuple,VulkanCompiledGraphicsPipeline}
-    # Keyed like `gfx_pipelines`. Here and not on the user's
-    # `RayTracingPipeline`, so a reset drops the handles and identical
-    # pipelines compile once.
-    rt_pipelines::CompilationCache{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}
-    # The `rt_pipelines` entry a pipeline description with these argument types
-    # draws with, and the world it was checked in. A newer world looks the
-    # stages up again (`rt_compiled_for`); old entries stay, as a recording may
-    # hold their pipeline.
-    rt_current::Dict{UInt64,Tuple{UInt,UInt64}}
     timestamp_pool::Union{Nothing,VK.QueryPool}
     timestamp_next_slot::Int
     timestamp_period_ns::Float64
@@ -328,7 +310,5 @@ DeviceCaches() = DeviceCaches(
     IdDict{LavaGPUKernel,LavaLinkedKernel}(), IdDict{DataType,Vector{Any}}(),
     MemoryPolicy(), 0, nothing, (0, 0, 0), nothing, false,
     CompilationCache{Tuple,VulkanCompiledGraphicsPipeline}(),
-    CompilationCache{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}(),
-    Dict{UInt64,Tuple{UInt,UInt64}}(),
     nothing, 0, 1.0, Any[],
     IdDict{DataType,Vector{Any}}(), nothing, AccessCache())

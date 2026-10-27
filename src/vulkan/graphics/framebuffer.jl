@@ -103,8 +103,8 @@ function device_memory(ctx::LavaDevice, bytes::Integer, type_bits::Integer)
     idx = find_memory_type(ctx, UInt32(type_bits), VK.MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
     # Always `MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`: this also backs graph arenas,
     # whose buffers kernels address by device address, and the spec requires the
-    # flag for that. Without it RADV segfaults much later, in
-    # `vkCreateRayTracingPipelinesKHR` (NVIDIA tolerates it).
+    # flag for that. Without it RADV segfaulted much later, in pipeline creation
+    # (NVIDIA tolerates it).
     flags = VK.MemoryAllocateFlagsInfo(UInt32(0);
         flags = VK.MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)
     # Over the driver's budget is out of memory (`overbudget`). Thrown as the

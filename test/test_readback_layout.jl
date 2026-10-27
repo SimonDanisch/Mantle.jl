@@ -25,7 +25,7 @@ include(joinpath(@__DIR__, "freshprocess.jl"))
         Mantle.validating(dev) || exit(3)
         pip = GraphicsPipeline(; vertex = VertexShader(vert), fragment = FragmentShader(frag),
                                blend = Additive(), cull = NoCull(), depth = DepthOff())
-        fb = Mantle.Framebuffer(Mantle.backend(dev), 8, 8; depth = false, color_format = RGBA{Float32})
+        fb = Mantle.Framebuffer(dev, 8, 8; depth = false, color_format = RGBA{Float32})
         target = OffscreenTarget(fb)
         Mantle.validationmessages!(dev)
         @testset "draw, read back, draw on top, read back" begin

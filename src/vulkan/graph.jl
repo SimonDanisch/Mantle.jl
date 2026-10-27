@@ -41,9 +41,8 @@ function capacity(dev::LavaDevice)
 end
 
 # A device is its own KernelAbstractions backend and launches on its default
-# channel; a channel from `allocate_batch_queue!` is one too (core's `backend`
-# returns either unchanged). Core's `crosswaits!` orders buffers shared between
-# channels with timeline-semaphore waits.
+# channel; a channel from `allocate_batch_queue!` is one too. Core's `crosswaits!`
+# orders buffers shared between channels with timeline-semaphore waits.
 
 h264decoder(dev::LavaDevice, paramnals::AbstractVector{UInt8}; kw...) =
     VideoDecode.H264Decoder(dev, paramnals; kw...)
@@ -598,7 +597,7 @@ function compile_dispatch(c::Compile{LavaDevice}, d::Dispatch, argoff::Int, indi
     iscall(d) && return bake(c, d)
     # A plain KernelInterface function rather than a `@kernel` constructor, by
     # core's `buildskernel`.
-    buildskernel(d.kernel, backend(dev)) ||
+    buildskernel(d.kernel, dev) ||
         return kicompile_dispatch(c, dev, d, argoff, indirect)
     obj = kernelfor(d, dev)
     raw = rawargs(d.args)
@@ -625,7 +624,6 @@ the extents come from [`ki_launch_extents`](@ref), as for the immediate launch.
 """
 function kicompile_dispatch(c::Compile{LavaDevice}, dev::LavaDevice, d::Dispatch,
                             argoff::Int, indirect::Int)
-    be = backend(dev)
     raw = rawargs(d.args)
     args = devargs(adaptor(dev.default_bq), raw)
     nd = dispatchrange(d.ndrange)
@@ -637,48 +635,6 @@ function kicompile_dispatch(c::Compile{LavaDevice}, dev::LavaDevice, d::Dispatch
     launch = launch_plan(dev.default_bq, d.kernel, all_args, iter.ws_3d, tlas !== nothing)
     CompiledDispatch(launch, iter, nd, kern, nothing, d.kernel, d.args, d.ndrange,
                      tlas !== nothing, argoff, launch.total_size, indirect)
-end
-
-"""
-The ray-tracing counterpart of a `LaunchPlan`: the `VkPipeline` with its shader
-binding table, the pipeline description, and the raygen argument layout. Resolved
-at compile because the argument size fixes the trace's offset in the plan's
-argument memory, which a recording holds.
-"""
-struct VulkanTracePipeline{P,D,O,B}
-    pipeline::P              # LavaRTPipeline: VkPipeline + SBT + layout
-    # The whole description, not just the raygen: all four shader functions are
-    # held per record, since a closest-hit closes over its material's arrays.
-    desc::D
-    offsets::O
-    byval::B
-    argbytes::Int            # raygen push_info.arg_buffer_size, before inline extra
-end
-
-"""The `LavaTLAS` a trace descriptor set names, from what the caller declared."""
-tlasof(a::AdaptedAccel) = tlasof(a.hwtlas)
-tlasof(t::VulkanTLAS) = t.hw_tlas
-tlasof(t::LavaTLAS) = t
-tlasof(::Nothing) = throw(ArgumentError(
-    "trace!: the acceleration structure has no hardware TLAS. It was stripped " *
-    "before the pass ran, or built for a ray-query traversal, " *
-    "which `dispatch!` records rather than `trace!`."))
-
-"""
-    compile_dispatch(c, t::Trace, argoff, indirect) -> CompiledTrace
-
-Compile a trace's pipeline and argument layout once. `rt_compiled_for` must run
-here, not at record time: a cold compile flushes the queue to upload the shader
-binding table, which is not allowed while recording.
-"""
-function compile_dispatch(c::Compile{LavaDevice}, t::Trace, argoff::Int, indirect::Int)
-    dev = c.graph.dev
-    raw = rawargs(t.args)
-    vk_pipeline, raygen, offsets, byval = rt_compiled_for(dev.default_bq, t.pipeline, raw)
-    argbytes = raygen.push_info.arg_buffer_size
-    total = argbytes + compute_inline_extra_from_byval(byval)
-    compiled = VulkanTracePipeline(vk_pipeline, t.pipeline, offsets, byval, argbytes)
-    CompiledTrace(compiled, t.accel, t.args, t.ndrange, argoff, total, indirect)
 end
 
 """
@@ -695,46 +651,6 @@ function packdraw!(e::Emitter, d::CompiledDraw)
     return pack_gfx_args!(e.owner, rawargs(drawargs(d.args)),
                           am.ptr + off, am.address + off, d.shader.push_info)
 end
-
-"""
-    packtrace!(e, t::CompiledTrace)
-
-Pack a trace's arguments into the plan's argument memory, which lives as long as
-the plan, rather than into submission scratch, which is reused once that
-submission completes.
-"""
-function packtrace!(e::Emitter, t::CompiledTrace)
-    am, c, off = e.args, t.compiled, t.argoff
-    # Resolve Ref-backed values now; the recording owns these bytes through every replay.
-    return packtrace!(e.owner, c.desc, rawargs(t.args), am.ptr + off, am.address + off,
-                      c.offsets, c.argbytes, c.byval)
-end
-
-"""
-    tracelaunch!(e, n, t::CompiledTrace, tlas, name)
-
-Emit the trace: a host count traces `(n, 1, 1)` directly; a [`DeviceRange`](@ref)
-reads its `(n_rays, 1, 1)` command from the slot the pass's fused prepare
-(`emitprepares!`) wrote.
-"""
-function tracelaunch!(e::Emitter, r::DeviceRange, t::CompiledTrace, tlas,
-                      name::AbstractString)
-    # Written by the pass's fused prepare, with the trace's gate folded in.
-    indirect = indirectof(e.args, t.indirect)
-    argaddr = packtrace!(e, t)
-    emit_trace!(e, t.compiled.pipeline, tlas, argaddr, indirect, name)
-    return nothing
-end
-
-function tracelaunch!(e::Emitter, n, t::CompiledTrace, tlas, name::AbstractString)
-    argaddr = packtrace!(e, t)
-    emit_trace!(e, t.compiled.pipeline, tlas, argaddr, (Int(n),1,1), name)
-    return nothing
-end
-
-"""Emit a trace: resolve the acceleration structure, then launch."""
-emitdispatch!(e::Emitter, t::CompiledTrace, name::AbstractString) =
-    tracelaunch!(e, t.ndrange, t, tlasof(storage(t.accel)), name)
 
 """
     collect!(prof::Profiler, dev) -> prof

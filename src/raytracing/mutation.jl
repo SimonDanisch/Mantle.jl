@@ -28,44 +28,45 @@ end
 
 geometryref(t::BatchedTLAS, i::Int) = t.blas_list[i]
 
-function addbatch!(t::BatchedTLAS, i::Int, records, n::Int, triangles, sbt::UInt32)
+function addbatch!(t::BatchedTLAS, i::Int, records, n::Int, triangles, opaque::Bool)
     B = eltype(t.instances)
     handle = register!(t.instances, h ->
-        B(geometryref(t, i), records, n, h, triangles, sbt, false))
+        B(geometryref(t, i), records, n, h, triangles, false, opaque))
     t.dirty = true
     return handle
 end
 
 """
-    push!(t::BatchedTLAS, geometry, records; n=length(records), triangles, sbt_offset) -> handle
+    push!(t::BatchedTLAS, geometry, records; n=length(records), triangles, opaque=true) -> handle
 
 Register one batch of instance records; only `records[1:n]` are instances. A mesh
 builds its BLAS, a pre-built BLAS is registered once by identity. An invalid `n`
 is refused before any geometry is built. Native device arrays are kept, others uploaded.
+`opaque = false` makes `Raycore.transparent_hits` record the batch's hits rather
+than stop at them (`Raycore.set_opaque!`).
 """
 function Base.push!(t::BatchedTLAS{Tri}, geometry,
                     records::AbstractVector{Raycore.InstanceRecord};
                     n::Integer = length(records), triangles::Vector{Tri} = Tri[],
-                    sbt_offset::UInt32 = UInt32(0)) where {Tri}
+                    opaque::Bool = true) where {Tri}
     count = Int(n)
     0 <= count <= length(records) || throw(ArgumentError(
         "push!: n=$count must be between 0 and $(length(records)) records"))
     i, metadata = batchgeometry!(t, geometry, triangles)
-    return addbatch!(t, i, instancearray(t, records), count, metadata, sbt_offset)
+    return addbatch!(t, i, instancearray(t, records), count, metadata, opaque)
 end
 
 function Base.push!(t::BatchedTLAS, geometry, transform::Mat4f = Mat4f(I);
                     instance_id::UInt32 = UInt32(0), instance_mask::UInt8 = UInt8(0xff),
-                    sbt_offset::UInt32 = UInt32(0))
-    return push!(t, geometry, instancerecords([transform], [instance_id], instance_mask);
-                 sbt_offset)
+                    opaque::Bool = true)
+    return push!(t, geometry, instancerecords([transform], [instance_id], instance_mask); opaque)
 end
 
 function Base.push!(t::BatchedTLAS, geometry, transforms::AbstractVector{Mat4f};
                     instance_ids::Union{Nothing,AbstractVector{<:Integer}} = nothing,
-                    instance_mask::UInt8 = UInt8(0xff), sbt_offset::UInt32 = UInt32(0))
+                    instance_mask::UInt8 = UInt8(0xff), opaque::Bool = true)
     records = instancerecords(transforms, instance_ids, instance_mask)
-    return push!(t, geometry, records; sbt_offset)
+    return push!(t, geometry, records; opaque)
 end
 
 function requirebatch(t::BatchedTLAS, handle::Raycore.TLASHandle, operation)
@@ -124,8 +125,13 @@ function Base.delete!(t::BatchedTLAS, handle::Raycore.TLASHandle)
     return true
 end
 
-function Raycore.set_visible!(t::BatchedTLAS, handle::Raycore.TLASHandle, visible::Bool)
-    changed = sethidden!(t.instances, handle, !visible)
+Raycore.set_visible!(t::BatchedTLAS, handle::Raycore.TLASHandle, visible::Bool) =
+    setbatch!(t, handle, :hidden, !visible)
+Raycore.set_opaque!(t::BatchedTLAS, handle::Raycore.TLASHandle, opaque::Bool) =
+    setbatch!(t, handle, :opaque, opaque)
+
+function setbatch!(t::BatchedTLAS, handle::Raycore.TLASHandle, field::Symbol, value::Bool)
+    changed = setbatch!(t.instances, handle, field, value)
     changed === nothing && return false
     changed && (t.dirty = true)
     return true

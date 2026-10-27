@@ -9,7 +9,7 @@ end
 novelconstant() = Int(time_ns() % 1_000_000) + 2
 
 function novelscale(ctx)
-    backend = Mantle.backend(ctx)
+    backend = ctx
     o = Mantle.LavaArray{Float32}(undef, (64,); bq = ctx.default_bq)
     fill!(o, 1f0)
     K = novelconstant()

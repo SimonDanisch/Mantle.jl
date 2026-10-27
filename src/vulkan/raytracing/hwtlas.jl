@@ -139,7 +139,7 @@ end
 """Drop the host owner and adapt traversal arrays; keep the out-of-band scene value.
 Descriptor discovery uses the original unadapted hwtlas reference."""
 Adapt.adapt_structure(to::LavaAdaptor, accel::AdaptedAccel) =
-    adaptaccel(to, accel, identity)
+    adaptaccel(to, accel)
 
 """
     Raycore.wait_for_gpu!(hwtlas::VulkanTLAS) -> hwtlas
@@ -185,10 +185,12 @@ function reuse_or_alloc(prev, data::AbstractArray{T}, bq) where T
 end
 
 # The driver record: transform, id (low 24 bits), mask ANDed with `keep`, and the
-# batch's geometry as `(BLAS address, SBT offset)`.
-@inline instancerecord(::Type{VulkanInstanceRecord}, r, (blas_address, sbt), keep::UInt32) =
+# batch's geometry as its BLAS address. No shader binding table, so the offset is 0;
+# the flags force the instance opaque or not (FORCE_OPAQUE 0x4, FORCE_NO_OPAQUE 0x8),
+# whatever its geometry was built as.
+@inline instancerecord(::Type{VulkanInstanceRecord}, r, blas_address::UInt64, keep::UInt32, opaque::Bool) =
     VulkanInstanceRecord(r.transform, (r.id & 0x00ffffff) | ((r.mask & keep) << 24),
-                         sbt & 0x00ffffff, blas_address)
+                         (opaque ? UInt32(0x4) : UInt32(0x8)) << 24, blas_address)
 
 """
     writeinstances!(hwtlas, native, shading)
@@ -215,8 +217,8 @@ function writeinstances!(hwtlas::VulkanTLAS, native::LavaArray{VulkanInstanceRec
         for b in hwtlas.instances
             b.n == 0 && continue
             emitkernel!(e, instances_kernel!, native, shading, b.records,
-                        Int32(offset), Int32(b.n), (b.blas.address, b.sbt_offset),
-                        b.hidden ? UInt32(0) : UInt32(0xff); ndrange = b.n)
+                        Int32(offset), Int32(b.n), b.blas.address,
+                        b.hidden ? UInt32(0) : UInt32(0xff), b.opaque; ndrange = b.n)
             offset += b.n
         end
     end
@@ -309,11 +311,12 @@ function build!(t::VulkanTLAS, ::Rebuild)
     return t
 end
 
-# Inline ray-query `closest_hit` / `any_hit` on `AdaptedAccel`. They return
-# Raycore's software tuple `(hit, primitive, t, bary, inst_custom_idx)`, so one
-# kernel runs on either traversal. The kernel must be compiled with
-# `enable_ray_query=true` (set when `lava_launch!` gets `tlas=`), which binds the
-# TLAS descriptor at set 0, binding 0.
+# The query verbs (`raytracing/accel.jl`) on Lava's inline ray query. A kernel
+# tracing through an `AdaptedAccel` is compiled with `enable_ray_query=true` (set
+# when `lava_launch!` gets `tlas=`), which binds the TLAS descriptor at set 0,
+# binding 0. The query object lives in the shader, one per invocation, so the
+# handle carries nothing.
+struct VulkanRayQuery end
 
 # SPIR-V ray-query intersection kinds. Named because `1` means AABB for a
 # candidate and triangle for a committed hit.
@@ -321,72 +324,57 @@ const CANDIDATE_AABB     = UInt32(1)
 const COMMITTED_TRIANGLE  = UInt32(1)
 const COMMITTED_GENERATED = UInt32(2)
 
-# The candidate verbs (`raytracing/accel.jl`) on the inline ray query. Overlays in
-# Lava's method table: a Mac compiles this backend and Metal's, and plain methods
-# would be defined twice.
-@lava_device_override @inline candidate_primitive_index() = Int(lava_ray_query_get_primitive_index(false)) + 1
-@lava_device_override @inline candidate_object_ray() = (
+# `mask` is the ray's cull mask; the driver compares its low 8 bits with each
+# instance's mask. `% UInt32` avoids an error branch in every shader. Ray flags:
+# OpaqueKHR (1) takes every triangle as opaque, TerminateOnFirstHitKHR (4) stops at
+# the first commit.
+@inline function query_init(accel::AdaptedAccel{<:Any, <:LavaDeviceArray}, ray::Raycore.AbstractRay,
+                            mask::Integer, flags::UInt32)
+    o = ray.o; d = ray.d
+    lava_ray_query_init(flags, mask % UInt32,
+        Float32(o[1]), Float32(o[2]), Float32(o[3]), Float32(ray.t_min),
+        Float32(d[1]), Float32(d[2]), Float32(d[3]), Float32(ray.t_max))
+    return VulkanRayQuery()
+end
+
+@inline query_begin(accel::AdaptedAccel{<:Any, <:LavaDeviceArray}, ray::Raycore.AbstractRay,
+                    mask::Integer, anyhit::Bool) =
+    query_init(accel, ray, mask, anyhit ? UInt32(1 | 4) : UInt32(1))
+@inline query_begin_transparent(accel::AdaptedAccel{<:Any, <:LavaDeviceArray}, ray::Raycore.AbstractRay,
+                                mask::Integer) =
+    query_init(accel, ray, mask, UInt32(4))
+
+@inline query_next!(::VulkanRayQuery) = lava_ray_query_proceed()
+@inline candidate_is_box(::VulkanRayQuery) = lava_ray_query_get_type(false) == CANDIDATE_AABB
+@inline candidate_primitive_index(::VulkanRayQuery) = Int(lava_ray_query_get_primitive_index(false)) + 1
+@inline candidate_ids(::VulkanRayQuery) =
+    (lava_ray_query_get_instance_id(false), lava_ray_query_get_primitive_index(false),
+     lava_ray_query_get_instance_custom_index(false))
+@inline function candidate_triangle(::VulkanRayQuery)
+    u, v = lava_ray_query_get_barycentrics(false)
+    return (lava_ray_query_get_t(false), u, v)
+end
+@inline commit_triangle!(::VulkanRayQuery) = lava_ray_query_confirm()
+@inline candidate_object_ray(::VulkanRayQuery) = (
     Vec3f(lava_ray_query_get_object_ray_origin(false, 1),
           lava_ray_query_get_object_ray_origin(false, 2),
           lava_ray_query_get_object_ray_origin(false, 3)),
     Vec3f(lava_ray_query_get_object_ray_direction(false, 1),
           lava_ray_query_get_object_ray_direction(false, 2),
           lava_ray_query_get_object_ray_direction(false, 3)))
-@lava_device_override @inline commit_intersection!(t) = lava_ray_query_generate_intersection(Float32(t))
+@inline commit_intersection!(::VulkanRayQuery, t) = lava_ray_query_generate_intersection(Float32(t))
 
-@inline function rq_collect(accel::AdaptedAccel)
-    # The running best procedural hit, kept by the shader; `nothing` for a
-    # triangles-only scene, which folds the loop body away.
-    best = procedural_miss(accel.procedural)
-    while lava_ray_query_proceed()
-        # Opaque triangles commit themselves; an AABB candidate is answered here.
-        if lava_ray_query_get_type(false) == CANDIDATE_AABB
-            best = procedural_candidate(accel.procedural, best)
-        end
-    end
-
-    kind = lava_ray_query_get_type(true)  # committed
-    if kind == COMMITTED_GENERATED
-        t = lava_ray_query_get_t(true)
-        prim_idx = lava_ray_query_get_primitive_index(true)
-        inst_custom_idx = lava_ray_query_get_instance_custom_index(true)
-        prim = procedural_commit(accel.procedural, best, prim_idx, t, accel.empty)
-        # Same tuple shape and primitive type as a triangle hit (`procedural_commit`).
-        return (true, prim, t, procedural_bary(accel.procedural, best), inst_custom_idx)
-    end
-    if kind != COMMITTED_TRIANGLE
-        return (false, accel.empty, 0f0, SVector{3,Float32}(1f0, 0f0, 0f0), UInt32(0))
-    end
-    t = lava_ray_query_get_t(true)
-    inst_id = lava_ray_query_get_instance_id(true)
-    inst_custom_idx = lava_ray_query_get_instance_custom_index(true)
-    prim_idx = lava_ray_query_get_primitive_index(true)
-    bx, by = lava_ray_query_get_barycentrics(true)
-
-    tri = hittriangle(accel, inst_id, prim_idx)
-
-    bary = SVector{3,Float32}(1f0 - bx - by, bx, by)
-    return (true, tri, t, bary, inst_custom_idx)
+@inline function committed_kind(::VulkanRayQuery)
+    kind = lava_ray_query_get_type(true)
+    kind == COMMITTED_TRIANGLE && return Raycore.HIT_TRIANGLE
+    kind == COMMITTED_GENERATED && return Raycore.HIT_GENERATED
+    return Raycore.HIT_MISS
 end
-
-# `mask` is the ray's cull mask; the driver compares its low 8 bits with each
-# instance's mask. `% UInt32` avoids an error branch in every shader.
-@propagate_inbounds function Raycore.closest_hit(accel::AdaptedAccel, ray::Raycore.AbstractRay, mask::Integer)
-    o = ray.o; d = ray.d
-    lava_ray_query_init(UInt32(0), mask % UInt32,
-        Float32(o[1]), Float32(o[2]), Float32(o[3]), Float32(ray.t_min),
-        Float32(d[1]), Float32(d[2]), Float32(d[3]), Float32(ray.t_max))
-    return rq_collect(accel)
-end
-
-@propagate_inbounds function Raycore.any_hit(accel::AdaptedAccel, ray::Raycore.AbstractRay, mask::Integer)
-    o = ray.o; d = ray.d
-    # RayFlagsTerminateOnFirstHitKHR (4): stop at the first commit.
-    lava_ray_query_init(UInt32(4), mask % UInt32,
-        Float32(o[1]), Float32(o[2]), Float32(o[3]), Float32(ray.t_min),
-        Float32(d[1]), Float32(d[2]), Float32(d[3]), Float32(ray.t_max))
-    return rq_collect(accel)
-end
+@inline committed_ids(::VulkanRayQuery) =
+    (lava_ray_query_get_t(true), lava_ray_query_get_instance_id(true),
+     lava_ray_query_get_primitive_index(true), lava_ray_query_get_instance_custom_index(true))
+@inline committed_barycentrics(::VulkanRayQuery) = lava_ray_query_get_barycentrics(true)
+@inline query_end!(::VulkanRayQuery) = nothing
 
 """
     tlasset!(owner, ctx, pipeline, tlas) -> VkDescriptorSet
@@ -425,11 +413,6 @@ function bindtlas!(e::Emitter, pipeline::LavaComputePipeline, tlas::VulkanTLAS)
     hold!(e, lava_tlas)
     return nothing
 end
-
-# The SBT path needs VK_KHR_ray_tracing_pipeline, which a ray-query device may
-# lack (`supports_rt_pipeline` in `raytracing/api.jl`).
-supports_rt_pipeline(d::LavaDevice) = d.rt_pipeline_properties !== nothing
-supports_rt_pipeline(t::VulkanTLAS) = supports_rt_pipeline(t.backend)
 
 # The inline ray query answers boxes through the candidate verbs above.
 supports_procedural_traversal(d::LavaDevice) = d.ray_query_available

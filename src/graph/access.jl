@@ -224,13 +224,30 @@ pack(arg::Int, elem::Int) = (arg << ELEMBITS) | (0 <= elem <= MAXELEM ? elem : 0
 unpack(r::Int) = (r >> ELEMBITS, r & MAXELEM)
 
 """
+What a signature does to its arguments, and how long that holds: while `ci`, the
+`CodeInstance` its IR was inferred as, is valid. Julia ends a `CodeInstance`'s
+world range when a method its code depended on is redefined, through backedges
+and so transitively for every caller, which makes a summary stale exactly when
+the code it was read from changes. A declared signature (`declaredsignature`), or
+one with no `CodeInstance`, holds in the world it was worked out in.
+"""
+struct Summary
+    touches::Vector{Touch}
+    ci::Union{Nothing,Core.CodeInstance}
+    world::UInt
+end
+
+holds(s::Summary, world::UInt) =
+    s.ci === nothing ? s.world == world : (@atomic :monotonic s.ci.max_world) >= world
+
+"""
 State one `accessof` shares across the method instances it walks. `summaries`
 caches each callee's result per signature; `active` detects recursion, which is
 refused.
 """
 struct Walk{I}
     interp::I
-    summaries::IdDict{Any,Vector{Touch}}
+    summaries::IdDict{Any,Summary}
     active::Base.IdSet{Any}
     maxdepth::Int
     # The signature `accessof` was asked about, so a refusal in a callee names the
@@ -321,24 +338,17 @@ end
 """
 Summaries one device has worked out, reused across every graph it builds; a
 wavefront stage is ten thousand statements to infer. Keyed by signature and held
-per device, since answers come from its interpreter. Emptied when the world age
-moves, because a redefined method changes answers.
+per device, since answers come from its interpreter. Each holds while the code it
+was read from does ([`Summary`](@ref)), so defining an unrelated method costs
+nothing.
 """
-mutable struct AccessCache
-    world::UInt64
-    summaries::IdDict{Any,Vector{Touch}}
+struct AccessCache
+    summaries::IdDict{Any,Summary}
 end
-AccessCache() = AccessCache(Base.get_world_counter(), IdDict{Any,Vector{Touch}}())
+AccessCache() = AccessCache(IdDict{Any,Summary}())
 
-function summaries!(c::AccessCache)
-    w = Base.get_world_counter()
-    if c.world != w
-        empty!(c.summaries)
-        c.world = w
-    end
-    return c.summaries
-end
-summaries!(::Nothing) = IdDict{Any,Vector{Touch}}()
+summaries!(c::AccessCache) = c.summaries
+summaries!(::Nothing) = IdDict{Any,Summary}()
 
 """
     accesscache(device) -> AccessCache
@@ -381,15 +391,32 @@ function irfor(w::Walk, @nospecialize(sig))
     return ir
 end
 
+"""
+The `CodeInstance` `sig` has in the walk's interpreter's cache, inferred into it
+if it has none, or `nothing` when no single method applies. `code_ircode_by_type`
+does not cache the signature it is asked about, only what that calls.
+"""
+function codeinstance(w::Walk, @nospecialize(sig))
+    interp = w.interp === nothing ? Base.Compiler.NativeInterpreter() : w.interp
+    match = Base._which(sig; method_table = Base.Compiler.method_table(interp),
+                        world = Base.get_world_counter(), raise = false)
+    match === nothing && return nothing
+    ci = Base.Compiler.typeinf_ext(interp, Base.Compiler.specialize_method(match),
+                                   Base.Compiler.SOURCE_MODE_NOT_REQUIRED)
+    return ci isa Core.CodeInstance ? ci : nothing
+end
+
 """Per-argument `Touch` for a whole signature, or `nothing` if it cannot be seen."""
 function signaturetouches(w::Walk, @nospecialize(sig), depth::Int)
-    haskey(w.summaries, sig) && return w.summaries[sig]
+    world = Base.get_world_counter()
+    known = get(w.summaries, sig, nothing)
+    known !== nothing && holds(known, world) && return known.touches
     # A declaration outranks the walk and is checked before the depth limit and the
     # recursion guard: a device intrinsic's body is an `llvmcall` naming a symbol
     # only its emitter understands. Cached like an inferred answer.
     declared = declaredsignature(sig)
     if declared !== nothing
-        w.summaries[sig] = declared
+        w.summaries[sig] = Summary(declared, nothing, world)
         return declared
     end
     depth > w.maxdepth && return nothing
@@ -400,7 +427,7 @@ function signaturetouches(w::Walk, @nospecialize(sig), depth::Int)
     push!(w.active, sig)
     try
         touches = walkir(w, ir, argmap(ir, sig), depth)
-        w.summaries[sig] = touches
+        w.summaries[sig] = Summary(touches, codeinstance(w, sig), world)
         return touches
     finally
         delete!(w.active, sig)
@@ -915,7 +942,7 @@ arguments); the walk, `accessof`, is shared.
 """
 function kerneltouches(dev, kernel, args::Tuple, ndrange, group)
     argT = map(a -> devicetype(dev, a), args)
-    if buildskernel(kernel, backend(dev))
+    if buildskernel(kernel, dev)
         interp, body, tt = kakernelaccesssignature(dev, kernel, argT, ndrange, group)
         return accessof(interp, body, tt; cache = accesscache(dev))[3:end]
     end
@@ -937,7 +964,7 @@ way a KA launch builds its context. Backends override it only when their launch
 signature differs (Lava retains an `IterPlan`).
 """
 function kakernelaccesssignature(dev, kernel, argT::Tuple, ndrange, group)
-    obj = kernelfor(kernel, group, backend(dev))
+    obj = kernelfor(kernel, group, dev)
     nd = dispatchrange(ndrange)
     cg = callgroup(obj, group)
     ndr, _, iterspace, _ = KA.launch_config(obj, nd, cg)

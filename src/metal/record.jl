@@ -272,14 +272,14 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
     Mantle.iscall(d) && return Mantle.bake(c, d)
     # A macro-free KernelInterface kernel has no KA context; compiled here so its
     # pipeline gets `indirect = true`, which the KI wrapper does not set.
-    if !Mantle.buildskernel(d.kernel, Mantle.backend(dev))
+    if !Mantle.buildskernel(d.kernel, dev)
         raw = map(a -> Mantle.resolve(dev, a), d.args)
         adapted = map(Metal.mtlconvert, raw)
         tt = Tuple{map(Core.Typeof, adapted)...}
         entry = icb_name(string(nameof(typeof(d.kernel))))
         kernel = Metal.mtlfunction(Metal.mtlconvert(d.kernel), tt;
                                    name = entry, indirect = true)
-        wrapped = KI.Kernel(Mantle.backend(dev), kernel)
+        wrapped = KI.Kernel(metalbackend(dev), kernel)
         nd = recordedrange(d.ndrange)
         threads, groups = Mantle.ki_launch_extents(wrapped, nd, d.group)
         kernel.loggingEnabled && throw(ArgumentError(

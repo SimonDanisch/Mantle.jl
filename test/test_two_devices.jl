@@ -155,7 +155,7 @@ end
         @test other !== dev
         for d in (dev, other)
             @testset "$(Mantle.devicename(d))" begin
-                b = Mantle.backend(d)
+                b = d
 
                 # ── a dispatch, and the fill! that feeds it
                 a = KA.allocate(b, Float32, 64)

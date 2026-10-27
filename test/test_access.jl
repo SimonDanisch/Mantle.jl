@@ -83,3 +83,30 @@ end
     # kernel read came back read+write.
     @test t[4] === M.NOTOUCH
 end
+
+# A summary holds while the code it was read from does. The device's cache was
+# emptied whenever the world age moved, which in Julia 1.12 is any method defined
+# anywhere and even a new global at the REPL: the next scene re-inferred all 43
+# kernels of a Hikari render, two seconds of its first frame, for code that had
+# not changed. A redefinition reaches a summary through the `CodeInstance` it was
+# read from, whose world range Julia ends through the backedges of every caller.
+module AccessHoldsCode
+    load_or_store(p::Ptr{Float32}) = unsafe_load(p)
+    kernel(p::Ptr{Float32}) = load_or_store(p)
+end
+
+@testset "an access summary holds until its own code changes" begin
+    cache = M.AccessCache()
+    sig = Tuple{typeof(AccessHoldsCode.kernel), Ptr{Float32}}
+    touches() = M.accessof(nothing, AccessHoldsCode.kernel, (Ptr{Float32},); cache)[2]
+    @test touches() == M.READ
+    held = cache.summaries[sig]
+    # Defining something the kernel does not call keeps the summary.
+    Core.eval(AccessHoldsCode, :(unrelated() = 1))
+    @test touches() == M.READ
+    @test cache.summaries[sig] === held
+    # Redefining what the kernel calls renews it.
+    Core.eval(AccessHoldsCode, :(load_or_store(p::Ptr{Float32}) = (unsafe_store!(p, 1f0); 0f0)))
+    @test touches() == M.WRITE
+    @test cache.summaries[sig] !== held
+end

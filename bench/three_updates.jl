@@ -177,7 +177,7 @@ begin # ── the render loop, async like GLMakie's, so evaling keeps working �
                 mvp[] = camera(0.3f0 * t, dx)
             end
             if simulate
-                advect!(M.backend(dev))(M.storage(gpupos), M.storage(gpuvel), dt[], 1.4f0; ndrange = n)
+                advect!(dev)(M.storage(gpupos), M.storage(gpuvel), dt[], 1.4f0; ndrange = n)
                 update!(gpu; positions = M.storage(gpupos))     # device array, no host round trip
                 advect!(cpupos, cpuvel, dt[], 1.4f0)
                 update!(cpu; positions = cpupos)                # host array, staged once

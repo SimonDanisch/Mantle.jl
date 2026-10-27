@@ -2,8 +2,8 @@
 #
 # What an acceleration structure holds is seen the way a renderer sees it: by
 # TRACING rays through it with `Raycore.closest_hit` in an ordinary kernel. That
-# is the same call on every backend — Vulkan lowers it to an inline ray query,
-# Metal to a linked MSL intersector — so a test written against the probe below
+# is the same call on every backend — core's ray-query loop over Vulkan's inline
+# ray query or Metal's intersection query — so a test written against the probe below
 # names none, and checks what a caller would notice instead of a backend's
 # instance records or buffers.
 #

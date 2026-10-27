@@ -79,7 +79,7 @@ const E = Mantle
         M.run!(small.plan)
         M.run!(big.plan)
     end
-    KernelAbstractions.synchronize(M.backend(dev))
+    KernelAbstractions.synchronize(dev)
     @test all(==(5f0), Array(M.storage(small.out)))
     @test all(==(5f0), Array(M.storage(big.out)))
     @test !hasfield(M.Arena, :lastrun)
@@ -158,7 +158,7 @@ end
         @test all(r -> length(r) <= cap, plan.slabs)
         M.record!(plan)
         M.run!(plan)
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         @test all(==(3f0), Array(M.storage(out)))        # (0 + 1) + (0 + 1 + 1)
         M.free!(plan)
         # The part is an arena of its own in the pool, and giving the plan up
@@ -182,18 +182,18 @@ end
     rec = s.plan.recording
 
     M.run!(s.plan)
-    KernelAbstractions.synchronize(M.backend(dev))
+    KernelAbstractions.synchronize(dev)
     want = copy(Array(M.storage(s.out)))
 
     # Thirty runs submit the one recording: the plan is still recorded and its
     # recording is the same object, so nothing was recorded again. A run of an
     # unrecorded plan would have walked it instead (`execute!`).
     fill!(M.storage(s.out), 0f0)
-    KernelAbstractions.synchronize(M.backend(dev))
+    KernelAbstractions.synchronize(dev)
     for _ in 1:30
         M.run!(s.plan)
     end
-    KernelAbstractions.synchronize(M.backend(dev))
+    KernelAbstractions.synchronize(dev)
     @test M.recorded(s.plan)
     @test s.plan.recording === rec
     @test Array(M.storage(s.out)) == want                  # bit-exact, not merely close
@@ -207,16 +207,16 @@ end
     dev = M.Device(TESTBACKEND)
     p = Base.invokelatest(chainplan, dev, 50_000, 8)
     M.run!(p.plan)
-    KernelAbstractions.synchronize(M.backend(dev))
+    KernelAbstractions.synchronize(dev)
     want = copy(Array(M.storage(p.out)))
 
     M.record!(p.plan)
     for _ in 1:6
         GC.gc(true)
         fill!(M.storage(p.out), 0f0)
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         M.run!(p.plan)
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         @test Array(M.storage(p.out)) == want
     end
 end
@@ -236,16 +236,16 @@ end
     dev = M.Device(TESTBACKEND)
     small = Base.invokelatest(chainplan, dev, 100_000, 3)
     M.run!(small.plan)
-    KernelAbstractions.synchronize(M.backend(dev))
+    KernelAbstractions.synchronize(dev)
     M.record!(small.plan)
     rec = small.plan.recording
 
     big = Base.invokelatest(chainplan, dev, 4_000_000, 3)   # needs a much bigger arena
     M.run!(big.plan)
-    KernelAbstractions.synchronize(M.backend(dev))
+    KernelAbstractions.synchronize(dev)
 
     M.run!(small.plan)
-    KernelAbstractions.synchronize(M.backend(dev))
+    KernelAbstractions.synchronize(dev)
     @test small.plan.recording === rec
     @test Array(M.storage(small.out)) == fill(Float32(3 + 2), 100_000)
     M.free!(small.plan)
@@ -304,7 +304,7 @@ end
     for _ in 1:4
         M.run!(profiled)
     end
-    KernelAbstractions.synchronize(M.backend(dev))
+    KernelAbstractions.synchronize(dev)
     t = M.timings(profiled)
     # Two passes: the update pass every plan with a declared buffer has, which
     # was never written (nothing was stored, so it has no host time and no
@@ -349,7 +349,7 @@ M.timestamps(M.Device(TESTBACKEND)) && @testset "a profiled pass reports the tim
     for _ in 1:reps
         M.run!(profiled)
     end
-    KernelAbstractions.synchronize(M.backend(dev))
+    KernelAbstractions.synchronize(dev)
     t = M.timings(profiled)
     i = findfirst(x -> x.name == "only", t)
     @test t[i].samples >= 1
@@ -371,7 +371,7 @@ M.timestamps(M.Device(TESTBACKEND)) && @testset "a profiled pass reports the tim
     for _ in 1:reps
         push!(walls, @elapsed begin
             M.run!(profiled)
-            KernelAbstractions.synchronize(M.backend(dev))
+            KernelAbstractions.synchronize(dev)
         end)
     end
     M.timings(profiled)                           # reads the last run's frame
@@ -413,7 +413,7 @@ M.timestamps(M.Device(TESTBACKEND)) && @testset "a pass is not billed the pass b
     for _ in 1:10
         M.run!(profiled)
     end
-    KernelAbstractions.synchronize(M.backend(dev))
+    KernelAbstractions.synchronize(dev)
     t = M.timings(profiled)
     heavy = t[findfirst(x -> x.name == "heavy", t)].gpu_ms
     light = t[findfirst(x -> x.name == "light", t)].gpu_ms
@@ -438,7 +438,7 @@ end
         M.run!(a.plan)
         M.run!(b.plan)
     end
-    KernelAbstractions.synchronize(M.backend(dev))
+    KernelAbstractions.synchronize(dev)
     @test all(==(4f0), Array(M.storage(a.out)))
     @test all(==(4f0), Array(M.storage(b.out)))
     @test !isdefined(M, :takeover!)
@@ -552,9 +552,9 @@ end
     # Retire with a submission IN FLIGHT, which is the case that must wait: a
     # command the device is still running can name these bytes. A slow kernel
     # keeps the timeline behind the value the region is stamped with.
-    scratch = KernelAbstractions.allocate(M.backend(dev), Float32, 16)
+    scratch = KernelAbstractions.allocate(dev, Float32, 16)
     fill!(scratch, 1f-3)
-    arena_slow!(M.backend(dev), 16)(scratch; ndrange = 16)
+    arena_slow!(dev, 16)(scratch; ndrange = 16)
     M.free!(b)
     @test M.reclaim!(pool, dev) == 0        # stamped, not released: it has not signalled
 

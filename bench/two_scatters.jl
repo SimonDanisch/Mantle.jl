@@ -168,7 +168,7 @@ function measure(frames = 600; na = 200_000, nb = 100_000, sync = true)
         tf = time()
         s.mvp[] = camera(0.4f0 * Float32(time() - t0))
         M.run!(s.plan)
-        sync && KernelAbstractions.synchronize(M.backend(dev))
+        sync && KernelAbstractions.synchronize(dev)
         push!(times, time() - tf)
     end
     img = M.screenshot(win)

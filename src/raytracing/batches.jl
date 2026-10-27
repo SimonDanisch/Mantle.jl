@@ -14,8 +14,10 @@ mutable struct InstanceBatch{Tri,Geometry,Records}
     n::Int
     handle::Raycore.TLASHandle
     triangles::Vector{Tri}
-    sbt_offset::UInt32
     hidden::Bool
+    # Instances a transparent-hits query records rather than stops at
+    # (`Raycore.transparent_hits`).
+    opaque::Bool
 end
 Base.length(b::InstanceBatch) = b.n
 
@@ -98,17 +100,17 @@ function recordsof(bs::InstanceBatches, h::Raycore.TLASHandle)
 end
 
 """
-    sethidden!(batches, handle, hidden) -> Bool or nothing
+    setbatch!(batches, handle, field, value) -> Bool or nothing
 
-Mark the batch `handle` names hidden or shown. `nothing` when it names none, else
-whether anything changed (the structure then needs a build). A hidden batch is
-built with mask 0, which no ray matches; its records keep their own masks.
+Set the batch `handle` names `hidden` or `opaque` (`field`). `nothing` when it names
+none, else whether anything changed (the structure then needs a build). A hidden
+batch is built with mask 0, which no ray matches; its records keep their own masks.
 """
-function sethidden!(bs::InstanceBatches, h::Raycore.TLASHandle, hidden::Bool)
+function setbatch!(bs::InstanceBatches, h::Raycore.TLASHandle, field::Symbol, value::Bool)
     b = batchof(bs, h)
     b === nothing && return nothing
-    b.hidden == hidden && return false
-    b.hidden = hidden
+    getfield(b, field) == value && return false
+    setfield!(b, field, value)
     return true
 end
 

@@ -71,7 +71,7 @@ end
 # The port in Float64 runs on lavapipe, a CPU Vulkan device: its kernels take
 # the base triangles as arguments, so unlike the reference's they run anywhere,
 # and an Apple GPU has no Float64.
-const LVP = Mantle.backend(Mantle.Device("lavapipe"))
+const LVP = Mantle.Device("lavapipe")
 lvp(x::AbstractArray) = (d = KA.allocate(LVP, eltype(x), size(x)); copyto!(d, x); d)
 
 @testset "isubd pass A: refinement against its CPU reference" begin

@@ -46,7 +46,7 @@ onloan(dev) = sum(b -> length(b.live), Iterators.flatten(values(Mantle.pool(dev)
         Mantle.reclaim!(Mantle.pool(mine), mine; wait = true)
         before = onloan(mine)
 
-        be = Mantle.backend(other)
+        be = other
         tlas = Mantle.HWTLAS{Raycore.Triangle{UInt32}}(be)
         push!(tlas, tri_mesh())
         Raycore.sync!(tlas)

@@ -201,14 +201,13 @@ function Mantle.build_accel!(f, bq::Metal.BatchedCommandQueue)
 end
 
 """
-    build_blas(ctx, vertices, indices; opaque = true, allow_update = false) -> MetalBLAS
+    build_blas(ctx, vertices, indices; allow_update = false) -> MetalBLAS
 
 The portable triangle build (`raytracing/api.jl`). `vertices` go to a `Shared`
-buffer the BLAS owns for refits. `opaque` is ignored: every instance is built
-with `MTLAccelerationStructureInstanceOptionOpaque`.
+buffer the BLAS owns for refits.
 """
 function Mantle.build_blas(ctx::MetalAccelBuildContext, vertices::Vector{NTuple{3,Float32}},
-                           indices::Vector{UInt32}; opaque::Bool = true, allow_update::Bool = false)
+                           indices::Vector{UInt32}; allow_update::Bool = false)
     d = ctx.device
     length(indices) % 3 == 0 && !isempty(indices) || throw(ArgumentError(
         "build_blas: $(length(indices)) indices are not a whole number of triangles"))
@@ -245,13 +244,12 @@ function Raycore.refit!(blas::MetalBLAS, vertices::AbstractVector)
 end
 
 """
-    build_blas_aabb(ctx, aabbs; opaque = true) -> MetalBLAS
+    build_blas_aabb(ctx, aabbs) -> MetalBLAS
 
-A bottom-level structure over procedural boxes. `opaque` is ignored, as on
-Vulkan's ray-query path; it keeps the call identical across backends.
+A bottom-level structure over procedural boxes.
 """
 function Mantle.build_blas_aabb(ctx::MetalAccelBuildContext,
-                                                 aabbs::Vector{Mantle.AABB}; opaque::Bool = true)
+                                                 aabbs::Vector{Mantle.AABB})
     d = ctx.device
     n = length(aabbs)
     n > 0 || throw(ArgumentError("build_blas_aabb: no boxes to build over"))

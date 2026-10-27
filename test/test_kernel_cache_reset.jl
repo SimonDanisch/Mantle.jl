@@ -53,7 +53,7 @@ include(joinpath(@__DIR__, "freshprocess.jl"))
 
             new = Mantle.reset_device!(dev)
             Mantle.resetkernelcompiles!(new)
-            @test bump(Mantle.backend(new), 64) == ones(Float32, 64)
+            @test bump(new, 64) == ones(Float32, 64)
             @test Mantle.kernelcompiles(new).misses == 0
         end
         """)

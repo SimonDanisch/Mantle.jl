@@ -4,11 +4,11 @@
 # silently does not check.
 
 """
-    debugenv(::MetalDevice / ::MetalBackend, cfg) -> environment pairs
+    debugenv(::MetalDevice, cfg) -> environment pairs
 
 `MTL_DEBUG_LAYER=1` for `validation`, `MTL_SHADER_VALIDATION=1` for `gpu_av`.
 """
-debugenv(::Union{MetalDevice,Metal.MetalBackend}, cfg::DebugConfig) =
+debugenv(::MetalDevice, cfg::DebugConfig) =
     Pair{String,String}[(cfg.validation ? ["MTL_DEBUG_LAYER" => "1"] : Pair{String,String}[])...,
                         (cfg.gpu_av ? ["MTL_SHADER_VALIDATION" => "1"] : Pair{String,String}[])...]
 

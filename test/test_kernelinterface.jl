@@ -201,7 +201,9 @@ end
         # Answered from the device, so the assertions are on shape, plausibility
         # and agreement with `Mantle.caps` rather than on a number this machine
         # happens to report.
-        @test KI.get_backend(Mantle.devicearray(backend, zeros(Float32, 1))) isa typeof(backend)
+        # `==`, not the type: an `MtlArray` reports Metal.jl's backend, which
+        # equals the device it lives on.
+        @test KI.get_backend(Mantle.devicearray(backend, zeros(Float32, 1))) == backend
         @test KI.supports_unified(backend)
         # Mantle's own kernels use Atomix on every backend
         # (`test_atomics_and_dispatch.jl`); a backend answering `false` here is
@@ -239,7 +241,7 @@ end
         # `allocate` goes through the same path as `KA.allocate`.
         b = KI.allocate(backend, Float32, (8,))
         @test b isa AbstractVector{Float32}
-        @test KI.get_backend(b) isa typeof(backend)
+        @test KI.get_backend(b) == backend
         @test size(b) == (8,)
     end
 

@@ -34,14 +34,6 @@ abstract type Window end
 Window(width::Integer, height::Integer; kw...) =
     Window(defaultbackend(), width, height; kw...)
 
-"""backend(device)
-
-The KernelAbstractions backend for launches outside a graph. A backend returns
-itself. Within a graph, dispatch! declares accesses and derives ordering."""
-function backend end
-
-backend(b::KernelAbstractions.Backend) = b
-
 """screenshot(window) -> Matrix
 
 Read window pixels in its format's element type, synchronizing internally and

@@ -13,10 +13,10 @@ using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             CoopMatrix, FragmentWrapper, GeometryConfig,
             KI_REDUCE_ADD_TYPES, KI_SHFL_TYPES, LavaCompilationError,
             LavaCompilerParams, LavaDeviceArray, LavaError, LavaGPUKernel,
-            LavaGfxShader, LavaRTShader, LavaSharedArray, MatrixA, MatrixB,
+            LavaGfxShader, LavaSharedArray, MatrixA, MatrixB,
             Op, PushConstantInfo, Scope, SourceMap, TargetFeatures, TessConfig,
             GeometryWrapper, MeshWrapper, VertexWrapper, WorkgroupMatrix,
-            cached_gfx_shader, cached_rt_shader, compile_or_lookup, compile_stats,
+            cached_gfx_shader, compile_or_lookup, compile_stats,
             coopmat_convert, coopmat_getcomp, coopmat_length, coopmat_load,
             coopmat_muladd, coopmat_setcomp, coopmat_store, coopmat_undef,
             coopmat_zero, disassemble_spirv, dump_spirv_to_disk,
@@ -32,9 +32,9 @@ using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             lava_ray_query_get_primitive_index, lava_ray_query_get_t,
             lava_ray_query_get_type, lava_ray_query_init,
             lava_ray_query_proceed,
-            # Procedural geometry: commit an AABB candidate's own hit
+            # Candidates: accept a triangle, or commit a box's own hit
             # (`raytracing/hwtlas.jl`).
-            lava_ray_query_generate_intersection,
+            lava_ray_query_confirm, lava_ray_query_generate_intersection,
             lava_ray_query_get_object_ray_origin,
             lava_ray_query_get_object_ray_direction,
             lava_workgroup_barrier,
@@ -74,8 +74,6 @@ include("graphics/textures.jl")
 include("graphics/api.jl")
 include("raytracing/instance_record.jl")
 include("raytracing/acceleration.jl")
-include("raytracing/pipeline.jl")
-include("raytracing/shaders.jl")
 include("raytracing/hwtlas.jl")
 # `runtime/video_h265.jl` is included by `runtime/video.jl`.
 

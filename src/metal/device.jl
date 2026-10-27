@@ -153,11 +153,29 @@ first run would go to the task's own queue, unordered against the replay).
 """
 defaultdevice!(d::MetalDevice) = (METAL.default = d; adoptqueue!(d); d)
 
-# The Mantle device of a KernelAbstractions backend; a backend bound to a channel
-# belongs to the device that handed the channel out.
+# The Mantle device of Metal.jl's backend, which is what `KA.get_backend` of an
+# `MtlArray` returns; a backend bound to a channel belongs to the device that
+# handed the channel out.
 Device(b::Metal.MetalBackend) = b.queue === nothing ? Device(MetalAPI()) : deviceof(b.queue)
+
+# A backend's `==` is "the same device": Raycore refuses to adapt a TLAS to another
+# device's backend, and an `MtlArray` reports Metal.jl's backend for the device it
+# lives on. `isequal` stays identity, so hashing asks nothing of Metal.jl's type.
+Base.:(==)(b::Metal.MetalBackend, d::MetalDevice) = Device(b) === d
+Base.:(==)(d::MetalDevice, b::Metal.MetalBackend) = b == d
+Base.isequal(::Metal.MetalBackend, ::MetalDevice) = false
+Base.isequal(::MetalDevice, ::Metal.MetalBackend) = false
 pool(d::MetalDevice) = d.pool
-backend(::MetalDevice) = Metal.MetalBackend()
+
+"""
+    metalbackend(dev) -> Metal.MetalBackend
+
+Metal.jl's backend bound to `dev`'s batch, which the device's KernelInterface
+methods (`metal/kernelinterface.jl`) forward to: a launch goes to `dev`'s queue
+from any task, where an unbound `MetalBackend()` uses the calling task's own
+queue, with a residency set of its own.
+"""
+metalbackend(d::MetalDevice) = Metal.MetalBackend(batchqueue(d))
 
 # A Metal constraint is a storage mode: an `MTLBuffer` has no usage flags, so
 # nothing else limits sharing. It is a Metal.jl type (`Metal.SharedStorage`, what
@@ -849,7 +867,6 @@ bound the placer checks against, not a reservation.
 capacity(d::MetalDevice) = Int(d.dev.recommendedMaxWorkingSetSize)
 
 """Wait for everything submitted to the device: its queue and every channel."""
-waitidle(b::Metal.MetalBackend) = waitidle(Device(b))
 waitidle(d::MetalDevice) = (waitidle(d.queue); foreach(Metal.synchronize, d.channels); nothing)
 
 # Both queues, the MTL4 one through the timeline so the pool sees what passed.
@@ -861,7 +878,7 @@ waitidle(q::MTL4Queue) = (waitfor(q, q.next); Metal.synchronize(q.bq); nothing)
 # unordered against each other; a buffer used on two is ordered by Metal.jl's
 # ownership check, a host wait for the other queue before each launch and copy.
 
-supports_batch_queue(::Union{Metal.MetalBackend,MetalDevice}) = true
+supports_batch_queue(::MetalDevice) = true
 
 function allocate_batch_queue!(d::MetalDevice)
     refuseretired(d)
@@ -872,7 +889,6 @@ function allocate_batch_queue!(d::MetalDevice)
     push!(d.channels, bq)
     return bq
 end
-allocate_batch_queue!(b::Metal.MetalBackend) = allocate_batch_queue!(Device(b))
 
 """
 The live device that handed `bq` out or owns it as its queue. Throws when none does.
@@ -887,8 +903,6 @@ function deviceof(bq::Metal.BatchedCommandQueue)
                         "released, or was never handed out by `allocate_batch_queue!`."))
 end
 todevice(bq::Metal.BatchedCommandQueue) = deviceof(bq)
-
-backend(bq::Metal.BatchedCommandQueue) = Metal.MetalBackend(bq)
 
 """Wait for everything submitted on `bq`, committing what is open first."""
 flush!(bq::Metal.BatchedCommandQueue) = (Metal.synchronize(bq); nothing)

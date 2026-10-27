@@ -162,26 +162,4 @@ end
     @test destroyed(tl, d)
 end
 
-@testset "all ray-tracing stages retain captured arrays" begin
-    arrays = [Float32[i] for i in 1:4]
-    capture(a) = () -> a[1]
-    pipe = Mantle.RayTracingPipeline(; raygen=capture(arrays[1]),
-        closest_hit=(capture(arrays[2]),capture(arrays[3])),
-        miss=capture(arrays[4]), any_hit=capture(arrays[1]))
-    tl = HoldTimeline()
-    ch = HoldChannel(tl)
-    r = Mantle.acquire!(ch)
-    Mantle.holdleaves!(ch,pipe)
-    expected = arrays[[1,2,3,4,1]]
-    @test length(last(ch.holds)) == length(expected)
-    @test all(a === b for (a,b) in zip(last(ch.holds),expected))
-    tok = Mantle.submit!(ch,r)
-    Mantle.handover!(ch,tok,r)
-    @test all(a === b for (a,b) in zip(only(ch.outstanding).payload.holds,expected))
-    tl.completed = tok
-    Mantle.drain!(ch)
-    @test isempty(ch.outstanding)
-    @test all(isempty,ch.spare)
-end
-
 end  # @testset

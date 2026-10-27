@@ -182,7 +182,7 @@ else
         for _ in 1:30
             M.run!(s.plan)
         end
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         img = M.screenshot(win)
         close(win)
 
@@ -203,7 +203,7 @@ else
             s.dt[] = 1f0 / 60
             M.run!(s.plan)
         end
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         after = Array(s.a.positions)
         close(win)
 
@@ -253,7 +253,7 @@ else
         for _ in 1:9
             M.run!(s.plan)
         end
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
 
         # Nothing a later frame could wait for is still sitting unsubmitted: the
         # plan's last token is no newer than everything the device was given.
@@ -282,7 +282,7 @@ else
         dev = M.Device(TESTBACKEND)
         s = Base.invokelatest(advect_plan, dev, 4_096)
         M.run!(s.plan)                       # the frame that may compile
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
 
         @eval $(gensym("bump"))() = 1         # what every eval in a session does
         stop = Ref(false)
@@ -351,7 +351,7 @@ else
         bytes = rand(UInt8, length(s.raw))
         copyto!(M.storage(s.raw), bytes)
         M.run!(s.plan)
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         got = Array(M.storage(s.out))
         want = Base.invokelatest(chainreference, bytes, W, H, STAGES)
         @test length(got) == length(want)
@@ -379,12 +379,12 @@ else
 
         seedchains!()
         M.run!(s.plan)
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         reference = Array(M.storage(s.bufs[1][end]))
 
         seedchains!()
         M.run!(s.plan)
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         @test Array(M.storage(s.bufs[1][end])) == reference
     end
 
@@ -486,7 +486,7 @@ else
         # And it still computes the right thing, which is the point of not
         # ordering them: both halves land.
         M.run!(sliced.plan)
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         got = Array(sliced.b)
         @test all(==(1f0), got[1:128]) && all(==(2f0), got[129:256])
 
@@ -882,7 +882,7 @@ else
             end
             plan = M.Plan(g)
             for _ in 1:20; GLFW.PollEvents(); M.run!(plan); end
-            KernelAbstractions.synchronize(M.backend(dev))
+            KernelAbstractions.synchronize(dev)
             img = M.screenshot(win); close(win)
             # A colour is not indexable: `p[1]` is a `MethodError` on
             # `BGRA{N0f8}`, and ColorTypes' accessors are the way in. The sum is
@@ -929,7 +929,7 @@ else
 
         got = map((tight, loose)) do s
             M.run!(s.plan)
-            KernelAbstractions.synchronize(M.backend(dev))
+            KernelAbstractions.synchronize(dev)
             Array(M.storage(s.out))
         end
         @test got[1] == got[2]                 # aliasing changed nothing
@@ -958,7 +958,7 @@ else
             size(win) == (w, h) && break
         end
         for _ in 1:6; M.run!(plan); end
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         return size(win)
     end
 
@@ -975,7 +975,7 @@ else
         win = M.Window(TESTBACKEND, W, H; title = "resize")
         s = Base.invokelatest(build, dev, win, 20_000, 10_000)
         for _ in 1:10; M.run!(s.plan); end
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         @test size(M.screenshot(win)) == (W, H)
 
         for (w, h) in ((640, 480), (1280, 900), (300, 200))
@@ -1015,7 +1015,7 @@ else
         end
         plan = M.Plan(g)
         for _ in 1:5; M.run!(plan); end
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         @test size(z) == (800, 600)
         small = M.peakbytes(plan)
 
@@ -1061,7 +1061,7 @@ else
         end
         plan = M.Plan(g)
         M.run!(plan)                              # same size: fine
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
 
         resizewindow!(win, 1200, 900)
         sleep(0.2)
@@ -1184,12 +1184,12 @@ else
         fb = M.Framebuffer(TESTBACKEND, size(win)...; depth = false, color_format = RGBA{N0f8})
         plan_off, _ = draw_into(g -> fb)
         M.run!(M.record!(plan_off))
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         a = M.readback_framebuffer(fb)
         # Every image the platform cycles through drawn, so the one a screenshot
         # is handed holds this scene.
         for _ in 1:6; M.run!(plan_win); end
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         b = M.screenshot(win)
         @test size(b) == size(a)
         for ch in (red, green, blue, alpha)
@@ -1303,7 +1303,7 @@ else
             rp = first(p for p in plan.graph.passes if p.kind === :render)
             @test last(first(rp.usages)) === want
             M.run!(plan)
-            KernelAbstractions.synchronize(M.backend(dev))
+            KernelAbstractions.synchronize(dev)
             px = reshape(Array(M.storage(raw)), 4, :)
             lit = count(j -> Int(px[1, j]) + Int(px[2, j]) + Int(px[3, j]) > 40, axes(px, 2))
             @test lit > 1000
@@ -1329,7 +1329,7 @@ else
             M.copy!(g, "read", raw, img)
             plan = M.record!(M.Plan(g))
             M.run!(plan)
-            KernelAbstractions.synchronize(M.backend(dev))
+            KernelAbstractions.synchronize(dev)
             px = reshape(Array(M.storage(raw)), 4, :)        # B, G, R, A per pixel
             rgb(r, gr, b) = count(j -> (px[3, j], px[2, j], px[1, j]) == (r, gr, b), axes(px, 2))
             (white = rgb(0xff, 0xff, 0xff), blue = rgb(0x00, 0x00, 0xff),
@@ -1386,7 +1386,7 @@ else
             M.copy!(g, "read", raw, img)
             plan = M.record!(M.Plan(g))
             M.run!(plan)
-            KernelAbstractions.synchronize(M.backend(dev))
+            KernelAbstractions.synchronize(dev)
             px = reshape(Array(M.storage(raw)), 4, N, N)
             (blue = Int(px[1, N ÷ 2, N ÷ 2]), red = Int(px[3, N ÷ 2, N ÷ 2]), plan = plan)
         end
@@ -1424,7 +1424,7 @@ else
         M.copy!(g, "read z", raw, z)
         plan = M.record!(M.Plan(g))
         M.run!(plan)
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         zs = reshape(Array(M.storage(raw)), N, N)
         @test zs[N ÷ 2, N ÷ 2] ≈ 0.3f0 atol = 1e-5   # the near point's z, not the far one's
         @test zs[1, 1] ≈ 1f0                          # and the clear everywhere else
@@ -1488,7 +1488,7 @@ else
         end
 
         M.run!(plan)
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         pa = reshape(Array(M.storage(ra)), 4, N, N)
         pb = reshape(Array(M.storage(rb)), 4, N, N)
         c = N ÷ 2
@@ -1536,7 +1536,7 @@ else
     function three_step!(s)
         # An unmodelled launch writing the plot's buffer directly: nothing in
         # the graph knows it happened, and the next run reads what it wrote.
-        advect!(M.backend(s.dev))(M.storage(s.gpu.positions), M.storage(s.gpuvel), s.dt, 1.4f0;
+        advect!(s.dev)(M.storage(s.gpu.positions), M.storage(s.gpuvel), s.dt, 1.4f0;
                                   ndrange = s.n)
         advect!(s.cpupos, s.cpuvel, s.dt, 1.4f0)
         # A host array, stored: a copy, because the store retains what it is
@@ -1558,7 +1558,7 @@ else
         for _ in 1:20
             Base.invokelatest(three_step!, s)
             M.run!(s.plan)
-            KernelAbstractions.synchronize(M.backend(dev))
+            KernelAbstractions.synchronize(dev)
         end
         after = map(p -> Array(p.positions), plots)
 
@@ -1574,7 +1574,7 @@ else
         fresh = cloud(5_000)
         fetch(Threads.@spawn (s.cpu.positions[:] = fresh))
         M.run!(s.plan)
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         @test Array(s.cpu.positions) == fresh
         close(win)
     end
@@ -1592,7 +1592,7 @@ else
         for _ in 1:30
             Base.invokelatest(three_step!, s)
             M.run!(s.plan)
-            KernelAbstractions.synchronize(M.backend(dev))
+            KernelAbstractions.synchronize(dev)
         end
         ts = M.timings(s.plan)
 
@@ -1675,12 +1675,12 @@ else
         store = sc.markersize.store
 
         M.run!(plan)                                  # nothing stored
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         @test Array(M.storage(sc.markersize))[1] == 2f0
 
         sc.markersize[] = 9f0
         M.run!(plan)
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         @test Array(M.storage(sc.markersize))[1] == 9f0   # the new value arrived
         @test sc.markersize.store === store               # in the same buffer
         close(win)
@@ -1715,19 +1715,19 @@ else
         # A clean frame stores nothing: the barrier is derived as if it fired,
         # but nothing is emitted when the source access never happened.
         store0 = w.sc.positions.store
-        M.run!(w.plan); KernelAbstractions.synchronize(M.backend(dev))
+        M.run!(w.plan); KernelAbstractions.synchronize(dev)
         @test w.sc.positions.store === store0
 
         fresh = cloud(5_000)
         w.sc.positions[:] = fresh
-        M.run!(w.plan); KernelAbstractions.synchronize(M.backend(dev))
+        M.run!(w.plan); KernelAbstractions.synchronize(dev)
         @test w.sc.positions.store === store0             # in place
         @test Array(w.sc.positions) == fresh
 
         # And it stays that store, however many stores land in it.
         for _ in 1:8
             w.sc.positions[:] = cloud(5_000)
-            M.run!(w.plan); KernelAbstractions.synchronize(M.backend(dev))
+            M.run!(w.plan); KernelAbstractions.synchronize(dev)
             @test w.sc.positions.store === store0
         end
 
@@ -1735,7 +1735,7 @@ else
         v = Base.invokelatest(scene, 5_000)
         s0 = v.sc.positions.store
         v.sc.positions[1:100] = [Vec3f(9, 9, 9) for _ in 1:100]
-        M.run!(v.plan); KernelAbstractions.synchronize(M.backend(dev))
+        M.run!(v.plan); KernelAbstractions.synchronize(dev)
         got = Array(v.sc.positions)
         @test v.sc.positions.store === s0
         @test all(got[1:100] .== Ref(Vec3f(9, 9, 9)))
@@ -1794,7 +1794,7 @@ else
                             (out, a,
                              Int32(w), Int32(h), 2.0f0), (w, h); group, name = "transpose")
             M.run!(M.record!(M.Plan(g)))
-            KernelAbstractions.synchronize(M.backend(dev))
+            KernelAbstractions.synchronize(dev)
             Array(out)
         end
         want = [2.0f0 * src[(y - 1) * w + x] for x in 1:w for y in 1:h]
@@ -1823,7 +1823,7 @@ else
         M.copy!(g, "read", out, img)
         plan = M.record!(M.Plan(g))
         M.run!(plan)
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
 
         px = Array(M.storage(out))
         red(i) = Float32(px[i] & 0xff) / 255
@@ -1876,7 +1876,7 @@ else
 
         litbands() = begin
             M.run!(plan)
-            KernelAbstractions.synchronize(M.backend(dev))
+            KernelAbstractions.synchronize(dev)
             px = reshape(Array(M.storage(out)), N, N)      # row major, so [x, y]
             count(y -> px[N ÷ 2, y] != 0xff000000, 1:N) ÷ (N ÷ NB)
         end
@@ -1916,7 +1916,7 @@ else
             M.copy!(g, "read", out, img)
             plan = M.record!(M.Plan(g))
             M.run!(plan)
-            KernelAbstractions.synchronize(M.backend(dev))
+            KernelAbstractions.synchronize(dev)
             px = reshape(Array(M.storage(out)), N, N)      # row major, so [x, y]
             lit(x, y) = px[x, y] != 0xff000000
             (tl = lit(q, q), tr = lit(3q, q), bl = lit(q, 3q), br = lit(3q, 3q))
@@ -1992,7 +1992,7 @@ else
             M.copy!(g, "read", out, img)
             plan = M.record!(M.Plan(g))
             M.run!(plan)
-            KernelAbstractions.synchronize(M.backend(dev))
+            KernelAbstractions.synchronize(dev)
             count(!=(0xff000000), Array(M.storage(out)))
         end
 
@@ -2080,10 +2080,10 @@ else
         # And they compute what they should, the same on every run.
         for s in (a, b)
             M.run!(s.plan)
-            KernelAbstractions.synchronize(M.backend(dev))
+            KernelAbstractions.synchronize(dev)
             reference = Array(s.out)
             M.run!(s.plan)
-            KernelAbstractions.synchronize(M.backend(dev))
+            KernelAbstractions.synchronize(dev)
             @test Array(s.out) == reference
             @test all(>(0f0), reference)
         end
@@ -2124,7 +2124,7 @@ else
         @test pass.pass.depth === z
 
         M.run!(plan)
-        KernelAbstractions.synchronize(M.backend(dev))
+        KernelAbstractions.synchronize(dev)
         zs = reshape(Array(M.storage(out)), N, N)   # row major, so [x, y]
         @test zs[N ÷ 4, N ÷ 2] ≈ 0.35f0 atol = 1e-5   # the quad's depth, written
         @test zs[3N ÷ 4, N ÷ 2] ≈ 1f0                 # and the clear beside it

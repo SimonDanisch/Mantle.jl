@@ -590,7 +590,7 @@ naivedft(x) = [sum(x[n + 1] * cispi(-2k * n / length(x)) for n in 0:length(x)-1)
     @test maximum(abs.(ComplexF64.(vec(r)) .- want)) < 1e-3 * maximum(abs, want)
 
     sig = rand(Float32, 2000)
-    win = M.hannwindow(M.backend(dev), 400)
+    win = M.hannwindow(dev, 400)
     S = Array(M.stft(roc(sig), 400, 160, win))
     @test size(S) == (201, 2000 ÷ 160 + 1)
     # Frame 5, centred, spans samples 600..999: interior, so the padding at the

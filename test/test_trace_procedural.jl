@@ -6,13 +6,10 @@ Julia payload through `Mantle.procedural_candidate`, read back from
 
 The payload solves a sphere inside each box, with a radius per box read from a
 device array, so the hit has a real distance and a cell, and the rays meet
-several boxes so the NEAREST sphere has to win. On Metal everything between the
-payload and the hit fails SILENTLY when it is wrong — the candidate compiled as
-its own stage, its registration as a table-reachable function, the payload packed
-into the scene argument buffer, and the four-float round trip of the best hit: a
-table entry pointing at an inlined function, a builtin order off by one, a dropped
-`best` slot all link, dispatch, complete, and report a miss or an off-by-one cell.
-Hence both the distance and the cell are asserted.
+several boxes so the NEAREST sphere has to win. The payload's best hit makes a
+four-float round trip through the hit record, where a dropped or reordered slot
+still traces and reports a miss or an off-by-one cell. Hence both the distance and
+the cell are asserted.
 
 Point location among overlapping boxes, and a box-only structure that still
 builds, syncs and adapts, are `test_aabb_blas_overlap.jl` and
@@ -25,11 +22,12 @@ import LinearAlgebra
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
-"""A payload: one radius per box, in a device array."""
+"""A payload: one radius per box, in a device array, and whether its spheres are opaque."""
 struct RadiusElems{A}
     r::A
+    opaque::Bool
 end
-Adapt.adapt_structure(to, e::RadiusElems) = RadiusElems(Adapt.adapt(to, e.r))
+Adapt.adapt_structure(to, e::RadiusElems) = RadiusElems(Adapt.adapt(to, e.r), e.opaque)
 
 struct RadiusHit
     t::Float32
@@ -39,13 +37,14 @@ struct RadiusHit
 end
 
 Mantle.procedural_miss(::RadiusElems) = RadiusHit(1f30, 0f0, 0f0, UInt32(0))
+Mantle.procedural_opaque(e::RadiusElems) = e.opaque
 
 # Written exactly as `src/raytracing/accel.jl` documents: solve in OBJECT space,
-# ask the QUERY for the ray, and commit only for a `t` that improves on `best`.
-# Box `cell` (1-based) is centred on `(2 * (cell - 1), 0, 0)`.
-function Mantle.procedural_candidate(e::RadiusElems, best::RadiusHit)
-    cell = Mantle.candidate_primitive_index()
-    o, d = Mantle.candidate_object_ray()
+# ask the QUERY for the ray, and answer only a `t` that improves on `best`; the
+# traversal commits it. Box `cell` (1-based) is centred on `(2 * (cell - 1), 0, 0)`.
+function Mantle.procedural_candidate(e::RadiusElems, best::RadiusHit, q)
+    cell = Mantle.candidate_primitive_index(q)
+    o, d = Mantle.candidate_object_ray(q)
     @inbounds rad = e.r[cell]
     ex = o[1] - 2f0 * Float32(cell - 1); ey = o[2]; ez = o[3]
     b = ex*d[1] + ey*d[2] + ez*d[3]
@@ -54,10 +53,6 @@ function Mantle.procedural_candidate(e::RadiusElems, best::RadiusHit)
     if disc >= 0f0
         t = -b - sqrt(disc)
         if t > 1f-4 && t < best.t
-            Mantle.commit_intersection!(t)
-            # `cell % UInt32`, not `UInt32(cell)`: the checked conversion's
-            # `InexactError` path reaches for kernel state, which a Metal visible
-            # function has no more than a graphics stage does.
             return RadiusHit(t, 0f0, 0f0, cell % UInt32)
         end
     end
@@ -77,6 +72,13 @@ Mantle.procedural_bary(::RadiusElems, b::RadiusHit) =
     @inbounds hits[i]  = hit ? Int32(1) : Int32(0)
     @inbounds ts[i]    = hit ? t : -1f0
     @inbounds cells[i] = hit ? UInt32(bary[1]) : UInt32(0)
+end
+
+# `Raycore.transparent_hits` of the same rays, keeping four.
+@kernel function transparent_probe!(out, @Const(ys), accel, ox, limit)
+    i = @index(Global)
+    r = Raycore.Ray(o = Point3f(ox, ys[i], 0f0), d = Vec3f(1, 0, 0), t_max = 1f30)
+    @inbounds out[i] = Raycore.transparent_hits(accel, r, 0xff, Val(4), limit)
 end
 
 @testset "procedural geometry" begin
@@ -117,7 +119,7 @@ end
             push!(hw, blas, Mat4f(LinearAlgebra.I); instance_id = UInt32(0))
             # The payload is the field Hikari's `fem.jl` sets; `sync!` builds what
             # the traversal needs from it.
-            hw.procedural = RadiusElems(Mantle.devicearray(be, radii))
+            hw.procedural = RadiusElems(Mantle.devicearray(be, radii), true)
             Raycore.sync!(hw)
 
             ys = Float32[0.0, 0.4, 0.8, 1.2]
@@ -151,6 +153,43 @@ end
                     @test Int(gc[i]) == bc
                 end
             end
+        end
+    end
+    @testset "transparent_hits records a see-through payload's hits, stops at an opaque one's" begin
+        if !(Mantle.supports_hwtlas(be) && Mantle.supports_procedural_traversal(be))
+            @test_skip Mantle.supports_procedural_traversal(be)
+        else
+            # Five spheres along +x; a ray down the axis meets all five, at their
+            # near sides. A shadow ray through water (a level set with `shadows`)
+            # is this: each surface it crosses is recorded and shaded by the caller.
+            radii = Float32[0.75, 0.5, 0.9, 0.6, 0.8]
+            nb = length(radii)
+            aabbs = [Mantle.AABB(Point3f(2f0*i - 1, -1, -1), Point3f(2f0*i + 1, 1, 1)) for i in 0:(nb - 1)]
+            blas = Mantle.build_accel!(Mantle.batchqueue(Mantle.Device(be))) do ctx
+                Mantle.build_blas_aabb(ctx, aabbs)
+            end
+            dy = Mantle.devicearray(be, Float32[0])
+            # One structure per payload: the payload is set with the push that
+            # makes the structure rebuild, as Hikari does.
+            function shoot(opaque; limit = 10)
+                hw = Mantle.HWTLAS{Raycore.Triangle{UInt32}}(be)
+                push!(hw, blas, Mat4f(LinearAlgebra.I); instance_id = UInt32(7))
+                hw.procedural = RadiusElems(Mantle.devicearray(be, radii), opaque)
+                Raycore.sync!(hw)
+                out = Adapt.adapt(be, [Raycore.TransparentHits{4}()])
+                transparent_probe!(be, 64)(out, dy, Adapt.adapt(be, hw), -5f0, limit; ndrange = 1)
+                KA.synchronize(be)
+                return only(Array(out))
+            end
+            @test shoot(true).blocked
+            th = shoot(false)
+            near = [5f0 + 2f0 * (p - 1) - radii[p] for p in 1:nb]
+            @test !th.blocked && th.count == nb
+            @test [h.t for h in th.hits] ≈ near[1:4] rtol = 1f-5
+            @test all(h -> h.kind == Raycore.HIT_GENERATED && h.custom == 7, th.hits)
+            # The payload's best rides in the record: the cell, 1-based.
+            @test [Int(Mantle.unpackbest(RadiusHit, h.a).cell) for h in th.hits] == 1:4
+            @test shoot(false; limit = 4).blocked
         end
     end
 end

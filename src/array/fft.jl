@@ -579,7 +579,7 @@ Declare a batched complex FFT along the first dimension: the graph form of
 """
 function fftany_dispatch!(g, dst, src; inverse::Bool = false, skew::Bool = FFT_SKEW,
                           name::AbstractString = "fft")
-    dispatchlaunches!(g,fftany_launches(dst,src,caps(backend(g.dev)); inverse,skew);name)
+    dispatchlaunches!(g,fftany_launches(dst,src,caps(g.dev); inverse,skew);name)
     return dst
 end
 

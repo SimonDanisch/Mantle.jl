@@ -38,14 +38,6 @@ export MeshConfig, ObjectConfig, PrimitiveEmitter, NativeEmitter, MeshEmitter,
     set_mesh_point!, set_mesh_primitive_data!, set_mesh_outputs!, set_mesh_groups!,
     mesh_thread_index, mesh_group_index
 export Flat, isflat, unflat, GeometryConfig
-using KernelInterface: rt_launch_id_x, rt_hit_object_trace_ray, rt_reorder_thread,
-    rt_hit_object_execute_shader, rt_ignore_intersection, rt_primitive_id,
-    rt_instance_id, rt_instance_custom_index, rt_ray_tmax, rt_hit_bary_u,
-    rt_hit_bary_v
-export rt_launch_id_x, rt_hit_object_trace_ray, rt_reorder_thread,
-    rt_hit_object_execute_shader, rt_ignore_intersection, rt_primitive_id,
-    rt_instance_id, rt_instance_custom_index, rt_ray_tmax, rt_hit_bary_u,
-    rt_hit_bary_v
 
 using KernelInterface: primitivevertices,
     Topology, TriangleList, TriangleStrip, LineList,
@@ -101,7 +93,7 @@ include("runtime/cache.jl")
 include("runtime/backendhooks.jl")  # declared here, answered in vulkan/ or metal/
 include("runtime/format.jl")
 include("runtime/api.jl")
-include("memory/array.jl")    # names `Device` and `backend`, both from api.jl
+include("memory/array.jl")    # names `Device`, from api.jl
 # `trydevicearray` needs the array API above.
 include("runtime/lifecycle.jl")
 include("runtime/dispatch.jl")
@@ -143,7 +135,6 @@ include("geometry/narrow_phase.jl")   # needs both
 include("graph/backend.jl")
 include("graph/packing.jl")
 
-include("raytracing/pipeline.jl")
 include("raytracing/batches.jl")
 include("raytracing/accel.jl")
 include("raytracing/geometry.jl")
@@ -173,7 +164,7 @@ export Backend, VulkanAPI, MetalAPI, WebGPUAPI, ROCmAPI
 export Usage, ResourceKind, BufferKind, ImageKind, AccelKind
 export Access, ReadOnly, WriteOnly, ReadWrite, NoAccess, Src, Dst
 export Vertices, Indices, Indirect, Predicated, Uniform, Sampled, Present, Undefined
-export CopySrc, CopyDst, TraceRead, TraceBuild, Storage, ColorAttachment, Depth, Unordered, Traced
+export CopySrc, CopyDst, TraceRead, TraceBuild, Storage, ColorAttachment, Depth, Unordered
 export reads, writes, discards, kindof, unordered, inner
 export Transition, ResourceState, transition!, transitions, needs_transition, barrierhazards
 export stages, access, layout
@@ -192,7 +183,7 @@ export SubmitChannel, deviceof, hold!, oneshot!, acquire!, Submission
 export ownthread, WrongThread
 export Stamp, stampof, retire!, reclaim!, drain!, handover!
 export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
-export supports_graphics, supports_geometry_stage, supports_tessellation, supports_batch_queue, use_bindings!, supports_rt_pipeline
+export supports_graphics, supports_geometry_stage, supports_tessellation, supports_batch_queue, use_bindings!
 export supports_procedural_traversal, supports_hwtlas, supports_float64, supports_int64_atomics
 export batchqueue
 export defaultbackend, availablebackends, eachbackend, register_backend!
@@ -220,13 +211,12 @@ export GraphicsPipeline, Rasterizer
 export DrawIndirectCommand
 export MeshPipeline, meshconfig, objectconfig
 export supports_mesh_pipeline
-export RayTracingPipeline, AdaptedAccel, tracescall
+export AdaptedAccel
 # Implemented by a scene to add non-triangle geometry to traversal.
-export procedural_miss, procedural_candidate, procedural_commit, procedural_bary
-export candidate_primitive_index, candidate_object_ray, commit_intersection!
+export procedural_miss, procedural_candidate, procedural_opaque, procedural_commit, procedural_bary
+export candidate_primitive_index, candidate_object_ray
 
 export build_accel!, build_blas_aabb, refit_tlas!
-export trace!, Trace
 export primitivevertices
 export Topology, TriangleList, TriangleStrip, LineList, LineStrip, PointList,
        PatchList, LineListAdjacency, LineStripAdjacency
@@ -239,7 +229,7 @@ export ContactRecord, NO_CONTACT, narrow_phase_kernel, narrow_phase_contacts_ker
 
 export pixelbytes
 export LoadOp, Clear, Keep, Discard
-export Device, Resource, Graph, Plan, Transient, Window, backend, screenshot
+export Device, Resource, Graph, Plan, Transient, Window, screenshot
 export DeviceInfo, devices, defaultdevice!
 export DebugConfig, debugenv, validating, validationmessages!, submissions, retired,
     trydevicearray

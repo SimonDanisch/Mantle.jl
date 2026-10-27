@@ -275,8 +275,7 @@ end
 # `draw!` is core's (`graphics/record.jl`), over `compile_draw` and `record_draw!`.
 
 
-# Answered for the backend and the device, since a caller may hold either.
-Mantle.supports_mesh_pipeline(::Metal.MetalBackend) = true
+Mantle.supports_mesh_pipeline(::MetalDevice) = true
 
 # Geometry pipelines run as mesh pipelines via `Mantle.lower_geometry_to_mesh`,
 # so `supports_geometry_stage` is `false` and the same `GraphicsPipeline` still draws.

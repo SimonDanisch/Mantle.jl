@@ -51,7 +51,7 @@ submits(f, dev) = (s0 = Mantle.submissions(dev); f(); Mantle.submissions(dev) - 
 
 @testset "submissions per call" begin
     dev = Mantle.Device(TESTBACKEND)
-    be = Mantle.backend(dev)
+    be = dev
     n = 256
 
     @testset "a launch and the wait for it are one submission" begin

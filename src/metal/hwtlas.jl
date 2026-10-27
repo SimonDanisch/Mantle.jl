@@ -1,104 +1,12 @@
-# Metal's incremental hardware TLAS and its device-side traversal. `intersector<>`
-# is a C++ template with no AIR symbol, so traversal is MSL (`HWTLAS_MSL`) linked
-# into each calling kernel through `MTLLinkedFunctions` and reached by an extern
-# `ccall` (Metal.jl's `isintrinsic` accepts the `__metal_linked_` prefix). A Julia
-# kernel cannot take an `instance_acceleration_structure`, so the TLAS travels in
-# an argument buffer, `AdaptedAccel.scene`.
+# Metal's incremental hardware TLAS and its device-side traversal: the query verbs
+# (`raytracing/accel.jl`) on Metal's intersection query, through the AIR intrinsics
+# Metal.jl wraps (`Metal.intersection_query`).
 
-const HWTLAS_MSL = """
-#include <metal_stdlib>
-#include <metal_raytracing>
-using namespace metal;
-using namespace raytracing;
-
-struct SceneAB { instance_acceleration_structure accel; };
-// `inst` is the instance INDEX, which picks the instance's triangles; `user` is
-// its CUSTOM index (the descriptor's `userID`), which Hikari reads as a
-// per-instance material override. Two different numbers, and Vulkan has both.
-struct HitOut  { float t; uint hit; uint prim; uint inst; float bu; float bv; uint user; };
-
-// Returned BY VALUE. A struct of scalars matches what Julia's `ccall` expects on
-// the same LLVM back-end, and it is the only shape that avoids giving every
-// caller a scratch buffer to write hits into.
-static inline HitOut pack(float tmax, thread const intersection_result<instancing, triangle_data> &res) {
-    HitOut h;
-    if (res.type == intersection_type::none) {
-        // A miss reports tmax, matching the software traversal.
-        h.t = tmax; h.hit = 0u; h.prim = 0u; h.inst = 0u; h.bu = 0.0f; h.bv = 0.0f;
-        h.user = 0u;
-    } else {
-        h.t = res.distance; h.hit = 1u;
-        h.prim = res.primitive_id; h.inst = res.instance_id;
-        h.user = res.user_instance_id;
-        float2 bc = res.triangle_barycentric_coord;
-        h.bu = bc.x; h.bv = bc.y;
-    }
-    return h;
-}
-
-// `accept_any_intersection` is Metal's spelling of Vulkan's
-// RayFlagsTerminateOnFirstHitKHR: stop at the first hit rather than the nearest.
-static inline HitOut trace(device const SceneAB *scene,
-        float ox, float oy, float oz, float dx, float dy, float dz,
-        float tmin, float tmax, uint cull, bool anyhit)
-{
-    ray r; r.origin = float3(ox,oy,oz); r.direction = float3(dx,dy,dz);
-    r.min_distance = tmin; r.max_distance = tmax;
-    intersector<instancing, triangle_data> isect;
-    isect.accept_any_intersection(anyhit);
-    return pack(tmax, isect.intersect(r, scene->accel, cull));
-}
-
-[[visible]] HitOut __metal_linked_closest(device const SceneAB *scene,
-        float ox, float oy, float oz, float dx, float dy, float dz,
-        float tmin, float tmax, uint cull)
-{ return trace(scene, ox,oy,oz, dx,dy,dz, tmin, tmax, cull, false); }
-
-[[visible]] HitOut __metal_linked_any(device const SceneAB *scene,
-        float ox, float oy, float oz, float dx, float dy, float dz,
-        float tmin, float tmax, uint cull)
-{ return trace(scene, ox,oy,oz, dx,dy,dz, tmin, tmax, cull, true); }
-"""
-
-"""The hit record the linked MSL functions return; mirrors `HitOut` field for field."""
-struct MetalHit
-    t::Float32
-    hit::UInt32
-    prim::UInt32
-    inst::UInt32
-    bu::Float32
-    bv::Float32
-    user::UInt32
-end
-@assert sizeof(MetalHit) == 28 "MetalHit must match MSL's HitOut (28 bytes)"
-
-# Per `MTLDevice`, as Metal.jl's linked-function registry is: `MTLLibrary(dev,
-# source)` runs the Metal frontend, tens of milliseconds.
-const LINKED_MSL = Dict{Tuple{Any,Symbol},MTL.MTLLibrary}()
-const LINKED_MSL_LOCK = ReentrantLock()
-
-"""
-    linkmsl!(d, tag, source, names) -> MTLLibrary
-
-Compile `source` once per device and register its `[[visible]]` functions
-`names` for linking into the kernels that call them.
-"""
-function linkmsl!(d::MetalDevice, tag::Symbol, source::String, names)
-    Base.@lock LINKED_MSL_LOCK get!(LINKED_MSL, (pointer(d.dev), tag)) do
-        lib = MTL.MTLLibrary(d.dev, source)
-        for name in names
-            Metal.register_linked_function!(d.dev, MTL.MTLFunction(lib, name))
-        end
-        lib
-    end
-end
-traversallib(d::MetalDevice) =
-    linkmsl!(d, :traversal, HWTLAS_MSL, ("__metal_linked_closest", "__metal_linked_any"))
-
-# Metal cannot infer residency through an argument buffer, and a non-resident
-# structure makes rays miss silently. Through Metal.jl's per-queue residency set
-# rather than `add_allocation!`: the set holds strong references, and only
-# allocations Metal.jl tracks leave it when freed (`forget_resident!`).
+# Metal cannot infer residency for a structure a kernel names only by its
+# `gpuResourceID`, and a non-resident structure makes rays miss silently. Through
+# Metal.jl's per-queue residency set rather than `add_allocation!`: the set holds
+# strong references, and only allocations Metal.jl tracks leave it when freed
+# (`forget_resident!`).
 function make_resident!(d::MetalDevice, resources...)
     Metal.install_queue_residency!(cmdqueue(d), d.dev)
     for r in resources
@@ -108,63 +16,88 @@ function make_resident!(d::MetalDevice, resources...)
     return nothing
 end
 
-const DeviceU8Ptr = Core.LLVMPtr{UInt8, Metal.AS.Device}
-
-@inline function unpackhit(accel, h::MetalHit)
-    if h.hit == UInt32(0)
-        return (false, accel.empty, h.t, SVector{3,Float32}(1f0, 0f0, 0f0), UInt32(0))
-    end
-    # As on Vulkan: per-instance offset into the flat triangle array plus the
-    # primitive index within the instance's BLAS.
-    tri = hittriangle(accel, h.inst, h.prim)
-    bary = SVector{3,Float32}(1f0 - h.bu - h.bv, h.bu, h.bv)
-    # Fifth value: the instance's custom index (descriptor `userID`, Vulkan's
-    # `gl_InstanceCustomIndexEXT`), not its index. Hikari's `resolve_mi_idx` reads
-    # it as a per-instance medium-interface override, where `meshscatter!` puts
-    # each instance's material; 0 or `h.inst` here renders the wrong material.
-    return (true, tri, h.t, bary, h.user)
+"""Metal's query object, allocated in thread memory for one query."""
+struct MetalRayQuery
+    q::Metal.IntersectionQuery
 end
 
-# Dispatch on the triangle array type (`hwtlas` is `nothing` on every backend
-# after `Adapt.adapt`) and statically on `procedural`: `nothing` takes the cheaper
-# `intersector<>` call instead of a query that calls back into Julia per candidate.
-# `mask % UInt32` avoids an error branch in every kernel.
-const MetalAdaptedTri  = AdaptedAccel{<:Any, <:Metal.MtlDeviceArray, <:Any, <:Any, <:Any, Nothing}
-const MetalAdaptedProc = AdaptedAccel{<:Any, <:Metal.MtlDeviceArray, <:Any, <:Any, <:Any, <:Any}
-
-"""
-    unpack_procedural(accel, h::MetalHit)
-
-A committed procedural hit as a `closest_hit` tuple. The payload's
-`procedural_commit` rebuilds the primitive from the best hit's four floats, so
-the tuple shape and primitive type match a triangle hit.
-"""
-@inline function unpack_procedural(accel, h::MetalHit)
-    if h.hit == UInt32(0)
-        return (false, accel.empty, h.t, SVector{3,Float32}(1f0, 0f0, 0f0), UInt32(0))
-    end
-    B = typeof(procedural_miss(accel.procedural))
-    best = unpackbest(B, (h.t, h.bu, h.bv, as_f32(h.inst)))
-    prim = procedural_commit(accel.procedural, best, h.prim, h.t, accel.empty)
-    return (true, prim, h.t, procedural_bary(accel.procedural, best), h.user)
+# The structure travels as its `gpuResourceID` (`AdaptedAccel.scene`). Forced opaque
+# for `query_begin`; a transparent query leaves it to the instances (`writeinstances!`).
+@inline function query_reset(accel::AdaptedAccel{<:Any, <:Metal.MtlDeviceArray}, ray::Raycore.AbstractRay,
+                             mask::Integer, forced_opacity::UInt32, anyhit::Bool)
+    q = Metal.intersection_query()
+    o = ray.o; d = ray.d
+    Metal.query_reset!(q, (Float32(o[1]), Float32(o[2]), Float32(o[3])),
+                       (Float32(d[1]), Float32(d[2]), Float32(d[3])),
+                       Float32(ray.t_min), Float32(ray.t_max), accel.scene, mask % UInt32,
+                       forced_opacity, anyhit)
+    return MetalRayQuery(q)
 end
 
-# `closest_hit` and `any_hit` for triangle-only and procedural scenes: the linked
-# function and the unpacking differ, the call does not.
-for (verb, linked) in ((:closest_hit, "closest"), (:any_hit, "any")),
-    (A, suffix, unpack) in ((:MetalAdaptedTri, "", :unpackhit), (:MetalAdaptedProc, "_proc", :unpack_procedural))
-    name = "extern __metal_linked_$(linked)$(suffix)"
-    @eval @propagate_inbounds function Raycore.$verb(accel::$A, ray::Raycore.AbstractRay, mask::Integer)
-        o = ray.o; d = ray.d
-        p = reinterpret(DeviceU8Ptr, pointer(accel.scene))
-        h = ccall($name, llvmcall, MetalHit,
-                  (DeviceU8Ptr, Float32,Float32,Float32, Float32,Float32,Float32, Float32,Float32, UInt32),
-                  p, Float32(o[1]), Float32(o[2]), Float32(o[3]),
-                  Float32(d[1]), Float32(d[2]), Float32(d[3]),
-                  Float32(ray.t_min), Float32(ray.t_max), mask % UInt32)
-        return $unpack(accel, h)
-    end
+@inline query_begin(accel::AdaptedAccel{<:Any, <:Metal.MtlDeviceArray}, ray::Raycore.AbstractRay,
+                    mask::Integer, anyhit::Bool) =
+    query_reset(accel, ray, mask, Metal.FORCED_OPACITY_OPAQUE, anyhit)
+@inline query_begin_transparent(accel::AdaptedAccel{<:Any, <:Metal.MtlDeviceArray}, ray::Raycore.AbstractRay,
+                                mask::Integer) =
+    query_reset(accel, ray, mask, Metal.FORCED_OPACITY_NONE, true)
+
+@inline query_next!(m::MetalRayQuery) = Metal.query_next!(m.q)
+@inline candidate_is_box(m::MetalRayQuery) = Metal.candidate_type(m.q) == Metal.INTERSECTION_BOUNDING_BOX
+@inline candidate_primitive_index(m::MetalRayQuery) = Int(Metal.candidate_primitive_id(m.q)) + 1
+# The candidate's ray is in the candidate instance's object space.
+@inline candidate_object_ray(m::MetalRayQuery) =
+    (Vec3f(Metal.candidate_ray_origin(m.q)...), Vec3f(Metal.candidate_ray_direction(m.q)...))
+@inline candidate_ids(m::MetalRayQuery) =
+    (Metal.candidate_instance_id(m.q), Metal.candidate_primitive_id(m.q), Metal.candidate_user_instance_id(m.q))
+@inline function candidate_triangle(m::MetalRayQuery)
+    u, v = Metal.candidate_triangle_barycentric(m.q)
+    return (Metal.candidate_triangle_distance(m.q), u, v)
 end
+@inline commit_triangle!(m::MetalRayQuery) = Metal.commit_triangle!(m.q)
+@inline commit_intersection!(m::MetalRayQuery, t) = Metal.commit_bounding_box!(m.q, Float32(t))
+
+@inline function committed_kind(m::MetalRayQuery)
+    kind = Metal.committed_type(m.q)
+    kind == Metal.INTERSECTION_TRIANGLE && return Raycore.HIT_TRIANGLE
+    kind == Metal.INTERSECTION_BOUNDING_BOX && return Raycore.HIT_GENERATED
+    return Raycore.HIT_MISS
+end
+# `instance_id` is the instance INDEX, which picks the instance's triangles;
+# `user_instance_id` its CUSTOM index (the descriptor's `userID`), which Hikari reads
+# as a per-instance material override. Two different numbers, as on Vulkan.
+@inline committed_ids(m::MetalRayQuery) =
+    (Metal.committed_distance(m.q), Metal.committed_instance_id(m.q),
+     Metal.committed_primitive_id(m.q), Metal.committed_user_instance_id(m.q))
+@inline committed_barycentrics(m::MetalRayQuery) = Metal.committed_triangle_barycentric(m.q)
+@inline query_end!(m::MetalRayQuery) = Metal.query_release!(m.q)
+
+# Without procedural geometry no candidate of an opaque query needs an answer, and
+# Metal traverses in one `intersect` call instead of an intersection query, its
+# native spelling of the same traversal: the query was 5-10% slower on an M5 in
+# subsurface and alpha-cutout scenes, which trace most. The loop in `query_record`
+# then never runs. A transparent query, whose candidates are recorded, is a query.
+"""Metal's answer to a traversal with no candidates: one `intersect` call's result."""
+struct MetalIntersection
+    r::Metal.IntersectionResult
+end
+
+@inline function query_begin(accel::AdaptedAccel{<:Any, <:Metal.MtlDeviceArray, <:Any, <:Any, <:Any, Nothing},
+                             ray::Raycore.AbstractRay, mask::Integer, anyhit::Bool)
+    o = ray.o; d = ray.d
+    r = Metal.intersect((Float32(o[1]), Float32(o[2]), Float32(o[3])),
+                        (Float32(d[1]), Float32(d[2]), Float32(d[3])),
+                        Float32(ray.t_min), Float32(ray.t_max), accel.scene, mask % UInt32,
+                        Metal.FORCED_OPACITY_OPAQUE, true, anyhit)
+    return MetalIntersection(r)
+end
+
+@inline query_next!(::MetalIntersection) = false
+@inline committed_kind(m::MetalIntersection) =
+    m.r.type == Metal.INTERSECTION_TRIANGLE ? Raycore.HIT_TRIANGLE : Raycore.HIT_MISS
+@inline committed_ids(m::MetalIntersection) =
+    (m.r.distance, m.r.instance_id, m.r.primitive_id, m.r.user_instance_id)
+@inline committed_barycentrics(m::MetalIntersection) = m.r.barycentric
+@inline query_end!(::MetalIntersection) = nothing
 
 """One batch of instances that all reference the same BLAS."""
 const MetalInstanceBatch{Tri} =
@@ -179,8 +112,7 @@ Core's `BatchedTLAS` owns registration and batch mutation; this type owns native
 builds, record packing, residency and traversal.
 """
 mutable struct MetalHWTLAS{Tri} <: BatchedTLAS{Tri}
-    backend::Any
-    device::MetalDevice
+    backend::MetalDevice
 
     blas_list::Vector{MetalBLAS}
     # Order, handles and reindex on delete are core's (`raytracing/batches.jl`).
@@ -195,43 +127,32 @@ mutable struct MetalHWTLAS{Tri} <: BatchedTLAS{Tri}
     # transform (`AdaptedAccel.instances`). A refit writes them in place, so an
     # adapted form a plan holds sees the change.
     records::Any          # Union{Nothing, MtlVector{Raycore.InstanceRecord}}
-    scene_buf::Any        # Union{Nothing, MtlVector{UInt64}}: the argument buffer
     static_tlas::Any
-    # Procedural traversal: the candidate's function table, the pipeline that
-    # owns its handle, and the payload bytes. `nothing` for a triangles-only scene.
-    proc_table::Any
-    proc_pipeline::Any
-    proc_payload::Any
 
-    # The scene's procedural geometry or `nothing`, which selects the
-    # triangles-only traversal. Set by the caller that pushes an AABB BLAS
-    # (Hikari's `push!(scene, mesh, ::FEMMaterial)`), read by `sync!` to build
-    # the candidate's table, passed to kernels through `AdaptedAccel`.
+    # The scene's procedural geometry or `nothing`, which folds the box branch out of
+    # the traversal. Set by the caller that pushes an AABB BLAS (Hikari's
+    # `push!(scene, mesh, ::FEMMaterial)`), passed to kernels through `AdaptedAccel`.
     procedural::Any
 
     dirty::Bool
     transforms_dirty::Bool
 end
 
-HWTLAS{Tri}(backend::Metal.MetalBackend; kw...) where {Tri} = MetalHWTLAS{Tri}(backend; kw...)
+HWTLAS{Tri}(d::MetalDevice; kw...) where {Tri} = MetalHWTLAS{Tri}(d; kw...)
 
-function MetalHWTLAS{Tri}(backend::Metal.MetalBackend) where {Tri}
-    d = Device(backend)
-    traversallib(d)
-    MetalHWTLAS{Tri}(backend, d,
+MetalHWTLAS{Tri}(d::MetalDevice) where {Tri} =
+    MetalHWTLAS{Tri}(d,
         MetalBLAS[],
         Mantle.InstanceBatches{MetalInstanceBatch{Tri}}(),
         Raycore.Bounds3(),
         nothing, nothing, nothing, nothing, nothing, nothing,
-        nothing, nothing, nothing, nothing,
         true, false)
-end
 
-Raycore.wait_for_gpu!(t::MetalHWTLAS) = (waitidle(t.device); t)
+Raycore.wait_for_gpu!(t::MetalHWTLAS) = (waitidle(t.backend); t)
 
 AdaptedAccel(t::MetalHWTLAS{Tri}) where {Tri} =
-    AdaptedAccel(t, t.tri_gpu, t.off_gpu, Raycore.empty_triangle(Tri), t.scene_buf,
-                 t.procedural, t.records)
+    AdaptedAccel(t, t.tri_gpu, t.off_gpu, Raycore.empty_triangle(Tri),
+                 reinterpret(UInt64, t.built.handle.gpuResourceID), t.procedural, t.records)
 
 function Adapt.adapt_structure(to, t::MetalHWTLAS)
     Raycore.sync!(t)
@@ -242,16 +163,15 @@ end
 # walker would recurse forever.
 Mantle.holdleaves!(holder, t::MetalHWTLAS) = Mantle.holdleaves!(holder, t.static_tlas)
 
-"""Adapt the arrays and the in-band scene buffer, dropping the host `hwtlas` owner."""
-Adapt.adapt_structure(to::Metal.Adaptor, accel::AdaptedAccel) =
-    adaptaccel(to, accel, Base.Fix1(Adapt.adapt, to))
+"""Adapt the arrays, dropping the host `hwtlas` owner."""
+Adapt.adapt_structure(to::Metal.Adaptor, accel::AdaptedAccel) = adaptaccel(to, accel)
 
 # `vertices` comes packed from core, three consecutive vertices per triangle.
 function buildgeometry!(t::MetalHWTLAS, vertices)
-    vbuf = MTL.MTLBuffer(t.device.dev, sizeof(vertices); storage = Metal.SharedStorage)
+    vbuf = MTL.MTLBuffer(t.backend.dev, sizeof(vertices); storage = Metal.SharedStorage)
     GC.@preserve vertices unsafe_copyto!(convert(Ptr{NTuple{3,Float32}}, MTL.contents(vbuf)),
                                         pointer(vertices), length(vertices))
-    return build_blas(t.device, vbuf, length(vertices) ÷ 3)
+    return build_blas(t.backend, vbuf, length(vertices) ÷ 3)
 end
 
 geometryref(::MetalHWTLAS, i::Int) = i
@@ -267,9 +187,10 @@ function updatebatch!(t::MetalHWTLAS, batch, transforms)
 end
 
 # The descriptor Metal builds from, naming geometry `index` (zero-based) in the
-# structure's list.
-@inline instancerecord(::Type{MetalInstanceDescriptor}, r, (index, options), keep::UInt32) =
-    MetalInstanceDescriptor(r, index, options, keep)
+# structure's list, opaque or not whatever its geometry was built as.
+@inline instancerecord(::Type{MetalInstanceDescriptor}, r, index::UInt32, keep::UInt32, opaque::Bool) =
+    MetalInstanceDescriptor(r, index, opaque ? UInt32(MTL.MTLAccelerationStructureInstanceOptionOpaque) :
+                                              UInt32(MTL.MTLAccelerationStructureInstanceOptionNonOpaque), keep)
 
 """
     writeinstances!(t, descriptors, shading)
@@ -279,13 +200,12 @@ build or refit that follows runs on a command buffer of its own, which nothing
 orders after Metal.jl's batch.
 """
 function writeinstances!(t::MetalHWTLAS, descriptors::MtlArray, shading::MtlArray)
-    options = UInt32(MTL.MTLAccelerationStructureInstanceOptionOpaque)
     offset = 0
     for b in t.instances
         b.n == 0 && continue
         KI.Kernel(t.backend, instances_kernel!)(descriptors, shading, b.records,
-            Int32(offset), Int32(b.n), (UInt32(b.blas - 1), options),
-            b.hidden ? UInt32(0) : UInt32(0xff); ndrange = b.n)
+            Int32(offset), Int32(b.n), UInt32(b.blas - 1),
+            b.hidden ? UInt32(0) : UInt32(0xff), b.opaque; ndrange = b.n)
         offset += b.n
     end
     KA.synchronize(t.backend)
@@ -303,7 +223,7 @@ canrefit(t::MetalHWTLAS) =
 # kernels retain the records' device view.
 function build!(t::MetalHWTLAS, ::Refit)
     writeinstances!(t, t.built.instances, t.records)
-    refit_tlas!(t.device, t.built)
+    refit_tlas!(t.backend, t.built)
     return t
 end
 
@@ -319,63 +239,17 @@ function build!(t::MetalHWTLAS{Tri}, ::Rebuild) where {Tri}
     descriptors = MtlArray{MetalInstanceDescriptor}(undef, max(total, 1))
     t.records = MtlArray{Raycore.InstanceRecord}(undef, max(total, 1))
     writeinstances!(t, descriptors, t.records)
-    t.built = build_accel!(t.device, t.blas_list, descriptors, total; refittable = true)
+    t.built = build_accel!(t.backend, t.blas_list, descriptors, total; refittable = true)
     t.tri_gpu = MtlArray(metadata.triangles)
     t.off_gpu = MtlArray(metadata.hits)
 
-    # The argument buffer the kernel dereferences: the TLAS resource ID, or with
-    # procedural geometry `SceneProcAB`'s layout in `procedural.jl`,
-    # `{accel, visible_function_table, device void *payload}`.
-    if t.procedural === nothing
-        t.scene_buf = MtlArray(reinterpret(UInt64, [t.built.handle.gpuResourceID]))
-    else
-        t.proc_payload = procedural_payload_bytes(t.procedural)
-        t.proc_table, t.proc_pipeline =
-            procedural_table(t.device, t.procedural, typeof(procedural_miss(t.procedural)))
-        t.scene_buf = MtlArray(UInt64[
-            reinterpret(UInt64, t.built.handle.gpuResourceID),
-            reinterpret(UInt64, t.proc_table.gpuResourceID),
-            # The GPU address, not `pointer`: the shader dereferences it. Like
-            # any buffer reached by a stored address it must be made resident.
-            UInt64(t.proc_payload.data[].buffer.gpuAddress) +
-                UInt64(t.proc_payload.offset * sizeof(UInt8)),
-        ])
-        # Reached through the argument buffer, so Metal cannot infer residency.
-        make_resident!(t.device, t.proc_table, t.proc_payload.data[].buffer)
-        # Also whatever the device addresses in the payload point at.
-        procedural_resident!(t.device, t.procedural)
-    end
-
     # Non-resident structures are not mapped for the dispatch: every ray misses silently.
-    make_resident!(t.device, t.built.handle, (b.handle for b in t.blas_list)...)
+    make_resident!(t.backend, t.built.handle, (b.handle for b in t.blas_list)...)
     return t
 end
 
-# Traversal is a linked MSL function called from the shading kernel: hardware
-# traversal, but no shader binding table or indirect trace-rays command.
-supports_rt_pipeline(::Metal.MetalBackend) = false
-supports_rt_pipeline(::MetalHWTLAS) = false
-
-# AABB geometry: an MSL `intersection_query<>` loop whose body is the caller's
-# `procedural_candidate`, compiled to an AIR visible function and reached through
-# a table (`procedural.jl`).
-supports_procedural_traversal(::Metal.MetalBackend) = true
+# AABB geometry: the query offers each box to the payload's `procedural_candidate`.
+supports_procedural_traversal(::MetalDevice) = true
 # Every Apple-silicon GPU builds and traverses `MTLAccelerationStructure`s.
-supports_hwtlas(::Metal.MetalBackend) = true
+supports_hwtlas(::MetalDevice) = true
 supports_procedural_traversal(::MetalHWTLAS) = true
-
-# The candidate verbs inside a procedural visible function. Overlays in Metal.jl's
-# method table, as Vulkan's are in Lava's: a Mac compiles both, so plain methods
-# would be defined twice. The values arrive as parameters `stage_builtins!`
-# appends, as for `vertex_index()`.
-
-@device_override @inline candidate_primitive_index() = Int(Metal.candidate_prim_raw()) + 1
-
-@device_override @inline candidate_object_ray() =
-    (Vec3f(Metal.candidate_ox(), Metal.candidate_oy(), Metal.candidate_oz()),
-     Vec3f(Metal.candidate_dx(), Metal.candidate_dy(), Metal.candidate_dz()))
-
-# A no-op: a payload calls this only for a `t` that improves its running best and
-# returns that best, so the MSL loop compares the returned `t` with the one it
-# sent and issues `commit_bounding_box_intersection` itself.
-@device_override @inline commit_intersection!(t) = nothing

@@ -2,11 +2,9 @@ using Test, Mantle
 using KernelAbstractions
 import KernelInterface as KI
 
-# The reported array backend and compiler backend can be different (ROCm).
+# An array can report its own package's backend, which resolves to its device
+# (Metal.jl's `MetalBackend`, AMDGPU.jl's `ROCBackend`); the device compiles.
 # Conversion can also change the callable type, just as it changes array types.
-struct PreparationCompiler
-    launches::Vector{Any}
-end
 
 KernelAbstractions.@kernel function preparation_group!(out)
     i = @index(Global)
@@ -25,14 +23,12 @@ end
     @test all(>(0), out)
 end
 struct PreparationDevice <: Mantle.Device
-    compiler::PreparationCompiler
+    launches::Vector{Any}
 end
 struct PreparationBackend
     device::PreparationDevice
 end
-Mantle.backend(d::PreparationDevice) = PreparationBackend(d)
 Mantle.todevice(b::PreparationBackend) = b.device
-Mantle.kibackend(d::PreparationDevice) = d.compiler
 
 struct HostCallable
     offset::Float32
@@ -47,33 +43,32 @@ struct ConvertedArgument
     data::Vector{Float32}
 end
 (f::HostCallable)(a) = (a.data .+= f.offset; nothing)
-KI.argconvert(::PreparationCompiler, f::HostCallable) = ConvertedCallable(f.offset)
-KI.argconvert(::PreparationCompiler, a::HostArgument) = ConvertedArgument(a.data)
+KI.argconvert(::PreparationDevice, f::HostCallable) = ConvertedCallable(f.offset)
+KI.argconvert(::PreparationDevice, a::HostArgument) = ConvertedArgument(a.data)
 
 struct PreparedKernel{T}
-    compiler::PreparationCompiler
+    device::PreparationDevice
     callable::ConvertedCallable
 end
-function KI.kernel_function(be::PreparationCompiler, f::ConvertedCallable, ::Type{T}) where {T}
+function KI.kernel_function(d::PreparationDevice, f::ConvertedCallable, ::Type{T}) where {T}
     T === Tuple{ConvertedArgument} || error("compiled the host argument ABI")
-    return PreparedKernel{T}(be, f)
+    return PreparedKernel{T}(d, f)
 end
 function (k::PreparedKernel{T})(a::HostArgument; ndrange, workgroupsize=nothing) where {T}
-    converted = KI.argconvert(k.compiler, a)
+    converted = KI.argconvert(k.device, a)
     for i in 1:ndrange
         converted.data[i] += k.callable.offset
     end
-    push!(k.compiler.launches, (ndrange, workgroupsize))
+    push!(k.device.launches, (ndrange, workgroupsize))
     return nothing
 end
 
+# A device that answers no KernelInterface verb.
 struct UnsupportedPreparationDevice <: Mantle.Device end
-Mantle.backend(::UnsupportedPreparationDevice) = :no_ki_backend
 
 @testset "eager and declared kernels use the converted callable and argument ABI" begin
-    compiler = PreparationCompiler(Any[])
-    dev = PreparationDevice(compiler)
-    be = Mantle.backend(dev)
+    dev = PreparationDevice(Any[])
+    be = PreparationBackend(dev)
     f = HostCallable(2f0)
     arg = HostArgument(zeros(Float32, 4))
     @test Mantle.kisupported(dev, f)
@@ -81,21 +76,20 @@ Mantle.backend(::UnsupportedPreparationDevice) = :no_ki_backend
     kernel = Mantle.kikernel(f, dev, (arg,))
     kernel(arg; ndrange=4, workgroupsize=2)
     @test arg.data == fill(2f0, 4)
-    @test compiler.launches == [(4, 2)]
+    @test dev.launches == [(4, 2)]
     # Array library eager submission must use that same compiler and ABI.
     @test Mantle.kilaunch!(be, f, arg; ndrange=4, workgroupsize=2) === nothing
     @test arg.data == fill(4f0, 4)
-    @test compiler.launches[end] == (4, 2)
+    @test dev.launches[end] == (4, 2)
     Mantle.kilaunch!(be, f, arg; ndrange=2)
     @test arg.data == Float32[6, 6, 4, 4]
-    @test compiler.launches[end] == (2, nothing)
+    @test dev.launches[end] == (2, nothing)
     @test !Mantle.kisupported(UnsupportedPreparationDevice(), f)
     @test_throws r"macro-free kernel" Mantle.kikernel(f, UnsupportedPreparationDevice(), (arg,))
 end
 
 struct ContextPreparationDevice <: Mantle.Device end
 struct ConvertedAccessContext{C} end
-Mantle.backend(::ContextPreparationDevice) = KernelAbstractions.CPU()
 Mantle.argtype(::ContextPreparationDevice, ctx) = ConvertedAccessContext{typeof(ctx)}
 Mantle.kernelinterpreter(::ContextPreparationDevice, f, tt) = tt
 
@@ -107,6 +101,6 @@ Mantle.kernelinterpreter(::ContextPreparationDevice, f, tt) = tt
         @test tt[1] <: ConvertedAccessContext
         @test tt[2] === Vector{Int32}
         @test interp === Tuple{tt...}
-        @test body === Mantle.kernelfor(preparation_group!,group,Mantle.backend(dev)).f
+        @test body === Mantle.kernelfor(preparation_group!,group,dev).f
     end
 end

@@ -109,7 +109,7 @@ const _MOVEPATCH_TRI = M.Rasterizer(; vertex = M.VertexShader(_movepatch_tri_ver
 
 @testset "a resize!d buffer under a recorded plan is patched, not re-recorded" begin
     dev = M.Device(TESTBACKEND)
-    be = M.backend(dev)
+    be = dev
     n = 64
     src = M.Buffer(dev, ones(Float32, n))          # capacity == n, so a grow moves it
     out = M.Buffer(dev, zeros(Float32, n))
@@ -136,7 +136,7 @@ end
 
 @testset "a resize!d buffer reaches the next run of a walked plan" begin
     dev = M.Device(TESTBACKEND)
-    be = M.backend(dev)
+    be = dev
     n = 64
     src = M.Buffer(dev, ones(Float32, n))
     out = M.Buffer(dev, zeros(Float32, n))
@@ -159,7 +159,7 @@ end
 
 @testset "a buffers arena growing under a recorded plan patches it" begin
     dev = M.Device(TESTBACKEND)
-    be = M.backend(dev)
+    be = dev
     n = 250_000
     small = Base.invokelatest(_movepatch_chainplan, dev, n, 3)
     M.run!(small.plan)                               # recorded at build
@@ -185,7 +185,7 @@ end
 
 @testset "an images arena growing under a recorded plan re-records it" begin
     dev = M.Device(TESTBACKEND)
-    be = M.backend(dev)
+    be = dev
     N = 64
     g = M.Graph(dev)
     img = M.Transient.Image(g, RGBA{Float16}, (N, N))

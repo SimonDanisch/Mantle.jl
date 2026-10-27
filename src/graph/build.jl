@@ -860,7 +860,6 @@ indirectof(am::ArgMemory, k::Int) = k == 0 ? nothing : am.indirect[k]
 # Whether a compiled dispatch reads its size on the device; `Launch` and `Call`
 # answer in `kalaunch.jl`.
 devicesized(d::CompiledDispatch) = countresource(d.ndrange) !== nothing
-devicesized(t::CompiledTrace) = countresource(t.ndrange) !== nothing
 
 PassPlan(pass, draws, dispatches, images, pre, barrier) =
     PassPlan(pass, draws, dispatches, images, pre, barrier,
