@@ -635,6 +635,7 @@ include(joinpath(@__DIR__, "test_no_ambient_allocation.jl"))
 
 include(joinpath(@__DIR__, "test_submit_channel.jl"))
 include(joinpath(@__DIR__, "test_catch_returns_no_sentinel.jl"))
+_VULKAN_OK && include(joinpath(@__DIR__, "test_inline_argument_extent.jl"))
 include(joinpath(@__DIR__, "foreachbackend.jl"))
 
 # NOT gated on `_VULKAN_OK` any more. Everything below runs once per backend
@@ -658,6 +659,7 @@ foreachbackend(joinpath(@__DIR__, "test_arena_recording.jl"))
 # need no device, and the walk needs the interpreter a backend compiles with.
 include(joinpath(@__DIR__, "test_access.jl"))
 foreachbackend(joinpath(@__DIR__, "test_compile_golden.jl"))
+foreachbackend(joinpath(@__DIR__, "test_recorded_buffer_sync.jl"))
 # Same shape: headless, GPU-only. A `DeviceRange` is the one ndrange whose value
 # never reaches the host, so the Host backend cannot pin the half that matters.
 foreachbackend(joinpath(@__DIR__, "test_devicerange.jl"))
@@ -892,6 +894,8 @@ foreachbackend(joinpath(@__DIR__, "test_graphics_pipeline.jl"))
 foreachbackend(joinpath(@__DIR__, "test_video_decode.jl"))
 
 foreachbackend(joinpath(@__DIR__, "test_access_kernels.jl"))
+# What the access walk says a dispatch only reads reaches Lava as `Lava.Const`.
+_VULKAN_OK && foreachbackend(joinpath(@__DIR__, "vulkan", "test_readonly_args.jl"))
 foreachbackend(joinpath(@__DIR__, "test_device_array_wrappers.jl"))
 foreachbackend(joinpath(@__DIR__, "test_two_devices.jl"))
 foreachbackend(joinpath(@__DIR__, "test_mapreduce_struct_eltypes.jl"))

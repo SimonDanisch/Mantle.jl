@@ -85,6 +85,7 @@ include("lowering.jl")
 include("graph.jl")
 # Both after `graph.jl`, which declares `LavaDevice` and `adaptor`.
 include("access.jl")
+include("readonly.jl")
 include("graphics/record.jl")
 
 # No `export`s: public names (`Texture2D`, `HWTLAS`, `begin_pass!`,
