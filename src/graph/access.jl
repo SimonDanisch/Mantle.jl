@@ -385,8 +385,18 @@ because it removes a barrier.
 function irfor(w::Walk, @nospecialize(sig))
     irs = w.interp === nothing ? Base.code_ircode_by_type(sig) :
                                  Base.code_ircode_by_type(sig; interp = w.interp)
+    return inferred_access_ir(irs)
+end
+
+"Accept actual inferred IR only; reflection can return Method => Any on failure."
+function inferred_access_ir(irs)
     length(irs) == 1 || return nothing
     ir, rt = irs[1]
+    # Julia 1.12's reflection fallback is a Method, not IRCode. Treating it
+    # as IR raises FieldError in argmap and cannot establish resource access.
+    # `nothing` preserves signaturetouches/accessof's existing refusal path;
+    # in particular it is NOT an empty/no-touch proof.
+    ir isa Core.Compiler.IRCode || return nothing
     rt === Union{} && return nothing
     return ir
 end
@@ -772,13 +782,42 @@ function calltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
     # unresolved.
     tt === Union{} && return Taint()
     for a in rest
-        refuse!(w, am, operandtaint(ir, st, a),
-                "a call to `$f` it has no summary for and could not resolve, " *
-                "which a device compiler rejects as a dynamic invocation",
-                Expr(:call, args...))
+        refuse!(w, am, operandtaint(ir, st, a), dynamiccall(ir, f), Expr(:call, args...))
     end
     return carries(tt) ? out : Taint()
 end
+
+"""
+Why a dynamic call is refused, naming its callee. An SSA callee is shown as the
+statement that produced it, and a module member that does not exist says so: a
+kernel calling `Atomix.atomic_max`, which Atomix does not define, was reported
+as a call to `%12`, which neither a reader nor a model handed the message as
+feedback can act on.
+"""
+function dynamiccall(ir, @nospecialize(f))
+    def = f isa Core.SSAValue ? ir.stmts[f.id][:stmt] : f
+    ref = modulemember(def)
+    if ref !== nothing && !isdefined(ref.mod, ref.name)
+        return "a call to `$(ref.mod).$(ref.name)`, which `$(ref.mod)` does not define, " *
+               "so the call stays dynamic and a device compiler rejects it"
+    end
+    callee = ref !== nothing ? "$(ref.mod).$(ref.name)" : f isa Core.SSAValue ? "$f = $def" : "$f"
+    return "a call to `$callee` it has no summary for and could not resolve, " *
+           "which a device compiler rejects as a dynamic invocation"
+end
+
+modulemember(@nospecialize(x)) = nothing
+modulemember(x::GlobalRef) = x
+# `getglobal(M, :name)`: what `M.name` becomes when the optimiser cannot resolve it.
+function modulemember(x::Expr)
+    Meta.isexpr(x, :call, 3) && opname(x.args[1]) === :getglobal || return nothing
+    mod, name = constmodule(x.args[2]), x.args[3]
+    mod isa Module && name isa QuoteNode && name.value isa Symbol || return nothing
+    return GlobalRef(mod, name.value)
+end
+# The module operand arrives as a value or as a reference to its binding.
+constmodule(@nospecialize(x)) = x
+constmodule(x::GlobalRef) = isdefined(x.mod, x.name) ? getglobal(x.mod, x.name) : nothing
 
 """
 A store `pointerset(ptr, value, index, align)`: ordered unless the slot was claimed.

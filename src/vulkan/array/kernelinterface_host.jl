@@ -74,15 +74,26 @@ function KI.launch(k::KI.Kernel{LavaDevice}, groups::Dims{3}, items::Dims{3}, ar
     bq = batchqueue(k.backend)
     # Before Adapt, which strips the hwtlas.
     tlas    = find_tlas_in_args(args)
+    # A KI kernel's signature has no ndrange, so any host range answers.
+    touches = kitouches(k.backend, k.kern, args, groups .* items)
     oneshot!(bq; tag = :launch) do e
         owner = e.owner
         holdleaves!(owner, k.kern)
         holdleaves!(owner, args)
         adaptor = LavaAdaptor(owner)
-        # `ka_launch!` drops `all_args[1]`, where the KA path passes the kernel
-        # function; a KI kernel passes a zero-sized `nothing` there.
-        all_args = (nothing, argmap(a -> Adapt.adapt(adaptor, a), args)...)
-        ka_launch!(e, k.kern, all_args, groups, items, tlas)
+        adapted = argmap(a -> Adapt.adapt(adaptor, a), args)
+        # As in `emitlaunch!`: one dynamic call, taken only when there is something
+        # to wrap.
+        any(isreadonly, touches) &&
+            return kilaunchwith!(e, k.kern, readonlyargs(nothing, touches, args, adapted),
+                                 groups, items, tlas)
+        kilaunchwith!(e, k.kern, adapted, groups, items, tlas)
     end
     return nothing
 end
+
+# `ka_launch!` drops `all_args[1]`, where the KA path passes the kernel function; a KI
+# kernel passes a zero-sized `nothing` there.
+# `::K`, as `launchwith!` has it: a function only passed on is not specialised on.
+@noinline kilaunchwith!(e, kern::K, args::Tuple, groups, items, tlas) where {K} =
+    ka_launch!(e, kern, (nothing, args...), groups, items, tlas)

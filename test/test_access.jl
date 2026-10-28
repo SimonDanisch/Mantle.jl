@@ -8,6 +8,18 @@
 using Test, Mantle
 const M = Mantle
 
+@testset "reflection failure is not an inferred no-access proof" begin
+    rows=Base.code_ircode_by_type(Tuple{typeof(identity),Int})
+    @test length(rows)==1 && first(only(rows)) isa Core.Compiler.IRCode
+    ir=first(only(rows))
+    @test M.inferred_access_ir(rows)===ir
+    @test M.inferred_access_ir([which(identity,(Int,))=>Any])===nothing
+    @test M.inferred_access_ir([nothing=>Any])===nothing
+    @test M.inferred_access_ir([ir=>Union{}])===nothing
+    @test M.inferred_access_ir([])===nothing
+    @test M.inferred_access_ir([ir=>Int,ir=>Int])===nothing
+end
+
 @testset "inferred access: the unknown is refused, not guessed at" begin
     # `accessof` on a signature nothing can be inferred for must not answer
     # read+write for every argument: safe for the barrier phase, and
@@ -39,6 +51,40 @@ const M = Mantle
     @test M.usagetype(M.ATOMIC, M.BufferKind()) ===
           Unordered{Storage{BufferKind, ReadWrite}}
     @test M.usagetype(M.READ, M.BufferKind()) === Storage{BufferKind, ReadOnly}
+end
+
+# A dynamic call names its callee. A generated kernel called `Atomix.atomic_max`,
+# which Atomix does not define; the refusal said "a call to `%12`", and that was
+# the whole of the runtime feedback a repair attempt was given. The callee is a
+# `getglobal(Atomix, :atomic_max)` statement, so the module and name are known.
+module NoSuchMember end
+function callsmissing(out::Ptr{Float32})
+    NoSuchMember.atomic_max(out, 1, 2f0, :monotonic)
+    return
+end
+callsdefined(out::Ptr{Float32}, f) = (f(out); return)
+
+@testset "a refused dynamic call names its callee" begin
+    err = try
+        M.accessof(nothing, callsmissing, (Ptr{Float32},))
+        nothing
+    catch e
+        e
+    end
+    @test err isa M.UnanalysableAccess
+    msg = sprint(showerror, err)
+    @test occursin("NoSuchMember.atomic_max", msg)
+    @test occursin("does not define", msg)
+    @test !occursin("call to `%", msg)
+    # A callee that exists but stays dynamic is still named, and not called missing.
+    err = try
+        M.accessof(nothing, callsdefined, (Ptr{Float32}, Any))
+        nothing
+    catch e
+        e
+    end
+    @test err isa M.UnanalysableAccess
+    @test !occursin("does not define", sprint(showerror, err))
 end
 
 # A device address laundered through an integer is still an address.

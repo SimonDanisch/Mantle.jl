@@ -251,6 +251,7 @@ if _VULKAN_OK
                 VulkanCompiledGraphicsPipeline, DebugConfig, copy_framebuffer!,
                 fastdiv
 end
+include(joinpath(@__DIR__, "test_inorder_host.jl"))
 
 # The barrier lowering per API marker: host tables, no device and no driver, so they
 # run on every machine. Every build compiles the Vulkan tree, the Mac's through the
@@ -636,6 +637,8 @@ include(joinpath(@__DIR__, "test_no_ambient_allocation.jl"))
 
 include(joinpath(@__DIR__, "test_submit_channel.jl"))
 include(joinpath(@__DIR__, "test_catch_returns_no_sentinel.jl"))
+_VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_inline_argument_extent.jl"))
+_VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_buffer_barrier_policy.jl"))
 include(joinpath(@__DIR__, "foreachbackend.jl"))
 
 # NOT gated on `_VULKAN_OK` any more. Everything below runs once per backend
@@ -659,6 +662,7 @@ foreachbackend(joinpath(@__DIR__, "test_arena_recording.jl"))
 # need no device, and the walk needs the interpreter a backend compiles with.
 include(joinpath(@__DIR__, "test_access.jl"))
 foreachbackend(joinpath(@__DIR__, "test_compile_golden.jl"))
+foreachbackend(joinpath(@__DIR__, "test_recorded_buffer_sync.jl"))
 # Same shape: headless, GPU-only. A `DeviceRange` is the one ndrange whose value
 # never reaches the host, so the Host backend cannot pin the half that matters.
 foreachbackend(joinpath(@__DIR__, "test_devicerange.jl"))
@@ -809,6 +813,8 @@ foreachbackend(joinpath(@__DIR__, "test_int32_cartesian_miscompile.jl"))
 foreachbackend(joinpath(@__DIR__, "test_logical_pointer_bitcast.jl"))
 foreachbackend(joinpath(@__DIR__, "test_loop_unswitch_miscompile.jl"))
 foreachbackend(joinpath(@__DIR__, "test_psb_chain_fold.jl"))
+foreachbackend(joinpath(@__DIR__, "test_branch_between_views.jl"))
+foreachbackend(joinpath(@__DIR__, "test_smatrix_in_kernel.jl"))
 foreachbackend(joinpath(@__DIR__, "test_spirv_pattern_correctness.jl"))
 foreachbackend(joinpath(@__DIR__, "test_struct_broadcast.jl"))
 foreachbackend(joinpath(@__DIR__, "test_vector_pointer_access.jl"))
@@ -893,12 +899,15 @@ foreachbackend(joinpath(@__DIR__, "test_recorded_run_semantics.jl"))
 foreachbackend(joinpath(@__DIR__, "test_pending_stores.jl"))
 foreachbackend(joinpath(@__DIR__, "test_repeat.jl"))
 foreachbackend(joinpath(@__DIR__, "test_gated_loop_batches.jl"))
+foreachbackend(joinpath(@__DIR__, "test_nested_repeat.jl"))
 foreachbackend(joinpath(@__DIR__, "test_repeat_inner_3d.jl"))
 foreachbackend(joinpath(@__DIR__, "test_waitidle_submits.jl"))
 foreachbackend(joinpath(@__DIR__, "test_graphics_pipeline.jl"))
 foreachbackend(joinpath(@__DIR__, "test_video_decode.jl"))
 
 foreachbackend(joinpath(@__DIR__, "test_access_kernels.jl"))
+# What the access walk says a dispatch only reads reaches Lava as `Lava.Const`.
+_VULKAN_OK && foreachbackend(joinpath(@__DIR__, "vulkan", "test_readonly_args.jl"))
 foreachbackend(joinpath(@__DIR__, "test_device_array_wrappers.jl"))
 foreachbackend(joinpath(@__DIR__, "test_two_devices.jl"))
 foreachbackend(joinpath(@__DIR__, "test_mapreduce_struct_eltypes.jl"))
@@ -910,6 +919,7 @@ foreachbackend(joinpath(@__DIR__, "test_trace_hwtlas.jl"))
 foreachbackend(joinpath(@__DIR__, "test_trace_hit_record.jl"))
 foreachbackend(joinpath(@__DIR__, "test_trace_procedural.jl"))
 foreachbackend(joinpath(@__DIR__, "test_recorded_plan_runs.jl"))
+foreachbackend(joinpath(@__DIR__, "test_hostwait.jl"))
 foreachbackend(joinpath(@__DIR__, "test_pool_on_device.jl"))
 foreachbackend(joinpath(@__DIR__, "test_stored_device_array.jl"))
 
@@ -1007,7 +1017,8 @@ global METAL_TESTS = joinpath(@__DIR__, "metal")
 
 if _METAL_OK
     @testset "Metal backend" begin
-        for f in ("test_kernelinterface_metal.jl", "test_hwtlas_memory_metal.jl")
+        for f in ("test_kernelinterface_metal.jl", "test_hwtlas_memory_metal.jl",
+                  "test_mtl4_hostwait.jl")
             @testset "$f" begin
                 include(joinpath(METAL_TESTS, f))
             end

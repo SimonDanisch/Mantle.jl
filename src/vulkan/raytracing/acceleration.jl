@@ -222,17 +222,20 @@ aabbinput(backend::LavaDevice, n::Integer) =
 
 """build_blas_aabb(ctx, aabbs; allow_update=false) -> LavaBLAS
 
-Build procedural geometry from AS-readable device boxes; Vector inputs upload
-once. Requires ray-query support. The BLAS retains its boxes for refits."""
+Build procedural geometry from the first `n` AS-readable device boxes (all by
+default); Vector inputs upload once. Requires ray-query support. The BLAS retains
+its boxes for refits."""
 function build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::LavaArray{AABB,1};
-                         allow_update::Bool=false)
+                         allow_update::Bool=false, n::Integer=length(aabbs))
+    0 < n <= length(aabbs) || throw(ArgumentError(
+        "build_blas_aabb: $n boxes of an array of $(length(aabbs))"))
     (deviceof(ctx.bq)).ray_query_available || error(
         "build_blas_aabb: this Vulkan device does not support " *
         "VK_KHR_ray_query. Procedural-AABB BLASes are only useful with " *
         "ray_query in this codebase. Build on a device that supports it.")
     # `AABB` is two `Point3f`: VkAabbPositionsKHR's layout, 24 bytes a box.
     geom = AABBsGeometry(; aabb_addr = bda_address(aabbs), aabb_stride = UInt64(sizeof(AABB)))
-    return newblas!(ctx, geom, length(aabbs), allow_update, LavaArray[aabbs])
+    return newblas!(ctx, geom, n, allow_update, LavaArray[aabbs])
 end
 
 build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::Vector{AABB}; allow_update::Bool=false) =

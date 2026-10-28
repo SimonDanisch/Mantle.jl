@@ -109,6 +109,9 @@ screenshot(w::VulkanWindow) = readback_window(w)
 extrausage(::Type{DrawIndirectCommand}) = UInt32(VK.BUFFER_USAGE_INDIRECT_BUFFER_BIT)
 # `repeat!`'s per-iteration flags, read by `vkCmdBeginConditionalRenderingEXT`.
 extrausage(::Type{Predicate}) = UInt32(VK.BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT)
+# Boxes a kernel writes and an acceleration-structure build reads: see
+# `build_blas_aabb(ctx, ::LavaArray{AABB,1})`.
+extrausage(::Type{AABB}) = AS_INPUT_USAGE
 
 # Conditional rendering is optional; without it `repeat!` must refuse the graph
 # rather than run every iteration.
@@ -565,7 +568,7 @@ function compiledraw(c::Compile{LavaDevice}, p::Pass, d, argoff::Int)
     # holding one is never recorded.
     packed = packedargs(d.args, d.args, d.frag_args)
     info = shader.push_info
-    nbytes = info.arg_buffer_size + compute_inline_extra_from_byval(info.byval_llvm_sizes)
+    nbytes = info.arg_buffer_size + compute_inline_extra_from_byval(info.byval_llvm_sizes, info.arg_buffer_size)
     indices = d.indices === nothing ? nothing : resolve(c.graph.dev, d.indices)
     return CompiledDraw(compiled, shader, packed, d.count, drawviewport(p, d),
                         d.bindings, indices, d.instances, argoff, nbytes)
@@ -601,7 +604,8 @@ function compile_dispatch(c::Compile{LavaDevice}, d::Dispatch, argoff::Int, indi
         return kicompile_dispatch(c, dev, d, argoff, indirect)
     obj = kernelfor(d, dev)
     raw = rawargs(d.args)
-    args = devargs(adaptor(dev.default_bq), raw)
+    args = readonlyargs(c.graph, argument_usage(dev, d.kernel, d.args, d.ndrange, d.group),
+                        raw, devargs(adaptor(dev.default_bq), raw))
     nd = dispatchrange(d.ndrange)
     # `callgroup`: `nothing` when `kernelfor` baked the group into the kernel type
     # (passing it again keys a duplicate plan), the group for a `DynamicSize` kernel.
@@ -625,7 +629,8 @@ the extents come from [`ki_launch_extents`](@ref), as for the immediate launch.
 function kicompile_dispatch(c::Compile{LavaDevice}, dev::LavaDevice, d::Dispatch,
                             argoff::Int, indirect::Int)
     raw = rawargs(d.args)
-    args = devargs(adaptor(dev.default_bq), raw)
+    args = readonlyargs(c.graph, argument_usage(dev, d.kernel, d.args, d.ndrange, d.group),
+                        raw, devargs(adaptor(dev.default_bq), raw))
     nd = dispatchrange(d.ndrange)
     kern = kikernel(d.kernel, dev, args)
     wg, blocks = ki_launch_extents(kern, nd, d.group)
@@ -717,6 +722,8 @@ function emithead!(e::Emitter, pl::Plan)
     end
     return nothing
 end
+
+buffer_head_ordered(::LavaDevice)=true
 
 """
     emitloophead!(e::Emitter, plan, body)
@@ -1075,8 +1082,8 @@ function present_frame!(dev::LavaDevice, win::VulkanWindow)
 end
 
 """Present the acquired image of a failed frame untouched, through the same
-submit-and-present as a drawn frame so the slot's fence and semaphores stay
-paired. A no-op if nothing is acquired or the device is lost."""
+submit-and-present as a drawn frame so the slot's semaphores stay paired and its
+token is set. A no-op if nothing is acquired or the device is lost."""
 function abandonframe!(dev::LavaDevice, pl::Plan)
     for s in pl.graph.surfaces
         win = s.win
@@ -1166,6 +1173,7 @@ function packdispatch!(e::Emitter, d::CompiledDispatch, it)
     # their buffers for submission ordering, so a replay cannot race a host write.
     holdleaves!(e.owner, d.kernel)
     holdleaves!(e.owner, raw)
+    # Not wrapped by `readonlyargs`: a `Lava.Const` packs as the array it wraps.
     args = devargs(adaptor(e), raw)
     pack_args_direct!(e.owner, am.ptr + off, am.address + off, lp.offsets,
                            lp.arg_buffer_size, lp.byval_sizes,

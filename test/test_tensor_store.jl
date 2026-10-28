@@ -59,9 +59,9 @@ end
 
             inrange = EXT_S - off                 # rows/cols the tile actually covers
             expected_written = min(TS, inrange)^2
-            written = count(!=(SENT_S), d)
+            nwritten = count(!=(SENT_S), d)
 
-            @test written == expected_written
+            @test nwritten == expected_written
             # Nothing outside the tile's footprint moved. Written as a scan over
             # the whole array rather than a slice comparison, so a store that
             # wrapped around or wrote a wrong stride is caught too.

@@ -399,13 +399,16 @@ end
 @testset "repeat! refuses what one recording of the body cannot express" begin
     dev = Mantle.Device(TESTBACKEND)
     x = Mantle.Buffer(dev, zeros(Int32, 4))
-    # Nested loops: a pass belongs to one loop.
+    # Nested loop spans retain their hierarchy.
     g = Mantle.Graph(dev)
-    @test_throws ArgumentError Mantle.repeat!(g, 2) do i
+    Mantle.repeat!(g, 2) do i
         Mantle.repeat!(g, 2) do j
             Mantle.dispatch!(g, loop_zero!, (x,), 4; name = "inner")
         end
     end
+    spans = Mantle.loopspans(g.passes)
+    @test length(spans) == 2
+    @test count(pair -> pair[2].parent === nothing, spans) == 1
 end
 
 # One iteration is a gated region: no loop in the plan, no index to reset or

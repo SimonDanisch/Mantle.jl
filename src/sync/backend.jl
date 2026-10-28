@@ -17,6 +17,13 @@ because its `needs_transition` answer and the `Device(api)` spelling are core vo
 """
 struct ROCmAPI <: Backend end
 
+"""Whether an emitted buffer dependency covers every buffer with the same
+usage scopes, rather than only its named resource. Barrier elimination is core's
+decision; these methods describe the scope of the native barrier verb."""
+global_buffer_barriers(::Backend) = false
+global_buffer_barriers(::VulkanAPI) = true
+global_buffer_barriers(::MetalAPI) = true
+
 function stages end
 function access end
 function layout end

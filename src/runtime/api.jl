@@ -97,6 +97,7 @@ function checklive(plan, regions, ntransients::Integer)
 end
 
 """Identity-based resource IDs for scheduling, with a reverse id-to-resource table.
+Native array views use their shared storage owner instead of wrapper identity.
 IDs are assigned in first-use order and remain stable within the graph."""
 struct IdTable
     ids::IdDict{Any,Int}
@@ -104,8 +105,16 @@ struct IdTable
 end
 IdTable() = IdTable(IdDict{Any,Int}(), Dict{Int,Any}())
 
+"""Stable storage owner used by native-array views; resources default to identity.
+
+Backends answer this allocation fact for their array type. Core interns all of
+its scalar/vector/reshape views together, so scheduling and synchronization do
+not mistake another view of a write for an unrelated buffer.
+"""
+resource_identity(r)=r
+
 """The id `r` is known by, assigning one if this is the first time it is named."""
-resourceid(t::IdTable, r) = get!(t.ids, r) do
+resourceid(t::IdTable, r) = get!(t.ids, resource_identity(r)) do
     id = length(t.ids) + 1
     t.by_id[id] = r
     id
@@ -113,11 +122,11 @@ end
 
 """What an id names. The inverse of [`resourceid`](@ref)."""
 byid(t::IdTable, id::Integer) = t.by_id[id]
-Base.haskey(t::IdTable, r) = haskey(t.ids, r)
+Base.haskey(t::IdTable, r) = haskey(t.ids, resource_identity(r))
 
 """Look up an existing resource ID. Unlike resourceid, this never registers a resource."""
-Base.getindex(t::IdTable, r) = t.ids[r]
-Base.get(t::IdTable, r, default) = get(t.ids, r, default)
+Base.getindex(t::IdTable, r) = t.ids[resource_identity(r)]
+Base.get(t::IdTable, r, default) = get(t.ids, resource_identity(r), default)
 Base.length(t::IdTable) = length(t.ids)
 
 """

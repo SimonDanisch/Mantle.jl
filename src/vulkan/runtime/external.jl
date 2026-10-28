@@ -112,8 +112,10 @@ function Base.copyto!(img::VulkanExternalImage, a::LavaArray)
             src_stage_mask = VK.PIPELINE_STAGE_TRANSFER_BIT,
             dst_stage_mask = VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT)
         @vk_checked ctx "external_copy_end" VK.end_command_buffer(cb)
-        @vk_checked ctx "external_copy_submit" VK.queue_submit(ctx.compute_queue, [VK.SubmitInfo([], [], [cb], [])])
-        @vk_checked ctx "external_copy_wait" VK.queue_wait_idle(ctx.compute_queue)
+        @lock ctx.compute_queuelock begin
+            @vk_checked ctx "external_copy_submit" VK.queue_submit(ctx.compute_queue, [VK.SubmitInfo([], [], [cb], [])])
+            @vk_checked ctx "external_copy_wait" VK.queue_wait_idle(ctx.compute_queue)
+        end
         img.layout_initialized = true
     end
     return img

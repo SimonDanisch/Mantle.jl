@@ -317,6 +317,11 @@ Return the backend marker used to lower transitions into stages, access masks an
 """
 function syncbackend end
 
+"""Whether recorded runs and loop iterations start behind a full buffer memory
+dependency, including host stores emitted in front of the recording. Core uses
+this native fact only for plans that actually take the recorded route."""
+buffer_head_ordered(::Any) = false
+
 """
     profiled!(f, plan, emitter, i)
 
@@ -545,7 +550,7 @@ const BACKEND_VOCABULARY = (
     :allocate_batch_queue!, :release_batch_queue!, :submit!, :flush!, :waitidle,
     :waitfor, :waitfor!, :passed, :fence, :reset_device!, :awaitwrites,
     # sync lowering
-    :access, :stages, :layout, :needs_transition,
+    :access, :stages, :layout, :needs_transition, :global_buffer_barriers,
     # Vendor verbs (`vkformat`, `mtlformat`) are backend-private and not listed.
     # compile: the phases are core's, a backend answers these
     :syncbackend,
@@ -577,7 +582,7 @@ const BACKEND_VOCABULARY = (
     :collect!,
     :emitkernel!, :emitpreparebarrier!, :workgroupsize, :indirectslot, :writegroups!, :slotgrid,
     :storebytes!, :orderstore!,
-    :recordsplans, :recordable, :runscalls, :librarygemm, :native_gemm_available,
+    :recordsplans, :recordable, :recordablekind, :buffer_head_ordered, :runscalls, :librarygemm, :native_gemm_available,
     :native_conv2d_dispatch!,
     :native_gemm_dispatch!, :native_batched_gemm_dispatch!,
     :native_attention_dispatch!,
@@ -597,7 +602,7 @@ const BACKEND_VOCABULARY = (
     :readback_window, :target_extent, :target_format, :target_image, :target_view,
     # Core infers accesses; backends supply adapted argument types, interpreters
     # and stage-wrapper signatures.
-    :argtype, :devicebuffertype, :isdevicearray, :accesscache, :kerneltouches,
+    :argtype, :devicebuffertype, :isdevicearray, :resource_identity, :accesscache, :kerneltouches,
     :kernelinterpreter, :kakernelaccesssignature,
     :vertextouches, :fragmenttouches,
     # ray tracing

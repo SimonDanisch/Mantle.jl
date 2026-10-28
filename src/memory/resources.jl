@@ -214,6 +214,7 @@ outlives its resources.
 @inline holdleaves!(holder, r::Union{Buffer,GPURef}) = holdleaves!(holder, r.store)
 
 Base.length(b::Buffer) = b.len
+Base.isempty(b::Buffer) = iszero(length(b))
 Base.size(b::Buffer) = size(b.store)
 # Per-dimension `size`, `1` past the rank as Base does.
 Base.size(b::Buffer, d::Integer) = d <= ndims(b) ? size(b)[d] : 1
@@ -237,6 +238,7 @@ Base.strides(b::Buffer) = strides(storage(b))
 Base.copyto!(dst::Buffer, src) = (copyto!(storage(dst), src); dst)
 Base.copyto!(dst::AbstractArray, src::Buffer) = copyto!(dst, storage(src))
 Base.length(::GPURef) = 1
+Base.isempty(::GPURef) = false
 # `stride` 0 means one value shared by every element, so a `GPURef` and a
 # per-element `Buffer` share shader path and pipeline (see `stride` in
 # runtime/api.jl). `count` is what a draw covers.

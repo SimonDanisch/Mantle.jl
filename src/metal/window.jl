@@ -111,6 +111,7 @@ Base.isopen(w::MetalWindow) =
     w.open && (w.handle === nothing || !GLFW.WindowShouldClose(w.handle))
 
 function Base.close(w::MetalWindow)
+    Mantle.checkframeowner(w.acquirer, "close")
     w.open = false
     w.drawable = nothing
     w.acquirer = nothing
@@ -135,6 +136,8 @@ after `beforeframe!` and before recording.
 """
 function Base.resize!(w::MetalWindow, width::Integer, height::Integer)
     (width, height) == (w.width, w.height) && return false
+    # A worker may be inside `nextDrawable` on this layer for another task's frame.
+    Mantle.checkframeowner(w.acquirer, "resize!")
     w.width, w.height = Int(width), Int(height)
     w.layer.drawableSize = MTL.CGSize(Cdouble(width), Cdouble(height))
     return true
@@ -164,13 +167,23 @@ skipping the frame silently.
 """
 function Mantle.acquire_next_image!(w::MetalWindow)
     Mantle.checkacquirable(w.acquirer)
-    w.drawable = nextdrawable(w)
+    # Claimed before the wait for a drawable, which yields: a task arriving
+    # meanwhile finds the window taken (`checkacquirable`, `checkframeowner`).
     w.acquirer = current_task()
+    try
+        w.drawable = nextdrawable(w)
+    catch
+        w.acquirer = nothing
+        rethrow()
+    end
     return nothing
 end
 
 function nextdrawable(w::MetalWindow)
-    d = MTL.next_drawable(w.layer)
+    # `nextDrawable` blocks, up to a second, while every drawable is in flight,
+    # and nothing can ask the layer first, so it always waits on a worker
+    # (`hostwait`); the call is GC-safe, as every `@objc` is.
+    d = something(hostwait(MTL.next_drawable, nothing, w.layer))
     d === nothing &&
         error("no drawable became available; every one is still in flight. " *
               "Present the frames already recorded before starting another.")

@@ -70,11 +70,12 @@ function acquire_next_image! end
 """
     checkacquirable(acquirer)
 
-Refuse a second image while `acquirer`, the task holding the window's image, has
-not presented it; `nothing` is a window between frames. Compiling a kernel
-mid-frame yields, so a second task can arrive between acquire and present. On
-Vulkan its acquire would block forever in a foreign call; on Metal two frames
-would draw at once.
+Refuse a second image while `acquirer`, the task drawing the window's frame, has
+not presented it; `nothing` is a window between frames. Host waits yield
+([`hostwait`](@ref)) and so does compiling a kernel, so a second task can arrive
+anywhere between acquire and present, and two frames would draw into one window
+at once. A backend claims the window before its acquire blocks, so the claim
+covers the wait for the image too.
 """
 checkacquirable(::Nothing) = nothing
 function checkacquirable(acquirer::Task)
@@ -84,6 +85,22 @@ function checkacquirable(acquirer::Task)
     error("acquire_next_image!: this window already holds an image, acquired by " *
           who * ". A window is rendered by one task: pass it around, or hand it " *
           "over once the frame that owns it has been presented.")
+end
+
+"""
+    checkframeowner(acquirer, what)
+
+Refuse to `what` (resize, close) a window while another task draws a frame into
+it. That task yields in its waits, so this one can run mid-frame, and on Vulkan a
+worker thread may be inside `vkAcquireNextImageKHR` on the swapchain this would
+destroy. The task drawing the frame may: a stale swapchain is rebuilt from inside
+its acquire and present.
+"""
+checkframeowner(::Nothing, what) = nothing
+function checkframeowner(acquirer::Task, what)
+    acquirer === current_task() && return nothing
+    error("$what: another task ($acquirer) is drawing a frame into this window. A " *
+          "window is rendered by one task; stop its loop and wait for it, then $what.")
 end
 
 """
@@ -148,7 +165,7 @@ The destination of the last transition `plan` makes on `r`, in scheduled order:
 the layout `r` rests in between runs. `nothing` when the plan never touches `r`.
 """
 function restingusage(pl::Plan, r)
-    id = get(pl.graph.ids.ids, r, nothing)
+    id = get(pl.graph.ids, r, nothing)
     id === nothing && return nothing
     rest = nothing
     for pp in pl.passes, t in pp.pre

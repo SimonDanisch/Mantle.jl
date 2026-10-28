@@ -54,6 +54,39 @@ include(joinpath(@__DIR__, "testbackend.jl"))
     end
 end
 
+include(joinpath(@__DIR__, "spinwork.jl"))
+
+@testset "a frame's waits let the thread's other tasks run" begin
+    # A frame waits for its slot's previous frame, for an image, and in the present,
+    # where NVIDIA's X11 driver waits out the whole GPU frame. All of them yield
+    # (`hostwait`), so an input loop beside the render loop runs while frames are in
+    # flight (MakieOrg/Makie.jl#5856). GPU-bound frames, 20 ms each, so the frame
+    # waits whatever the display does; without vsync, nothing waits for it.
+    dev = M.Device(TESTBACKEND)
+    n = spinsteps(dev, 0.02)
+    win = M.Window(TESTBACKEND, 64, 64; title = "waits yield", vsync = false)
+    stop = Ref(false)
+    ticks, task = ticker(stop)
+    try
+        g = M.Graph(dev)
+        M.dispatch!(g, hw_spin!, (M.Buffer(dev, zeros(UInt32, 1)), n), 1; name = "spin")
+        M.render!(g, "present", M.Surface(g, win) => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+        end
+        plan = M.Plan(g)
+        foreach(_ -> M.run!(plan), 1:3)                 # compiled, swapchain settled
+        k, s = progress_during(() -> foreach(_ -> M.run!(plan), 1:20), ticks)
+        Mantle.flush!(dev)
+        # Twenty frames of 20 ms; at least one tick per 10 ms of them, where the
+        # ticker manages about five and a thread held in the waits none.
+        @test s > 0.2
+        @test k >= s / 0.01
+    finally
+        stop[] = true
+        wait(task)
+        close(win)
+    end
+end
+
 # Window hints are GLFW-global. A Mantle window asks for `CLIENT_API = NO_API`,
 # because it presents through Vulkan or Metal, and it left the hint set: the next
 # OpenGL window anything in the process opened had no context to make current.

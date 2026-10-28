@@ -79,24 +79,6 @@ mutable struct Recording <: Closed
 end
 
 """
-Per-queue scratch for `wait_timeline!` and `query_timeline`: one semaphore slot,
-one value slot, one packed wait info and one counter cell, refilled per call so
-a wait allocates nothing. Only the channel's owning thread (`bq.thread`) uses
-it; other threads take the allocating path.
-"""
-mutable struct QueueSlots
-    wait_sems::Vector{VK.vk.VkSemaphore}
-    wait_values::Vector{UInt64}
-    wait_info::Base.RefValue{VK.vk.VkSemaphoreWaitInfo}
-    counter::Base.RefValue{UInt64}
-end
-QueueSlots() = QueueSlots(Vector{VK.vk.VkSemaphore}(undef, 1), Vector{UInt64}(undef, 1),
-                          Ref(VK.vk.VkSemaphoreWaitInfo(VK.vk.VkStructureType(0), C_NULL,
-                                                        VK.vk.VkSemaphoreWaitFlags(0),
-                                                        UInt32(0), C_NULL, C_NULL)),
-                          Ref(UInt64(0)))
-
-"""
     VulkanQueue{C}
 
 The driver side of core's `SubmitChannel`: the `VkQueue`, its command pool and
@@ -107,6 +89,13 @@ channel's.
 mutable struct VulkanQueue{C}
     device::VK.Device
     queue::VK.Queue
+    # Host access to `queue`, which Vulkan requires externally synchronized: every
+    # submit, present and idle wait on it holds this (`queuelock`). Shared by the
+    # channels on one hardware queue (`allocate_batch_queue!` shares the primary
+    # when it runs out). A present holds it from a worker thread (`hostwait`), so a
+    # submit from another task on this thread waits for the present instead of
+    # entering the queue beside it.
+    queuelock::ReentrantLock
     family_index::UInt32
     cmd_pool::VK.CommandPool
     # Each submit increments `next_timeline` and signals the new value.
@@ -125,7 +114,11 @@ mutable struct VulkanQueue{C}
     # Hardware queue index within `family_index`, returned by
     # `release_batch_queue!`. -1 for the primary queue and for queues sharing it.
     queue_index::Int
-    slots::QueueSlots
+    # The cell `query_timeline` reads the counter into, so a query allocates
+    # nothing. Only the owning thread (`bq.thread`) uses it, and nothing yields
+    # between the write and the read, so tasks sharing that thread cannot see
+    # each other's value.
+    counter::Base.RefValue{UInt64}
     # Scratch for `submit!`, refilled per call (single writer, synchronous).
     #
     # Cross-channel waits filled by core's `crosswaits!`: (channel, token)
@@ -152,20 +145,20 @@ end
 
 
 function SubmitChannel(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ctx;
-                    queue_index::Int=-1)
+                    queue_index::Int=-1, queuelock::ReentrantLock=ReentrantLock())
     cmd_pool = VK.CommandPool(device, qf_idx;
         flags=VK.COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)
     # Per-queue timeline semaphore for cross-queue ordering.
     type_info = VK.SemaphoreTypeCreateInfo(VK.SEMAPHORE_TYPE_TIMELINE, UInt64(0))
     timeline_sem = unwrap(VK.create_semaphore(device,
         VK.SemaphoreCreateInfo(; next=type_info)))
-    q = VulkanQueue{typeof(ctx)}(device, queue, qf_idx, cmd_pool,
+    q = VulkanQueue{typeof(ctx)}(device, queue, queuelock, qf_idx, cmd_pool,
                     timeline_sem, UInt64(0),
                     ctx,
                     UInt64(120) * 1_000_000_000,            # flush timeout
                     "", "",                                 # last / prev dispatch info
                     queue_index,
-                    QueueSlots(),
+                    Ref(UInt64(0)),
                     Tuple{Any,UInt64}[],
                     sizehint!(VK.vk.VkCommandBufferSubmitInfo[], 8),
                     sizehint!(VK.vk.VkSemaphoreSubmitInfo[], 4),
@@ -180,6 +173,7 @@ end
 @inline driver(bq::SubmitChannel{VulkanQueue{C}}) where {C} = bq.channel::VulkanQueue{C}
 @inline vkdevice(bq::SubmitChannel{<:VulkanQueue}) = driver(bq).device
 @inline vkqueue(bq::SubmitChannel{<:VulkanQueue}) = driver(bq).queue
+@inline queuelock(bq::SubmitChannel{<:VulkanQueue}) = driver(bq).queuelock
 @inline timelineof(bq::SubmitChannel{<:VulkanQueue}) = driver(bq).timeline_sem
 
 # The device this channel submits to, which core passes to `rawfree` and
@@ -260,8 +254,10 @@ mutable struct LavaDevice <: Device
     # concrete so `ctx.default_bq` infers.
     default_bq::SubmitChannel{VulkanQueue{LavaDevice},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
     # Queue 1 of the primary family, or the primary queue when the family has
-    # only one. Used by the external-image copy.
+    # only one. Used by the external-image copy, under `compute_queuelock`, which
+    # is the primary's lock when the two are one queue.
     compute_queue::VK.Queue
+    compute_queuelock::ReentrantLock
     # `nothing` without `VK_EXT_debug_utils`.
     debug_messenger::Any
     # The messenger's ring and its `pUserData`; see `ValidationRing`.
@@ -392,6 +388,8 @@ mutable struct LavaDevice <: Device
             lava_pipeline_cache_path(ctx.device_name, ctx.driver_version), ctx.physical_device)
         register_pipeline_cache_atexit!()
         ctx.default_bq = SubmitChannel(ctx.device, primary_queue, ctx.queue_family_index, ctx)
+        ctx.compute_queuelock = ctx.compute_queue === primary_queue ?
+                                queuelock(ctx.default_bq) : ReentrantLock()
         return ctx
     end
 end
@@ -1001,11 +999,13 @@ function allocate_batch_queue!(ctx::LavaDevice)
         queue = VK.get_device_queue(ctx.device, ctx.queue_family_index, UInt32(idx))
         idx == ctx.next_queue_index && (ctx.next_queue_index += 1)
     else
-        # All hardware queues taken: share the primary queue.
+        # All hardware queues taken: share the primary queue, and its lock.
         queue = vkqueue(ctx.default_bq)
         idx = -1
     end
-    bq = SubmitChannel(ctx.device, queue, ctx.queue_family_index, ctx; queue_index = idx)
+    lk = idx == -1 ? queuelock(ctx.default_bq) : ReentrantLock()
+    bq = SubmitChannel(ctx.device, queue, ctx.queue_family_index, ctx;
+                       queue_index = idx, queuelock = lk)
     push!(ctx.extra_queues, bq)
     return bq
 end
@@ -1367,9 +1367,19 @@ end
 function waitidle(ctx::LavaDevice)
     flush!(ctx.default_bq)
     # Checked: a discarded Result let a lost device look idle.
-    throw_if_error(ctx, "vkDeviceWaitIdle", VK.device_wait_idle(ctx.device))
+    throw_if_error(ctx, "vkDeviceWaitIdle", deviceidle(ctx))
     return nothing
 end
+
+"""
+    deviceidle(ctx) -> Result
+
+`vkDeviceWaitIdle`, holding the primary queue. The call requires every queue
+externally synchronized, and a present may be using the primary from a worker
+thread (`hostwait`). Blocks the thread: it only runs to rebuild or tear down. The
+other hardware queues belong to their channels' threads and are not held here.
+"""
+deviceidle(ctx::LavaDevice) = @lock queuelock(ctx.default_bq) VK.device_wait_idle(ctx.device)
 
 supports_graphics(::LavaDevice) = true
 

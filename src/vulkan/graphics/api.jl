@@ -138,7 +138,7 @@ end
 "Pack manual draw arguments into the owner's scratch and return its device address."
 function pack_gfx_args_bda(batch::O, args, push_info::PushConstantInfo) where {O<:Closed}
     (push_info.push_size == 0 || isempty(args)) && return UInt64(0)
-    total_size = push_info.arg_buffer_size + compute_inline_extra_from_byval(push_info.byval_llvm_sizes)
+    total_size = push_info.arg_buffer_size + compute_inline_extra_from_byval(push_info.byval_llvm_sizes, push_info.arg_buffer_size)
     arg_buf = get_arg_buffer(batch, total_size)
     pack_gfx_args!(batch, args, arg_buf.mapped_ptr, arg_buf.address, push_info)
     return arg_buf.address
@@ -171,8 +171,9 @@ end
 
 """submit_and_present!(bq, win, frame) -> token
 
-Submit a sealed frame with image-available wait, per-image render-finished signal
-and frame-slot fence, then present. The caller records the final image transition."""
+Submit a sealed frame with image-available wait and per-image render-finished
+signal, keep its token for the frame slot, then present. The caller records the
+final image transition."""
 function submit_and_present!(bq::SubmitChannel{<:VulkanQueue}, win::VulkanWindow,
                              frame::OneShot)
     win.acquired || error("present_frame!: no image acquired (call acquire_next_image! first)")
@@ -184,8 +185,8 @@ function submit_and_present!(bq::SubmitChannel{<:VulkanQueue}, win::VulkanWindow
         # Signal render_finished for the present; indexed by image, not frame
         # slot (see `create_swapchain!`).
         signals = ((win.render_finished[win.current_image_idx + 1], UInt64(0),
-                    VK.PipelineStageFlag2(VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)),),
-        fence = win.in_flight[fi])
+                    VK.PipelineStageFlag2(VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)),))
+    win.slot_tokens[fi] = tok
     handover!(bq, tok, frame; tag = :present)
     drain!(bq)
     present!(win)

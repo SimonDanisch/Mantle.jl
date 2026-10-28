@@ -181,7 +181,7 @@ end
 
 @testset "trailing unit ndrange" begin
     backend = TESTBACKEND
-    written(sz, wg) = begin
+    typedcoverage(sz, wg) = begin
         d = KernelAbstractions.allocate(backend, Float32, sz...)
         fill!(d, 0.0f0)
         markall!(backend, wg)(d; ndrange = sz)
@@ -195,7 +195,7 @@ end
                          ((64, 4, 4, 4, 4, 1),    (16, 2, 2, 2, 2, 1)),
                          ((64, 4, 4, 4, 1),       (16, 2, 2, 2, 1)),
                          ((64, 4, 4, 4, 4, 2),    (16, 2, 2, 2, 2, 1))]   # control
-            @test written(sz, wg) == 1.0
+            @test typedcoverage(sz, wg) == 1.0
         end
     end
 
