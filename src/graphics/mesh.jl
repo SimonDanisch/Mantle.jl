@@ -42,6 +42,15 @@ meshconfig(p::MeshPipeline) = stageconfig(p.mesh)
 
 pipeline_state_key(p::MeshPipeline) = (p.blend, p.cull, p.depth)
 
+# No backend emits an object stage: a mesh pipeline's threadgroups are dispatched by
+# the host, with the group count `draw!` takes.
+function checkstages(dev, p::MeshPipeline)
+    p.object === nothing || throw(ArgumentError(
+        "a mesh pipeline's object stage is not emitted by any backend yet; build it " *
+        "without one and pass the mesh group count to `draw!`"))
+    return nothing
+end
+
 """
     objectconfig(p::MeshPipeline) -> ObjectConfig or nothing
 

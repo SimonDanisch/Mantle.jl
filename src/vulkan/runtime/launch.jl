@@ -47,7 +47,7 @@ Submit a plain kernel in a one-shot on `bq` (see `emitkernel!`)."""
 function lava_launch!(bq::SubmitChannel{<:VulkanQueue}, @nospecialize(f), args...;
                        ndrange::Union{Integer, NTuple{3,<:Integer}},
                        workgroup_size::NTuple{3,Int} = (64, 1, 1),
-                       tlas=nothing)  # Union{Nothing, VulkanTLAS}, declared later in raytracing/hwtlas.jl
+                       tlas=nothing)  # Union{Nothing, BatchedTLAS}
     oneshot!(bq; tag = :launch) do e
         emitkernel!(e, f, args...; ndrange, workgroup_size, tlas)
     end
@@ -113,7 +113,7 @@ function preparekernel(owner::O, @nospecialize(f), args::Tuple,
 
     if pipeline.needs_tlas_descriptor && tlas === nothing
         error("kernel was compiled with enable_ray_query=true but launch_kernel was " *
-              "called without a tlas keyword. Pass tlas=<VulkanTLAS> to bind the " *
+              "called without a tlas keyword. Pass tlas=<HWTLAS> to bind the " *
               "acceleration structure to descriptor set 0, binding 0.")
     end
 
@@ -124,8 +124,8 @@ function preparekernel(owner::O, @nospecialize(f), args::Tuple,
     total_size = compiled.push_info.arg_buffer_size + inline_extra
     arg_buf = get_arg_buffer(owner, total_size)
 
-    pack_args_direct!(owner, arg_buf.mapped_ptr, arg_buf.address, offsets,
-                       compiled.push_info.arg_buffer_size, byval_sizes, all_args)
+    pack_args_direct!(owner, arg_buf, offsets, compiled.push_info.arg_buffer_size,
+                      byval_sizes, all_args)
 
     name = ctx.diag.dispatch_logging || ctx.diag.dispatch_timing ?
            "compute f=$(nameof(typeof(converted_f))) groups=$groups" : ""
@@ -161,7 +161,7 @@ end
 @inline function pack_arg!(x::T,
                            mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                            offset::Int, byval_size::Int, inline_offset::Int,
-                           batch::O) where {T,O<:Closed}
+                           batch::O, site) where {T,O<:Closed}
     if isbitstype(T) && !isprimitivetype(T)
         inline_offset = (inline_offset + 7) & ~7
         ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t),
@@ -169,7 +169,7 @@ end
         storebits!(mapped_ptr + inline_offset, x)
         unsafe_store!(Ptr{UInt64}(mapped_ptr + offset),
                       arg_buf_bda + UInt64(inline_offset))
-        recpatchfields!(batch, T, mapped_ptr + inline_offset)
+        notepacked!(site, T, mapped_ptr + inline_offset)
         return inline_offset + byval_size
     else
         # Native allocation handles need a packer that retains them and writes a BDA.
@@ -187,7 +187,7 @@ end
 @inline function pack_arg!(p::Ptr,
                            mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                            offset::Int, byval_size::Int, inline_offset::Int,
-                           batch::O) where {O<:Closed}
+                           batch::O, site) where {O<:Closed}
     unsafe_store!(Ptr{UInt64}(mapped_ptr + offset), UInt64(p))
     return inline_offset
 end
@@ -199,24 +199,25 @@ passedas(::Type{<:VkManagedBuffer}) = DeviceAllocation()
 @inline function pack_arg!(buf::VkManagedBuffer,
                            mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                            offset::Int, byval_size::Int, inline_offset::Int,
-                           batch::O) where {O<:Closed}
+                           batch::O, site) where {O<:Closed}
     # The kernel reads through this address, so the submission must outlive the
     # buffer and be ordered against whoever wrote it last.
     hold!(batch, buf)
     unsafe_store!(Ptr{UInt64}(mapped_ptr + offset), buf.address)
     # A single store at the layout slot, so a move can rewrite exactly there.
-    recpatch!(batch, buf.address, mapped_ptr + offset)
+    notepointer!(site, mapped_ptr + offset)
     return inline_offset
 end
 
 """
-    pack_args_direct!(owner, mapped_ptr, arg_buf_bda, offsets, base_size, byval_sizes, all_args)
+    pack_args_direct!(owner, site, mapped_ptr, arg_buf_bda, offsets, base_size, byval_sizes, all_args)
 
 Write kernel arguments into mapped GPU memory through `pack_arg!`, without heap
 allocation. Slots follow core's `passedslots`. The owner holds allocation
-arguments: a one-shot until completion, a recording until release.
+arguments: a one-shot until completion, a recording until release. `site`
+([`patchsite`](@ref)) is where the packed device pointers are registered.
 """
-@generated function pack_args_direct!(batch::Closed,
+@generated function pack_args_direct!(batch::Closed, site,
                                         mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                                         offsets::Vector{Int}, base_size::Int,
                                         byval_sizes::Vector{Int},
@@ -227,7 +228,7 @@ arguments: a one-shot until completion, a recording until release.
             all_args[$arg_i], mapped_ptr, arg_buf_bda,
             @inbounds(offsets[$layout_i]),
             @inbounds(byval_sizes[$layout_i]),
-            inline_offset, batch)))
+            inline_offset, batch, site)))
     end
     quote
         inline_offset = base_size
@@ -237,14 +238,14 @@ arguments: a one-shot until completion, a recording until release.
 end
 
 """
-    clear_kernel_cache!(ctx = vk_context())
+    clear_kernel_cache!(ctx = Device(VulkanAPI()))
 
 Drop `ctx`'s pipelines, linked kernels and launch plans so each kernel's next
 dispatch builds them again; the SPIR-V stays with its `CodeInstance`. All three
 go together, since each can return a pipeline the others would rebuild.
 Submissions and plans keep their own references, so accepted work stays valid.
 """
-function clear_kernel_cache!(ctx::LavaDevice = vk_context())
+function clear_kernel_cache!(ctx::LavaDevice = Device(VulkanAPI()))
     empty!(ctx.caches.pipelines)
     empty!(ctx.caches.pipeline_order)
     empty!(ctx.caches.linked)
@@ -298,6 +299,7 @@ const READBACK_BLOCK_SIZE = 16 * 1024 * 1024
 
 """A slice of the unified arena a recording writes its arguments into."""
 struct ArgBufferAlloc
+    region::Region            # the slice, as a move patch names it
     address::UInt64           # BDA of this sub-allocation
     mapped_ptr::Ptr{UInt8}    # CPU-writable pointer
     size::Int
@@ -337,10 +339,16 @@ the pointer the packer writes through."""
     r = scratch!(owner, nbytes)
     blk = memoryof(r)::BufferBlock
     off = offset(r)
-    return ArgBufferAlloc(blk.address + UInt64(off),
+    return ArgBufferAlloc(r, blk.address + UInt64(off),
                           (blk.ref[]::VkManagedBuffer).mapped_ptr + off,
                           length(r))
 end
+
+# Into the owner's scratch, which is then the patch target.
+pack_args_direct!(owner::Closed, a::ArgBufferAlloc, offsets::Vector{Int}, base_size::Int,
+                  byval_sizes::Vector{Int}, all_args::Tuple) =
+    pack_args_direct!(owner, patchsite(owner, a.region, a.mapped_ptr), a.mapped_ptr,
+                      a.address, offsets, base_size, byval_sizes, all_args)
 
 """
     indirect_command!(owner) -> LavaArray{UInt32,1}

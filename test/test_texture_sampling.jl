@@ -48,7 +48,7 @@ function tex_draw(dev, data; n = 4, filter = :nearest)
     bindings = tex_bindings(data, filter)
     fb = Mantle.Framebuffer(TESTBACKEND, n, n; depth = false, color_format = BGRA{N0f8})
     target = Mantle.OffscreenTarget(fb)
-    compiled = Mantle.compile_draw(dev, tex_pipeline(), (Mantle.blittarget(target),),
+    compiled = Mantle.compile_draw(dev, tex_pipeline(), (Mantle.target_format(target),),
                                    nothing, (), (); bindings)
     Mantle.pass!(dev, target; clear = (0f0, 0f0, 0f0, 1f0)) do pr
         Mantle.viewport!(pr, 0, 0, n, n)
@@ -90,6 +90,17 @@ end
         @info "no graphics pipeline on this backend; skipping"
         @test_skip Mantle.supports_graphics(dev)
         return
+    end
+
+    @testset "sampler keywords mean the same on every backend" begin
+        # Each backend parsed them itself: Metal had no `:clamp_border` and no
+        # `anisotropy`, and Vulkan refused an unknown one with a bare `error`.
+        for filter in (:nearest, :linear), wrap in (:repeat, :clamp, :mirror, :clamp_border)
+            @test Mantle.Sampler(dev; filter, wrap, anisotropy = 4) isa Mantle.Sampler
+        end
+        @test_throws ArgumentError Mantle.Sampler(dev; filter = :cubic)
+        @test_throws ArgumentError Mantle.Sampler(dev; wrap = :wrap)
+        @test_throws ArgumentError Mantle.Sampler(dev; anisotropy = -1)
     end
 
     @testset "a texture is bound as data[x, y]" begin

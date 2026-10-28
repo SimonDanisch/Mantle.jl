@@ -47,38 +47,22 @@ image_view(ctx::LavaDevice, image::VK.Image, format::VK.Format,
                             VK.COMPONENT_SWIZZLE_IDENTITY, VK.COMPONENT_SWIZZLE_IDENTITY),
         VK.ImageSubresourceRange(aspect, UInt32(0), UInt32(levels), UInt32(0), UInt32(1)))
 
-"""
-    VulkanFramebuffer(width, height; ctx, depth=true, color_format=VK.FORMAT_B8G8R8A8_SRGB, srgb=false)
-
-An offscreen framebuffer with a color and an optional `D32_SFLOAT` depth attachment.
-`color_format` may also be a Julia element type (`BGRA{N0f8}`, `RGBA{Float32}`),
-lowered by `vkformat` as for transient images.
-"""
-function VulkanFramebuffer(width::Integer, height::Integer;
-                          ctx::LavaDevice,
-                          depth::Bool=true,
-                          color_format::Union{VK.Format,Type}=VK.FORMAT_B8G8R8A8_SRGB,
-                          srgb::Bool=false)
-    color_format isa Type && (color_format = vkformat(VulkanAPI(), color_format; srgb))
+# Core's `Framebuffer` (`graphics/resources.jl`) chose the formats.
+function makeframebuffer(ctx::LavaDevice, width::Int, height::Int, color_format::VK.Format,
+                         depth_format::Union{Nothing,VK.Format})
     color_image = image_2d(ctx, width, height, color_format, COLOR_USAGE)
     color_memory = alloc_image_memory(ctx, color_image)
     color_view = image_view(ctx, color_image, color_format)
-
-    depth_format = VK.FORMAT_D32_SFLOAT
-    depth_img = nothing
-    depth_mem = nothing
-    depth_vw = nothing
-    if depth
+    depth_img = depth_mem = depth_vw = nothing
+    if depth_format !== nothing
         depth_img = image_2d(ctx, width, height, depth_format,
                              VK.IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
         depth_mem = alloc_image_memory(ctx, depth_img)
         depth_vw = image_view(ctx, depth_img, depth_format, VK.IMAGE_ASPECT_DEPTH_BIT)
     end
-
-    VulkanFramebuffer(Int(width), Int(height),
-        color_image, color_memory, color_view, color_format,
-        depth_img, depth_mem, depth_vw, depth_format,
-        ctx)
+    return VulkanFramebuffer(width, height, color_image, color_memory, color_view, color_format,
+                             depth_img, depth_mem, depth_vw, something(depth_format, VK.FORMAT_UNDEFINED),
+                             ctx)
 end
 
 """
@@ -263,32 +247,27 @@ function copy_image_to_buffer!(e::Emitter, dst::LavaArray{T, 1}, image::VK.Image
                                width::Integer, height::Integer, format::VK.Format;
                                aspect::VK.ImageAspectFlag=VK.IMAGE_ASPECT_COLOR_BIT,
                                region = nothing) where {T}
-    # Any element type: the copy moves bytes, `T` says what they mean.
+    # Any element type: the copy moves bytes, `T` says what they mean. Core checked
+    # that `dst` holds them (`checkcopy`).
     rect = region === nothing ? (0, 0, width, height) : region
-    nbytes = rect[3] * rect[4] * pixelbytes(eltypeof(format))
-    sizeof(T) * length(dst) >= nbytes ||
-        error("destination holds $(sizeof(T) * length(dst)) bytes, need $nbytes")
     copyimage!(e.cmd, dst.buf[].buffer, pool_offset(dst.buf[]) + dst.offset, image, rect; aspect)
     hold!(e, dst)
     return dst
 end
 
 """
-    readback_window(win::VulkanWindow) -> Matrix{BGRA{N0f8}}
+    readback_window(win::VulkanSwapchain) -> Matrix{BGRA{N0f8}}
 
 Read back a window image a frame drew, between frames (see the generic
 [`readback_window`](@ref)). A `(width, height)` matrix of `eltypeof(win.format)`,
 `BGRA{N0f8}` for every swapchain format this backend picks, as on Metal.
 """
-function readback_window(win::VulkanWindow)
-    checkopen(win)
+function readback_window(win::VulkanSwapchain)
     ctx = win.ctx
     bq = ctx.default_bq
 
     # A presentable image may only be touched between acquire and present, so
-    # this acquires one; it holds an earlier frame. Mid-frame there is no command
-    # buffer to add the copy to: read back after the frame is presented.
-    checkreadable(win.acquirer)
+    # this acquires one; it holds an earlier frame.
     i = acquireframe!(win)
     image = win.images[i]
     # A drawn image is in `PRESENT_SRC` (`presentready!`); an undrawn one is in
@@ -296,7 +275,7 @@ function readback_window(win::VulkanWindow)
     from = win.holdsframe[i] ? VK.IMAGE_LAYOUT_PRESENT_SRC_KHR : VK.IMAGE_LAYOUT_UNDEFINED
 
     # Read after `acquireframe!`, which may have rebuilt the swapchain.
-    w, h = size(win)
+    w, h = target_extent(win)
     return readbackimage(ctx, bq, eltypeof(win.format), w, h) do mb, off
         frame = oneshot(bq) do e
             cmd = e.cmd
@@ -331,7 +310,7 @@ a resize some images hold nothing yet (Mesa's headless surface hands out
 requested. A window no frame has drawn since its swapchain was built takes the
 first image. Throws after `attempts` acquires.
 """
-function acquireframe!(win::VulkanWindow; attempts::Int = 4 * length(win.images))
+function acquireframe!(win::VulkanSwapchain; attempts::Int = 4 * length(win.images))
     bq = win.ctx.default_bq
     for _ in 1:attempts
         # May rebuild the swapchain, which leaves no image holding a frame.

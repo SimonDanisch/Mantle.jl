@@ -12,7 +12,7 @@ colorimage(fb::VulkanFramebuffer) =
 depthimage(fb::VulkanFramebuffer) =
     fb.depth_view === nothing ? nothing :
     VulkanAttachment(fb.depth_view, fb.depth_image, fb.width, fb.height)
-currentimage(w::VulkanWindow) =
+currentimage(w::VulkanSwapchain) =
     VulkanAttachment(target_view(w), target_image(w),
                      Int(w.extent.width), Int(w.extent.height))
 target_view(a::VulkanAttachment) = a.view
@@ -37,14 +37,14 @@ function beginattachments!(e::Emitter, targets, loads, depth, depth_load; transi
                 depth_image = depth === nothing || !transition ? nothing : target_image(depth),
                 depth_clear = depth === nothing ? nothing : depthclearvalue(depth_load),
                 depth_load_op = depth === nothing ? nothing : loadop(depth_load), transition)
-    set_viewport!(e, 0, 0, ext[1], ext[2])
+    setviewport!(e, 0, 0, ext[1], ext[2])
     return nothing
 end
 
 # Target extent/format forwarding is defined by the resource wrappers.
 # Loses sRGB versus UNORM; graph compilation keeps the native format rather than
 # round-tripping it.
-eltypeof(f::VK.Format) = eltypefor((T; srgb = false) -> vkformat(VulkanAPI(), T; srgb), f)
+eltypeof(f::VK.Format) = eltypefor(VulkanAPI(), f)
 
 """Compiled native pipeline plus the shader defining its packed argument layout."""
 struct VulkanDraw
@@ -52,32 +52,32 @@ struct VulkanDraw
     shader::LavaGfxShader
 end
 
-# Raster and mesh draws share preparation; stage wrappers select their native compilation.
+# Raster and mesh draws share preparation; stage wrappers select their native
+# compilation. The caller chooses argument storage and retains the returned
+# pipeline and shader.
 function compile_draw(dev::LavaDevice, p::Union{GraphicsPipeline, MeshPipeline},
                       color_formats, depth_format, vargs, fargs; bindings = nothing)
-    return compile_vulkan_draw(dev, p,
-        VK.Format[vkformat(VulkanAPI(), T) for T in color_formats],
-        depth_format === nothing ? VK.FORMAT_UNDEFINED : vkformat(VulkanAPI(), depth_format),
-        vargs, fargs; bindings)
-end
-
-"""Prepare graph/manual draws against exact native attachment formats.
-The caller chooses argument storage and retains the returned pipeline/shader."""
-function compile_vulkan_draw(dev::LavaDevice, p, color_formats, depth_format,
-                             vargs, fargs; bindings=nothing)
-    ctx = dev
     ad = adaptor(dev.default_bq)
-    vtt = typeof(devargs(ad, rawargs(vargs)))
-    ftt = typeof(devargs(ad, rawargs(fargs)))
+    vtt = typeof(devargs(ad, resolve(dev, vargs)))
+    ftt = typeof(devargs(ad, resolve(dev, fargs)))
     vfn, vtt, ffn, ftt = resolve_shader_pair(p, vtt, ftt)
-    shader, compiled = ensure_compiled_with_shader!(p, vfn, ffn, vtt, ftt; ctx,
-        color_format = color_formats, depth_format,
+    shader, compiled = ensure_compiled_with_shader!(p, vfn, ffn, vtt, ftt; ctx = dev,
+        color_format = VK.Format[f for f in color_formats],
+        depth_format = something(depth_format, VK.FORMAT_UNDEFINED),
         # Sampled stages need the binding table's descriptor layout.
         descriptor_set_layout = bindings === nothing ? nothing : bindings.layout)
     # Fragment arguments choose the packed layout when present.
     isempty(fargs) || (shader = get_or_compile_gfx(ffn, ftt, :fragment))
     return VulkanDraw(compiled, shader)
 end
+
+# Packed once per recording into the plan's argument memory, byval values inline.
+function packedsize(d::VulkanDraw)
+    info = d.shader.push_info
+    return info.arg_buffer_size + compute_inline_extra_from_byval(info.byval_llvm_sizes)
+end
+
+depthformat(fb::VulkanFramebuffer) = fb.depth_format
 
 """A manual pass owns one one-shot and its emitter until end_render_pass! submits it."""
 struct VulkanPassHandle{E}
@@ -108,11 +108,11 @@ function end_render_pass!(h::VulkanPassHandle)
 end
 
 setviewport!(h::VulkanPassHandle, x::Real, y::Real, w::Real, hgt::Real) =
-    set_viewport!(h.e, x, y, w, hgt)
+    setviewport!(h.e, x, y, w, hgt)
 
 # The set binds against the pipeline's layout, not the `VulkanDraw`.
-use_bindings!(h::VulkanPassHandle, d::VulkanDraw, bindings) =
-    use_bindings!(h.e, d.pipeline, bindings)
+use_bindings!(e::Emitter, d::VulkanDraw, bindings) = use_bindings!(e, d.pipeline, bindings)
+use_bindings!(h::VulkanPassHandle, d::VulkanDraw, bindings) = use_bindings!(h.e, d, bindings)
 
 # The graph's draw command (`emit_draw!`), after packing this draw's arguments.
 function record_draw!(h::VulkanPassHandle, d::VulkanDraw, args, count;

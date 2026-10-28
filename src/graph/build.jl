@@ -11,10 +11,11 @@ to the kernel's name. `group` is the workgroup size; the default
 passes should give one. `ndrange` may be a [`DeviceRange`](@ref); the dispatch is
 then ordered after whatever wrote the count.
 """
-function dispatch!(g::Graph, kernel, args::Tuple, ndrange;
+function dispatch!(g::Graph, kernel, @nospecialize(args::Tuple), ndrange;
                    group = nothing, name = nothing)
     refuserefs(args)
     refuseempty(kernel, ndrange)
+    refusegroup(kernel, ndrange, group)
     p = newpass(g, name === nothing ? passname(kernel, args) : String(name), :compute)
     push!(passes(g), p)
     h = handle(g, p)
@@ -61,6 +62,24 @@ function refuseempty(@nospecialize(kernel), ndrange)
 end
 
 """
+    refusegroup(kernel, ndrange, group)
+
+Throw for a [`DeviceRange`](@ref) dispatch whose `group` extends past its first axis.
+The count is one-dimensional and the device turns it into workgroups along x, so a
+group of `(8, 8)` would cover an eighth of the count or run every item eight times,
+depending on how the backend reads the group.
+"""
+function refusegroup(@nospecialize(kernel), ::DeviceRange, group)
+    dims = groupdims(group)
+    all(==(1), dims[2:end]) && return nothing
+    throw(ArgumentError(
+        "dispatch!: `$kernel` is dispatched over a `DeviceRange` with group = $group. " *
+        "A device-written count is one-dimensional, so its workgroup can only extend " *
+        "along x: give group = $(prod(dims)) and index the items along x."))
+end
+refusegroup(@nospecialize(kernel), ndrange, group) = nothing
+
+"""
     dispatch!(graph, call, args; name = nothing)
 
 Declare a call that launches its own work (e.g. `dispatch!(g, mul!, (C, A, B))`),
@@ -69,7 +88,7 @@ ordered by what it reads and writes. Its accesses come from an
 [`UndeclaredCall`](@ref) is thrown. `runscalls(device)` says which backends can
 run calls.
 """
-function dispatch!(g::Graph, call, args::Tuple; name = nothing)
+function dispatch!(g::Graph, call, @nospecialize(args::Tuple); name = nothing)
     refuserefs(args)
     p = newpass(g, name === nothing ? string(nameof(call)) : String(name), :compute)
     push!(passes(g), p)
@@ -85,7 +104,7 @@ end
 The kernel's name, or the first argument's name when that is a function, so a
 higher-order kernel (a work-queue mapper) is named after the kernel it runs.
 """
-passname(kernel, args::Tuple) =
+passname(kernel, @nospecialize(args::Tuple)) =
     (!isempty(args) && first(args) isa Function) ? string(nameof(first(args))) :
     string(nameof(kernel))
 
@@ -96,7 +115,7 @@ Register one usage per device buffer reachable from each argument, because a
 barrier is scoped to a buffer and arguments may be containers. An argument's
 `Touch` applies to all of its leaves.
 """
-function declare!(h, args::Tuple, touches::Vector{Touch})
+function declare!(h, @nospecialize(args::Tuple), touches::Vector{Touch})
     g, p = graphof(h), passof(h)
     leaves = Any[]
     for (a, t) in zip(args, touches)
@@ -215,7 +234,7 @@ function repeat!(g::Graph, kernel, args::Tuple, ndrange;
     end
 end
 
-function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
+function repeat!(@nospecialize(f), g::Graph, maxiters::Integer, count = nothing;
                  while_nonzero = nothing)
     maxiters >= 1 || throw(ArgumentError("repeat!: maxiters must be at least 1, got $maxiters"))
     (count === nothing || while_nonzero === nothing) || throw(ArgumentError(
@@ -403,8 +422,7 @@ target_extent(s::WindowSurface) = target_extent(s.win)
 
 target_format(s::WindowSurface) = target_format(s.win)
 
-# The pixel type `attachment_format` compiles pipelines for; only the backend
-# window can name it.
+# The pixel type the surface's images hold; only the backend window can name it.
 Base.eltype(s::WindowSurface) = eltype(s.win)
 
 DrawCall(shader, args, count) =
@@ -893,9 +911,13 @@ allocate.
 """
 indirectof(am::ArgMemory, k::Int) = k == 0 ? nothing : am.indirect[k]
 
-# Whether a compiled dispatch reads its size on the device; `Launch` and `Call`
-# answer in `kalaunch.jl`.
-devicesized(d::CompiledDispatch) = countresource(d.ndrange) !== nothing
+"""
+    devicesized(compiled) -> Bool
+
+Whether a compiled dispatch reads its size on the device: whether it holds an
+indirect command, which the backend kept from the slot core gave it.
+"""
+devicesized(d) = indirectindex(d) != 0
 
 PassPlan(pass, draws, dispatches, images, pre, barrier) =
     PassPlan(pass, draws, dispatches, images, pre, barrier,
@@ -908,11 +930,9 @@ function sample!(ring::Vector{Float64}, x::Real)
     ring
 end
 
-# `rawargs` resolves Mantle resources to their storage; `devargs` adapts that for
-# the device. Look for a TLAS in the raw arguments: adapting strips it, since a
-# ray query binds it as a descriptor.
-rawargs(args::Tuple) = argmap(storage, args)
-
+# `devargs` adapts resolved arguments (`resolve`) for the device. Look for a TLAS
+# in the resolved arguments: adapting strips it, since a ray query binds it as a
+# descriptor.
 devargs(ad, raw::Tuple) = argmap(a -> Adapt.adapt(ad, a), raw)
 
 """The resource a usage names, following slices and vertex bindings to their parent."""
@@ -924,7 +944,8 @@ rootresource(a::Attr) = rootresource(a.resource)
 
 Compile(g::Graph; alias = true, policy = Overlap(), ordered_entry = false) =
     Compile(g, alias, policy, ordered_entry, Analysis(),
-            IdDict{Pass,Vector{Transition}}(), PassPlan[], Set{Any}())
+            IdDict{Pass,Vector{Transition}}(), PassPlan[], Set{Any}(),
+            recordspasses(g.dev, passes(g)))
 
 # Core selects synchronization from native facts and the actual plan route,
 # independently of scheduling policy. Walked plans retain first-use barriers.
@@ -1050,11 +1071,12 @@ dispatchrange(x) = count(x)
 
 """
 The index space a `DeviceRange` kernel is compiled against when it gives no
-`max`. The host never reads the device count: `__validindex` passes every thread
-up to this ceiling and the kernel's own bounds check against the device count
-does the rest.
+`max`: every count the device's `Int32` can hold. The host never reads the device
+count and the prepare sizes the launch from it unclamped, so `__validindex` must
+pass every thread the count launches; the kernel's own bounds check against the
+count does the rest. (At 1M items, a 1.5M count lost everything past 1,048,576.)
 """
-const INDIRECT_CEILING = 1024 * 1024
+const INDIRECT_CEILING = Int(typemax(Int32))
 
 dispatchrange(r::DeviceRange) = something(r.max, INDIRECT_CEILING)
 
@@ -1206,8 +1228,6 @@ function droprecording!(pl::Plan)
     empty!(pl.pending_patches)
     return pl
 end
-
-lp_of(d::CompiledDispatch) = d.launch
 
 """
     runonce!(g) -> nothing

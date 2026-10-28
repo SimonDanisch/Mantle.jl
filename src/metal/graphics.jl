@@ -68,33 +68,15 @@ struct MetalSampler <: Mantle.Sampler
     state::MTL.MTLSamplerState
 end
 
-"""
-    mtlsampledformat(T) -> MTLPixelFormat
-
-The pixel format of a sampled texture of `T`. Differs from `mtlformat` (render
-targets) only for scalar floats: `Float32` is `R32Float` here, not `Depth32Float`,
-which a sampler rejects.
-"""
-mtlsampledformat(::Type{Float32}) = MTL.MTLPixelFormatR32Float
-mtlsampledformat(::Type{Float16}) = MTL.MTLPixelFormatR16Float
-mtlsampledformat(@nospecialize(T::Type)) = mtlformat(T)
-
-"""
-    Texture2D(backend, data::AbstractMatrix; mipmap = false)
-
-A sampled 2D texture holding `data` (host or device), with the element type
-naming the format. `data[x, y]`: the first index is horizontal, as in GLMakie and
-the Vulkan backend. `Shared` storage, not a buffer-backed linear texture.
-`mipmap = true` regenerates the full mip chain from level 0 at every upload.
-"""
-function Mantle.Texture2D(d::MetalDevice, data::AbstractMatrix{T}; mipmap::Bool = false) where {T}
-    w, h = size(data)          # first index is x, second is y
-    desc = MTL.MTLTextureDescriptor(mtlsampledformat(T), w, h, mipmap)
+# Core's `Texture2D` (`graphics/resources.jl`) chose the format and the mip levels.
+# `Shared` storage, not a buffer-backed linear texture.
+function maketexture(d::MetalDevice, ::Type{T}, format::MTL.MTLPixelFormat, w::Int, h::Int,
+                     levels::Int) where {T}
+    desc = MTL.MTLTextureDescriptor(format, w, h, levels > 1)
+    desc.mipmapLevelCount = levels
     desc.usage = MTL.MTLTextureUsageShaderRead
     desc.storageMode = MTL.MTLStorageModeShared
-    t = MetalTexture2D{T}(MTL.MTLTexture(d.dev, desc), w, h, d)
-    Mantle.upload_texture_data!(t, data)
-    return t
+    return MetalTexture2D{T}(MTL.MTLTexture(d.dev, desc), w, h, d)
 end
 
 """
@@ -119,7 +101,7 @@ end
 # `MtlArray` is a `DenseMatrix` whose `pointer` is a device address.
 function Mantle.copytexels!(t::MetalTexture2D{T}, data::Metal.MtlMatrix{T}) where {T}
     # The kernel that wrote `data` may be on this task's own Metal.jl queue (no
-    # `adoptqueue!`), which `framebuffer!` does not order against.
+    # `adopt!`), which `framebuffer!` does not order against.
     Metal.synchronize()
     p = pointer(data)
     blit_into_texture!(t, p.buffer, p.offset)
@@ -143,27 +125,23 @@ function blit_into_texture!(t::MetalTexture2D{T}, src::MTL.MTLBuffer, soff::Inte
     return nothing
 end
 
-"""
-    Sampler(backend; filter = :linear, wrap = :repeat)
-
-How a texture is sampled; the same keywords as the Vulkan backend.
-`filter` is `:nearest` or `:linear`, `wrap` is `:repeat`, `:clamp` or `:mirror`.
-"""
-function Mantle.Sampler(d::MetalDevice; filter::Symbol = :linear,
-                        wrap::Symbol = :repeat)
-    f = filter === :nearest ? MTL.MTLSamplerMinMagFilterNearest :
-        filter === :linear  ? MTL.MTLSamplerMinMagFilterLinear :
-        error("unknown filter :$filter; expected :nearest or :linear")
-    a = wrap === :repeat        ? MTL.MTLSamplerAddressModeRepeat :
-        wrap === :clamp        ? MTL.MTLSamplerAddressModeClampToEdge :
-        wrap === :mirror       ? MTL.MTLSamplerAddressModeMirrorRepeat :
-        error("unknown wrap :$wrap; expected :repeat, :clamp or :mirror")
+# Core's `Sampler` (`graphics/resources.jl`) checked the keywords. Mip levels blend
+# linearly and the border is transparent black, as on Vulkan.
+function makesampler(d::MetalDevice, filter::Symbol, wrap::Symbol, anisotropy::Float32)
+    f = filter === :nearest ? MTL.MTLSamplerMinMagFilterNearest : MTL.MTLSamplerMinMagFilterLinear
+    a = wrap === :repeat ? MTL.MTLSamplerAddressModeRepeat :
+        wrap === :clamp  ? MTL.MTLSamplerAddressModeClampToEdge :
+        wrap === :mirror ? MTL.MTLSamplerAddressModeMirrorRepeat :
+                           MTL.MTLSamplerAddressModeClampToBorderColor
     desc = MTL.MTLSamplerDescriptor()
     desc.minFilter = f
     desc.magFilter = f
     desc.mipFilter = MTL.MTLSamplerMipFilterLinear
     desc.sAddressMode = a
     desc.tAddressMode = a
+    desc.borderColor = MTL.MTLSamplerBorderColorTransparentBlack
+    # Metal counts the one sample of no anisotropy as 1.
+    desc.maxAnisotropy = max(1, round(Int, anisotropy))
     desc.normalizedCoordinates = true
     return MetalSampler(MTL.MTLSamplerState(d.dev, desc))
 end
@@ -179,71 +157,45 @@ struct MetalFramebuffer <: Mantle.Framebuffer
     width::Int
     height::Int
     color_format::MTL.MTLPixelFormat
-    depth_format::MTL.MTLPixelFormat
     # Its passes commit on this device's queue, which a readback waits for.
     dev::MetalDevice
 end
 
-"""
-    Framebuffer(backend, width, height; depth = true, color_format = nothing)
-
-Allocate an offscreen target. `color_format` is a Julia element type lowered by
-`mtlformat` (default `BGRA8Unorm`); depth is `Depth32Float`.
-"""
-function Mantle.Framebuffer(d::MetalDevice, width::Integer, height::Integer;
-                            depth::Bool = true, color_format = nothing)
+# Core's `Framebuffer` (`graphics/resources.jl`) chose the formats.
+function makeframebuffer(d::MetalDevice, width::Int, height::Int, cfmt::MTL.MTLPixelFormat,
+                         dfmt::Union{Nothing,MTL.MTLPixelFormat})
     dev = d.dev
-    cfmt = color_format === nothing ? MTL.MTLPixelFormatBGRA8Unorm :
-                                      mtlformat(color_format)
     cdesc = MTL.MTLTextureDescriptor(cfmt, width, height, false)
     cdesc.usage = MTL.MTLTextureUsageRenderTarget | MTL.MTLTextureUsageShaderRead
     cdesc.storageMode = MTL.MTLStorageModeShared
     ctex = MTL.MTLTexture(dev, cdesc)
-
-    dfmt = MTL.MTLPixelFormatDepth32Float
     dtex = nothing
-    if depth
+    if dfmt !== nothing
         ddesc = MTL.MTLTextureDescriptor(dfmt, width, height, false)
         ddesc.usage = MTL.MTLTextureUsageRenderTarget
         # Private: depth is never read back.
         ddesc.storageMode = MTL.MTLStorageModePrivate
         dtex = MTL.MTLTexture(dev, ddesc)
     end
-    return MetalFramebuffer(ctex, dtex, Int(width), Int(height), cfmt, dfmt, d)
+    return MetalFramebuffer(ctex, dtex, width, height, cfmt, d)
 end
 
-"""
-    mtlformat(T) -> MTLPixelFormat
-
-Metal's render-target format for a Julia element type: the table in
-`runtime/format.jl`, as `vkformat` on Vulkan. `Float32` is depth. Matched on the
-type, not `nameof(T)`, so foreign types named `RGBA` do not match.
-"""
-function mtlformat(@nospecialize(T::Type); srgb::Bool = false)
-    # Depth, as `vkformat`'s `D32_SFLOAT`; `R32Float` would be a colour target.
-    T === Float32 && return MTL.MTLPixelFormatDepth32Float
-    T === UInt32 && return MTL.MTLPixelFormatR32Uint
-    T <: StaticVector{2,UInt32} && return MTL.MTLPixelFormatRG32Uint
-    T <: Real && error("no Metal pixel format for the scalar $T")
-    T === BGRA{N0f8}    && return srgb ? MTL.MTLPixelFormatBGRA8Unorm_sRGB :
-                                         MTL.MTLPixelFormatBGRA8Unorm
-    T === RGBA{N0f8}    && return srgb ? MTL.MTLPixelFormatRGBA8Unorm_sRGB :
-                                         MTL.MTLPixelFormatRGBA8Unorm
-    # Float formats have no sRGB variant; they hold linear values.
-    T === RGBA{Float16} && return MTL.MTLPixelFormatRGBA16Float
-    T === RGBA{Float32} && return MTL.MTLPixelFormatRGBA32Float
-
-    # Tuple spellings, as portable shaders write them.
-    T === NTuple{4,Float32} && return MTL.MTLPixelFormatRGBA32Float
-    T === NTuple{2,Float32} && return MTL.MTLPixelFormatRG32Float
-    T === NTuple{4,Float16} && return MTL.MTLPixelFormatRGBA16Float
-    T === NTuple{2,Float16} && return MTL.MTLPixelFormatRG16Float
-    T === NTuple{4,UInt8}   && return srgb ? MTL.MTLPixelFormatRGBA8Unorm_sRGB :
-                                             MTL.MTLPixelFormatRGBA8Unorm
-    T === UInt8             && return MTL.MTLPixelFormatR8Unorm
-    # No three-channel formats exist on Metal; callers pad to four.
-    error("no Metal pixel format for $T — extend `mtlformat` in metal/graphics.jl")
-end
+# Metal's value for each of core's pixel layouts (`runtime/format.jl`). No
+# three-channel formats exist on Metal; callers pad to four.
+nativeformat(::MetalAPI, ::Type{BGRA{N0f8}}, srgb::Bool) =
+    srgb ? MTL.MTLPixelFormatBGRA8Unorm_sRGB : MTL.MTLPixelFormatBGRA8Unorm
+nativeformat(::MetalAPI, ::Type{RGBA{N0f8}}, srgb::Bool) =
+    srgb ? MTL.MTLPixelFormatRGBA8Unorm_sRGB : MTL.MTLPixelFormatRGBA8Unorm
+nativeformat(::MetalAPI, ::Type{RGBA{Float16}}, ::Bool) = MTL.MTLPixelFormatRGBA16Float
+nativeformat(::MetalAPI, ::Type{RGBA{Float32}}, ::Bool) = MTL.MTLPixelFormatRGBA32Float
+nativeformat(::MetalAPI, ::Type{Depth32}, ::Bool) = MTL.MTLPixelFormatDepth32Float
+nativeformat(::MetalAPI, ::Type{Float32}, ::Bool) = MTL.MTLPixelFormatR32Float
+nativeformat(::MetalAPI, ::Type{Float16}, ::Bool) = MTL.MTLPixelFormatR16Float
+nativeformat(::MetalAPI, ::Type{UInt32}, ::Bool) = MTL.MTLPixelFormatR32Uint
+nativeformat(::MetalAPI, ::Type{SVector{2,UInt32}}, ::Bool) = MTL.MTLPixelFormatRG32Uint
+nativeformat(::MetalAPI, ::Type{NTuple{2,Float32}}, ::Bool) = MTL.MTLPixelFormatRG32Float
+nativeformat(::MetalAPI, ::Type{NTuple{2,Float16}}, ::Bool) = MTL.MTLPixelFormatRG16Float
+nativeformat(::MetalAPI, ::Type{UInt8}, ::Bool) = MTL.MTLPixelFormatR8Unorm
 
 """A compiled Metal render pipeline, plus the state a draw still has to set."""
 struct MetalCompiledGraphicsPipeline <: Mantle.CompiledGraphicsPipeline
@@ -496,11 +448,6 @@ function compile_pipeline(d::MetalDevice, p::Mantle.GraphicsPipeline,
               "with `Mantle.lower_geometry_to_mesh` and compiles the mesh " *
               "pipeline that comes out. Ask `supports_geometry_stage(backend)` " *
               "only if you need to know which of the two ran.")
-    (p.tess_control === nothing && p.tess_eval === nothing) ||
-        Mantle.supports_tessellation(d) ||
-        error("this backend has no tessellation; ask " *
-              "`supports_tessellation(backend)` before building a pipeline " *
-              "with it.")
 
     dev = d.dev
     vfn, ffn, vert_tt, frag_tt =
@@ -512,8 +459,7 @@ function compile_pipeline(d::MetalDevice, p::Mantle.GraphicsPipeline,
                                stagename(Mantle.stagefunction(p.fragment), "_fs"))
 
     # Native stages carry compiled code identity, independent of captured data.
-    key = (:raster, CacheIdentity((vstage, fstage)), Tuple(color_formats),
-           depth_format, pipeline_state_key(p))
+    key = pipelinekey((vstage, fstage), color_formats, depth_format, p)
     return get!(d.pipelines, key) do
         vfun, vlib = vstage
         ffun, flib = fstage === nothing ? (nothing, nothing) : fstage
@@ -786,11 +732,9 @@ buffer_types(a::StageArgs) = Tuple{map(argdevtype, a.device)...}
 
 # `bindings` is ignored: textures bind to encoder slots, so they do not affect
 # pipeline compilation (Vulkan needs the layout at compile).
-"""The attachment formats as Metal pixel formats, through `mtlformat` so a pipeline
-matches the attachments it draws into."""
+"""The attachments' native formats as the vector a pipeline descriptor takes."""
 mtlformats(color_formats, depth_format) =
-    (MTL.MTLPixelFormat[mtlformat(T) for T in color_formats],
-     depth_format === nothing ? nothing : mtlformat(depth_format))
+    (MTL.MTLPixelFormat[f for f in color_formats], depth_format)
 
 function Mantle.compile_draw(d::MetalDevice, p::Mantle.GraphicsPipeline,
                              color_formats, depth_format, vert_args, frag_args;
@@ -939,13 +883,13 @@ Mantle.target_image(fb::MetalFramebuffer) = fb.color
 
 Mantle.colorimage(fb::MetalFramebuffer) = fb.color
 Mantle.depthimage(fb::MetalFramebuffer) = fb.depth
+Mantle.depthformat(fb::MetalFramebuffer) = fb.depth.pixelFormat
 
 Mantle.target_extent(fb::MetalFramebuffer) = (fb.width, fb.height)
 Mantle.target_format(fb::MetalFramebuffer) = fb.color_format
-# The inverse of `mtlformat` over a framebuffer's colour formats, for core's
-# `blittarget` and for `readback_framebuffer`.
-
-eltypeof(f::MTL.MTLPixelFormat) = Mantle.eltypefor(mtlformat, f)
+# The inverse of `pixelformat` over a framebuffer's colour formats, for an
+# attachment's pixel type and for `readback_framebuffer`.
+eltypeof(f::MTL.MTLPixelFormat) = eltypefor(MetalAPI(), f)
 
 """
 End the encoder and commit the pass's command buffer.

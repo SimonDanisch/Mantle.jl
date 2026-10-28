@@ -13,17 +13,24 @@ struct Dispatch
     group::Any
 end
 
-"""DeviceRange(count; max=nothing)
+"""DeviceRange(count; max=nothing, at=1)
 
-A device-resident element count for an indirect dispatch. Core registers an
-Indirect read and backends prepare native workgroup counts and ordering.
-max is an optional static compilation ceiling. Kernels must guard i <= count[1]:
-whole workgroups can launch padded tail invocations."""
+A device-resident element count for an indirect dispatch: element `at` of the
+buffer `count`, so dispatches sized by different counters of one buffer need no
+buffer each. Core registers an Indirect read of the whole buffer and backends
+prepare native workgroup counts and ordering. max is an optional static
+compilation ceiling. Kernels must guard i <= count[at]: whole workgroups can
+launch padded tail invocations."""
 struct DeviceRange{C}
     count::C
     max::Union{Nothing,Int}
+    at::Int
+    function DeviceRange(count::C, max::Union{Nothing,Int}, at::Int) where {C}
+        at >= 1 || throw(ArgumentError("DeviceRange: `at` is a 1-based element index, not $at"))
+        return new{C}(count, max, at)
+    end
 end
-DeviceRange(count; max = nothing) = DeviceRange(count, max)
+DeviceRange(count; max = nothing, at::Integer = 1) = DeviceRange(count, max, Int(at))
 
 """The resource a `DeviceRange` reads its count from, or `nothing` for a host-side
 ndrange. Backends use this to decide which recording path a dispatch takes."""
@@ -42,6 +49,8 @@ refuserefs(::Base.RefValue) = throw(ArgumentError(
     "does not is passed as itself."))
 refuserefs(::Resource) = nothing
 refuserefs(::AbstractArray) = nothing
+# A dispatch's arguments, one by one: a method per argument type, not per argument list.
+refuserefs(@nospecialize(args::Tuple)) = (foreach(refuserefs, args); nothing)
 @generated function refuserefs(x::T) where {T}
     isbitstype(T) && return :(nothing)
     (T <: Tuple || T <: NamedTuple) && return Expr(

@@ -43,6 +43,31 @@ end
 pipeline_state_key(p::GraphicsPipeline) = (p.blend, p.cull, p.topology, p.depth)
 
 """
+    pipelinekey(stages, color_formats, depth_format, pipeline, extra...) -> key
+
+What identifies a compiled pipeline on every backend: its compiled stages by
+identity, so a stage recompiled after an edit is a new pipeline, the attachment
+formats it draws into and the state baked into it (`pipeline_state_key`). A
+backend appends what else it bakes in.
+"""
+pipelinekey(stages::Tuple, color_formats, depth_format, p, extra...) =
+    (CacheIdentity(stages), Tuple(color_formats), depth_format, pipeline_state_key(p), extra...)
+
+"""
+    checkstages(device, pipeline)
+
+Refuse a pipeline with stages the device cannot run before anything compiles, by
+the capability a caller can ask first.
+"""
+checkstages(dev, ::Any) = nothing
+function checkstages(dev, p::GraphicsPipeline)
+    (p.tess_control === nothing && p.tess_eval === nothing) || supports_tessellation(dev) ||
+        throw(ArgumentError("this device has no tessellation; ask `supports_tessellation(device)` " *
+                            "before building a pipeline with it"))
+    return nothing
+end
+
+"""
     lastgeometrystage(p::GraphicsPipeline) -> ShaderStage
 
 The stage whose outputs reach the rasteriser: the geometry stage when there is

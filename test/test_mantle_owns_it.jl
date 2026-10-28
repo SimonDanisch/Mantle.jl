@@ -75,29 +75,30 @@ const BACKEND_SPECIFIC_FUNCS = Set{Symbol}([
     :deviceslice,                         # native array views; some backends keep blocks instead
     :hostspan,                            # directly host-addressable device memory only
     :feed!, :decodemore!, :remaining,      # hardware decoder objects only
-    :buildgeometry!, :instancearray, :updatebatch!,  # BatchedTLAS native primitives
     :mipmapped,                           # graphics textures only
     :emitreadback!, :readbackbinding,     # native buffer transfer, only where nativebuffercopy(dev); others record a copy kernel
+    :readstamps,                          # GPU timestamp pools only; a host profiler reads none (`collect!`)
+    :submitpiece!,                        # backends that do not batch pieces; the others answer `submitrecording!`
 ])
 
 # Known missing implementations. New omissions and resolved entries both fail the guard.
 const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
-    :access, :acquire_next_image!, :allocate_batch_queue!, :batchqueue,
-    :begin_pass!, :begin_render_pass!, :beginframe!, :bind_textures,
+    :access, :newchannel, :closechannel!, :batchqueue,
+    :begin_render_pass!, :bind_textures,
     # These native graphics/RT operations are not implemented by the ROCm backend.
-    :build_blas_aabb, :build_blas, :copytexels!,
+    :buildnative!, :refitnative!, :refittable, :refitinput, :blastype, :nativerecords,
+    :geometryvalue, :instancerecord, :scenevalue, :copytexels!,
     :query_begin, :query_begin_transparent, :query_next!, :candidate_is_box,
     :candidate_primitive_index, :candidate_object_ray, :candidate_ids, :candidate_triangle,
     :commit_triangle!, :commit_intersection!, :committed_kind, :committed_ids,
     :committed_barycentrics, :query_end!,
-    :build_accel!, :colorimage, :compile_draw, :currentimage,
-    :depthimage, :destroyrecording!, :deviceof, :draw_in_pass!,
-    :draw_indexed_in_pass!, :draw_indirect_in_pass!, :emitkernel!, :end_pass!,
+    :build_accel!, :colorimage, :compile_draw,
+    :depthimage, :destroyrecording!, :emitkernel!,
     :end_render_pass!, :imageusage, :indirectslot, :initbackend!, :layout,
-    :makeimage, :makerecording, :present_frame!, :readback_framebuffer,
-    :readback_window, :record_draw!, :recorder, :refit_tlas!,
-    :release_batch_queue!, :remakeimage!, :reset_device!, :resetrecording!,
-    :screenshot, :set_viewport!, :setviewport!,
+    :makeimage, :makerecording, :readback_framebuffer, :record_draw!, :recorder,
+    :remakeimage!, :remakedevice, :resetrecording!,
+    :setviewport!, :windowsurface, :fitsurface!, :closesurface!,
+    :makeframebuffer, :maketexture, :makesampler,
     :stages, :storebytes!, :submit!,
     :use_bindings!,
     :vertextouches, :fragmenttouches,
@@ -171,12 +172,28 @@ end
     @test :staged_gemm_tile in nullary(core)
 end
 
-# 0.3: triage backend vocabulary methods with neither driver operations nor delegation.
-# A pure result can be a native fact rather than misplaced policy; review each candidate.
-# This known debt remains @test_broken.
+# 0.3: backend vocabulary methods with neither driver operations nor delegation are
+# candidates for misplaced core policy. Each one found was reviewed; the ones that
+# are native facts the heuristic cannot see are listed with the reason, per file, so a
+# new pure method anywhere still fails.
 
 const DRIVER_TOKENS = r"\b(VK\.|vk[A-Z_]|VK_|MTL\.|MTLm\.|Metal\.|@objc)\b"
-const PURE_BOOKKEEPING_ALLOWED = Set{Symbol}()
+# Reviewed 2026-10-28.
+const PURE_BOOKKEEPING_ALLOWED = Set{Tuple{Symbol,String}}([
+    (:validationmessages!, "src/metal/debug.jl"),   # drains what Metal's report-failure block collected
+    (:makeprofiler, "src/metal/graphics.jl"),       # turns on Metal's process-wide GPU-time collection
+    (:bind_textures, "src/metal/graphics.jl"),      # packs native texture and sampler objects
+    (:intrinsic_usage, "src/metal/ka.jl"),          # AIR intrinsic names are the backend compiler's
+    (:intrinsic_usage, "src/vulkan/access.jl"),     # Lava intrinsic names are the backend compiler's
+    (:emitbarriers!, "src/metal/record.jl"),        # sets an indirect command's barrier bit
+    (:emitloophead!, "src/metal/record.jl"),        # the same, at an iteration's head
+    (:target_view, "src/metal/window.jl"),          # the drawable's texture
+    (:abandonframe!, "src/metal/window.jl"),        # drops the drawables in flight
+    (:makedevice, "src/vulkan/graph.jl"),           # constructs the `LavaDevice`, through `invokelatest`
+    (:rawfree, "src/vulkan/graph.jl"),              # runs the Vulkan objects' destructors
+    (:mergeconstraints, "src/vulkan/graph.jl"),     # Vulkan memory-type bits
+    (:hostspan, "src/vulkan/graph.jl"),             # a `VkManagedBuffer`'s mapped pointer
+])
 
 @testset "0.3 a backend method names its driver" begin
     _, backend = sourcefiles()
@@ -196,7 +213,7 @@ const PURE_BOOKKEEPING_ALLOWED = Set{Symbol}()
         for m in eachmatch(r"^function\s+(?:Mantle\.)?([A-Za-z_][\w!]*)\s*\([\s\S]*?^end$"m, src)
             name = Symbol(m.captures[1])
             name in voc || continue
-            name in PURE_BOOKKEEPING_ALLOWED && continue
+            (name, replace(relpath(p, ROOT), '\\' => '/')) in PURE_BOOKKEEPING_ALLOWED && continue
             occursin(DRIVER_TOKENS, m.match) && continue
             # Delegation to another function of this backend reaches the driver.
             body = m.match
@@ -205,7 +222,7 @@ const PURE_BOOKKEEPING_ALLOWED = Set{Symbol}()
         end
     end
     isempty(pure) || @info "0.3 vocabulary methods in a backend with no driver call" pure
-    @test_broken isempty(pure)
+    @test isempty(pure)
 end
 
 # 0.4: core names no driver in code, except the exact backend-loader imports.
@@ -313,19 +330,20 @@ end
                   !any(d -> occursin(joinpath("src", d), string(f)), BACKEND_DIRS)
 
     # Unwrap parametric method signatures, but treat only Any, Device and Type as
-    # catch-alls. Bare parametric types such as CompiledDispatch are specific dispatches.
+    # catch-alls. Bare parametric types such as CompiledDraw are specific dispatches.
     permissive(m) = corefile(m.file) &&
         all(t -> t === Any || t === Mantle.Device || t === Type,
             collect(Base.unwrap_unionall(m.sig).parameters)[2:end])
 
-    # Read both backend trees; loaded method tables depend on the host platform.
+    # Read both backend trees; loaded method tables depend on the host platform. A
+    # definition is `function name(` or a one-line `name(...) =`, never a call that
+    # happens to start a line (`reset_device!(ctx)` read as Vulkan defining it).
+    defpat(nm) = Regex("(^|\n)[ \\t]*(@[\\w.]+[ \\t]+)*(function[ \\t]+(Mantle\\.)?\\Q$(nm)\\E\\(|" *
+                       "(Mantle\\.)?\\Q$(nm)\\E\\([^\\n]*\\)([ \\t]+where[^\\n=]*)?[ \\t]*=(?!=))")
     defines(dir, nm) = any(readdir(joinpath(ROOT, "src", dir); join = true)) do f
-        isdir(f) && return any(g -> endswith(g, ".jl") &&
-                                    occursin(Regex("(^|\n)\\s*(function\\s+)?(Mantle\\.)?\\Q$(nm)\\E\\("),
-                                             read(g, String)),
+        isdir(f) && return any(g -> endswith(g, ".jl") && occursin(defpat(nm), read(g, String)),
                                [joinpath(r, x) for (r, _, xs) in walkdir(f) for x in xs])
-        endswith(f, ".jl") && occursin(Regex("(^|\n)\\s*(function\\s+)?(Mantle\\.)?\\Q$(nm)\\E\\("),
-                                       read(f, String))
+        endswith(f, ".jl") && occursin(defpat(nm), read(f, String))
     end
 
     lonely = Symbol[]
@@ -340,7 +358,12 @@ end
 
     @info "0.8 vocabulary verbs with a permissive core default and ONE backend tree implementing" count=length(lonely) lonely
     # Legacy ceiling for the reviewed default set; this is not proof that every default is safe.
-    @test length(lonely) <= 31
+    # 33 since 2026-10-28: `packedsize` (only Vulkan packs draw arguments into plan
+    # memory), `supports_tessellation`, which Metal answers through core's `false` now
+    # that core refuses tessellation (`checkstages`; the old regex had read Metal's
+    # call to it as a definition), and `adopt!`, core's identity that Metal (and the
+    # ROCm extension, not scanned here) answer.
+    @test length(lonely) <= 33
 end
 
 # 0.9: extension-defined Mantle methods must belong to the declared vocabulary.

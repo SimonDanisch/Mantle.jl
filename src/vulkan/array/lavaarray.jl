@@ -30,7 +30,7 @@ end
 # `bq` defaults to the process default device. Backend code that has a device
 # must pass its queue (`test_no_ambient_allocation.jl`).
 function LavaArray{T,N}(::UndefInitializer, dims::NTuple{N,Int};
-                        bq::SubmitChannel{<:VulkanQueue}=vk_context().default_bq,
+                        bq::SubmitChannel{<:VulkanQueue}=Device(VulkanAPI()).default_bq,
                         extra_usage::UInt32=UInt32(0),
                         scratch::Bool=false,
                         unified::Bool=false) where {T,N}
@@ -107,7 +107,7 @@ function (::Type{LavaArray{T,N}})(s::UniformScaling, dims::Tuple{Int,Int}) where
     res = similar(LavaArray{T,N}, dims)
     fill!(res, zero(T))
     isempty(res) && return res
-    # The array's device, not the global `vk_context()`, which may be another GPU.
+    # The array's device, not the global `Device(VulkanAPI())`, which may be another GPU.
     KI.Kernel(KernelAbstractions.get_backend(res), identity_kernel!)(
         res, size(res, 1), T(s.λ); ndrange=minimum(dims))
     return res

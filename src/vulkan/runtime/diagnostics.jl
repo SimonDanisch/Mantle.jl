@@ -10,7 +10,7 @@ Live bytes and buffers, objects awaiting a deferred destroy, unified arena
 blocks and cache sizes of the default context. All zeros when no device exists.
 """
 function gpu_memory_usage()
-    ctx = VK_CONTEXT_REF[]
+    ctx = existingdefault(VulkanAPI())
     bq_deferred = 0
     if ctx !== nothing
         bq = ctx.default_bq

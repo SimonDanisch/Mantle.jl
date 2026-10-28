@@ -247,7 +247,7 @@ _VULKAN_OK || @info "Mantle tests: no Vulkan driver and compiler pair; skipping 
 # free identifiers that ONLY the extension defines, so the list is what is
 # actually used and not a guess.
 if _VULKAN_OK
-    using Mantle: LavaArray, VulkanFramebuffer, VulkanWindow,
+    using Mantle: LavaArray, VulkanFramebuffer,
                 VulkanCompiledGraphicsPipeline, DebugConfig, copy_framebuffer!,
                 fastdiv
 end
@@ -473,7 +473,7 @@ import Vulkan
     end
 
     @testset "a Float32 target is depth, by format and by aspect" begin
-        @test Mantle.vkformat(be, Float32) == Vulkan.FORMAT_D32_SFLOAT
+        @test Mantle.pixelformat(be, Float32) == Vulkan.FORMAT_D32_SFLOAT
         @test Mantle.aspect(Float32) == Vulkan.IMAGE_ASPECT_DEPTH_BIT
     end
 
@@ -537,43 +537,43 @@ include(joinpath(@__DIR__, "test_basealignment.jl"))
 # output object.
 include(joinpath(@__DIR__, "test_pipeline_stages.jl"))
 include(joinpath(@__DIR__, "test_raytracing_geometry.jl"))
-include(joinpath(@__DIR__, "test_tlas_mutation.jl"))
+include(joinpath(@__DIR__, "test_device_registry.jl"))
 include(joinpath(@__DIR__, "test_collection_policy.jl"))
 include(joinpath(@__DIR__, "test_compilation_cache.jl"))
 include(joinpath(@__DIR__, "test_kernel_preparation.jl"))
-isdefined(Mantle, :VideoDecode) && include(joinpath(@__DIR__, "test_video_bitstream.jl"))
+include(joinpath(@__DIR__, "test_video_bitstream.jl"))
 if _VULKAN_OK
     include(joinpath(@__DIR__, "vulkan", "test_collection_policy.jl"))
-    check_pressure_collection(Mantle.vk_context())
+    check_pressure_collection(Mantle.Device(Mantle.VulkanAPI()))
     include(joinpath(@__DIR__, "vulkan", "test_cache_invalidation.jl"))
-    check_cache_invalidation(Mantle.vk_context())
+    check_cache_invalidation(Mantle.Device(Mantle.VulkanAPI()))
     include(joinpath(@__DIR__, "vulkan", "test_pipeline_publication.jl"))
-    check_pipeline_publication(Mantle.vk_context())
+    check_pipeline_publication(Mantle.Device(Mantle.VulkanAPI()))
     include(joinpath(@__DIR__, "vulkan", "test_draw_argument_lifetime.jl"))
-    check_draw_argument_lifetime(Mantle.vk_context())
+    check_draw_argument_lifetime(Mantle.Device(Mantle.VulkanAPI()))
     include(joinpath(@__DIR__, "vulkan", "test_host_upload.jl"))
-    check_host_upload(Mantle.vk_context())
-    check_bounded_staging(Mantle.vk_context())
-    check_extent_refusal(Mantle.vk_context())
-    check_copy_bounds(Mantle.vk_context())
-    check_append_view(Mantle.vk_context())
+    check_host_upload(Mantle.Device(Mantle.VulkanAPI()))
+    check_bounded_staging(Mantle.Device(Mantle.VulkanAPI()))
+    check_extent_refusal(Mantle.Device(Mantle.VulkanAPI()))
+    check_copy_bounds(Mantle.Device(Mantle.VulkanAPI()))
+    check_append_view(Mantle.Device(Mantle.VulkanAPI()))
     include(joinpath(@__DIR__, "vulkan", "test_gemm_workspace.jl"))
-    check_workspace_retirement(Mantle.vk_context())
+    check_workspace_retirement(Mantle.Device(Mantle.VulkanAPI()))
     include(joinpath(@__DIR__, "vulkan", "test_flush_report.jl"))
-    check_flush_report(Mantle.vk_context())
+    check_flush_report(Mantle.Device(Mantle.VulkanAPI()))
     include(joinpath(@__DIR__, "vulkan", "test_live_buffers.jl"))
-    check_live_buffers(Mantle.vk_context())
+    check_live_buffers(Mantle.Device(Mantle.VulkanAPI()))
     include(joinpath(@__DIR__, "vulkan", "test_pipeline_creation.jl"))
-    check_pipeline_creation(Mantle.vk_context())
+    check_pipeline_creation(Mantle.Device(Mantle.VulkanAPI()))
     include(joinpath(@__DIR__, "vulkan", "test_recording_trim.jl"))
     check_recording_trim(Mantle.defaultbackend())
-    check_store_submission(Mantle.vk_context())
-    include(joinpath(@__DIR__, "vulkan", "test_accel_barriers.jl"))
-    check_accel_barriers(Mantle.vk_context())
-    include(joinpath(@__DIR__, "vulkan", "test_tlas_mutation.jl"))
-    check_tlas_mutation_allocations(Mantle.vk_context())
+    check_store_submission(Mantle.Device(Mantle.VulkanAPI()))
+    include(joinpath(@__DIR__, "vulkan", "test_external_image.jl"))
+    check_external_image(Mantle.Device(Mantle.VulkanAPI()))
+    include(joinpath(@__DIR__, "vulkan", "test_channel_waits.jl"))
+    check_channel_waits(Mantle.Device(Mantle.VulkanAPI()))
     include(joinpath(@__DIR__, "vulkan", "test_video_sessions.jl"))
-    check_video_sessions(Mantle.vk_context())
+    check_video_sessions(Mantle.Device(Mantle.VulkanAPI()))
 end
 # Also needs no GPU, and that is the point of the design rather than a happy
 # accident: everything the geometry-to-mesh lowering does except read one builtin
@@ -801,7 +801,8 @@ foreachbackend(joinpath(@__DIR__, "test_coopmat_reduce.jl"))
 foreachbackend(joinpath(@__DIR__, "test_coopmat_components.jl"))
 
 foreachbackend(joinpath(@__DIR__, "test_aabb_blas_overlap.jl"))
-_VULKAN_OK && foreachbackend(joinpath(@__DIR__, "vulkan", "test_aabb_blas_device.jl"))
+foreachbackend(joinpath(@__DIR__, "test_aabb_blas_device.jl"))
+foreachbackend(joinpath(@__DIR__, "test_blas_offset_inputs.jl"))
 foreachbackend(joinpath(@__DIR__, "test_atomics_and_dispatch.jl"))
 foreachbackend(joinpath(@__DIR__, "test_float_conversion_exact.jl"))
 foreachbackend(joinpath(@__DIR__, "test_bit_intrinsics.jl"))
@@ -830,6 +831,7 @@ foreachbackend(joinpath(@__DIR__, "test_kernel_print.jl"))
 foreachbackend(joinpath(@__DIR__, "test_array_capability_queries.jl"))
 
 foreachbackend(joinpath(@__DIR__, "test_holdleaves_stops_at_tlas.jl"))
+foreachbackend(joinpath(@__DIR__, "test_tlas_mutation.jl"))
 foreachbackend(joinpath(@__DIR__, "test_hwtlas_batch_delete.jl"))
 foreachbackend(joinpath(@__DIR__, "test_hwtlas_batch_triangles.jl"))
 foreachbackend(joinpath(@__DIR__, "test_hwtlas_device.jl"))

@@ -70,54 +70,35 @@ end
     copyto!(img::VulkanExternalImage, a::LavaArray) -> img
 
 Copy at least `4 * width * height` bytes of x-contiguous rows from `a` into the
-image on the GPU. Synchronizes `a`'s backend first, then submits on
-`ctx.compute_queue` and waits for that queue to go idle, so the importer may
-sample immediately. Leaves the image in `GENERAL` layout.
+image, in a one-shot on the device's channel, ordered behind the work that wrote
+`a`, and wait for it, so the importer may sample immediately. Leaves the image in
+`GENERAL` layout.
 """
 function Base.copyto!(img::VulkanExternalImage, a::LavaArray)
     nbytes = length(a) * sizeof(eltype(a))
     needed = 4 * img.width * img.height
-    nbytes >= needed ||
-        error("array holds $nbytes bytes; image needs $needed")
-    ctx = (a.buf[].ctx)::LavaDevice
-    KA.synchronize(ctx)  # pending kernel writes must land first
-
+    nbytes >= needed || throw(ArgumentError(
+        "copyto!: the array holds $nbytes bytes and the image needs $needed"))
+    bq = batchqueue(img.ctx)
     managed = a.buf[]
     src_offset = UInt64(pool_offset(managed) + a.offset)
-    # VK.jl handles destroy themselves in finalizers; a manual destroy here
-    # would destroy them twice and segfault.
-    pool = @vk_checked ctx "external_copy_pool" VK.create_command_pool(ctx.device, ctx.queue_family_index)
-    let
-        cb = first(@vk_checked ctx "external_copy_cb" VK.allocate_command_buffers(ctx.device,
-            VK.CommandBufferAllocateInfo(pool, VK.COMMAND_BUFFER_LEVEL_PRIMARY, 1)))
-        @vk_checked ctx "external_copy_begin" VK.begin_command_buffer(cb, VK.CommandBufferBeginInfo())
-        range = VK.ImageSubresourceRange(VK.IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1)
-        oldlayout = img.layout_initialized ? VK.IMAGE_LAYOUT_GENERAL :
-                                             VK.IMAGE_LAYOUT_UNDEFINED
-        VK.cmd_pipeline_barrier(cb, [], [],
-            [VK.ImageMemoryBarrier(VK.AccessFlag(0), VK.ACCESS_TRANSFER_WRITE_BIT,
-                oldlayout, VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                VK.QUEUE_FAMILY_IGNORED, VK.QUEUE_FAMILY_IGNORED, img.image, range)];
-            src_stage_mask = VK.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            dst_stage_mask = VK.PIPELINE_STAGE_TRANSFER_BIT)
-        VK.cmd_copy_buffer_to_image(cb, managed.buffer, img.image,
+    oldlayout = img.layout_initialized ? VK.IMAGE_LAYOUT_GENERAL : VK.IMAGE_LAYOUT_UNDEFINED
+    tok = oneshot!(bq; tag = :external) do e
+        imagebarrier!(e.cmd, img.image, oldlayout, VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK.PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
+            VK.AccessFlag(0), VK.ACCESS_TRANSFER_WRITE_BIT)
+        VK.cmd_copy_buffer_to_image(e.cmd, managed.buffer, img.image,
             VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             [VK.BufferImageCopy(src_offset, 0, 0,
                 VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT, 0, 0, 1),
                 VK.Offset3D(0, 0, 0), VK.Extent3D(img.width, img.height, 1))])
-        VK.cmd_pipeline_barrier(cb, [], [],
-            [VK.ImageMemoryBarrier(VK.ACCESS_TRANSFER_WRITE_BIT, VK.AccessFlag(0),
-                VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK.IMAGE_LAYOUT_GENERAL,
-                VK.QUEUE_FAMILY_IGNORED, VK.QUEUE_FAMILY_IGNORED, img.image, range)];
-            src_stage_mask = VK.PIPELINE_STAGE_TRANSFER_BIT,
-            dst_stage_mask = VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT)
-        @vk_checked ctx "external_copy_end" VK.end_command_buffer(cb)
-        @lock ctx.compute_queuelock begin
-            @vk_checked ctx "external_copy_submit" VK.queue_submit(ctx.compute_queue, [VK.SubmitInfo([], [], [cb], [])])
-            @vk_checked ctx "external_copy_wait" VK.queue_wait_idle(ctx.compute_queue)
-        end
-        img.layout_initialized = true
+        imagebarrier!(e.cmd, img.image, VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK.IMAGE_LAYOUT_GENERAL,
+            VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            VK.ACCESS_TRANSFER_WRITE_BIT, VK.AccessFlag(0))
+        hold!(e, a)
     end
+    waitfor!(bq, tok)
+    img.layout_initialized = true
     return img
 end
 

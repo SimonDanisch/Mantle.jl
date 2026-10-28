@@ -34,7 +34,7 @@ returned the clear colour.
 """
 function image_descriptor(::Type{T}, width::Int, height::Int, srgb::Bool,
                           usage::MTL.MTLTextureUsage) where {T}
-    desc = MTL.MTLTextureDescriptor(mtlformat(T; srgb), width, height, false)
+    desc = MTL.MTLTextureDescriptor(pixelformat(MetalAPI(), T; srgb), width, height, false)
     desc.usage = usage
     desc.storageMode = MTL.MTLStorageModePrivate
     desc.hazardTrackingMode = MTL.MTLHazardTrackingModeTracked
@@ -104,8 +104,6 @@ end
 Copy a placed render target to the host ([`readbackimage`](@ref)).
 """
 function Mantle.readback_target(dev::MetalDevice, t::MetalTransientImage{T}, ::Type) where {T}
-    t.image === nothing &&
-        error("this target has not been placed yet; readback needs a compiled plan")
     return readbackimage(identity, dev, t.image, T, t.width, t.height)
 end
 
@@ -118,14 +116,12 @@ indexes `y * width + x`, as Vulkan's copy with a zero `bufferRowLength`.
 """
 function Mantle.copy_target!(d::MetalDevice, dst, src::MetalTransientImage{T}; region = nothing) where {T}
     tex = src.image
-    tex === nothing &&
-        error("copying from a target that has not been placed; the plan is not compiled")
     buf = metal_buffer(dst)
     buf === nothing &&
         error("a copy pass writes into device memory, and $(typeof(dst)) is not any")
     cmd = framebuffer!(d.dev)
+    # Core checked that `dst` holds the pixels (`checkcopy`).
     x, y, w, h = region === nothing ? (0, 0, src.width, src.height) : region
-    sizeof(dst) >= w * h * sizeof(T) || error("copy destination is too small")
     MTL.MTLBlitCommandEncoder(cmd) do enc
         MTL.append_copy!(enc, buf, byteoffset(dst), w * sizeof(T), 0, tex,
                          MTL.MTLOrigin(x, y, 0), MTL.MTLSize(w, h, 1))

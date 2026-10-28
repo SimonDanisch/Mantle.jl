@@ -218,14 +218,7 @@ function decodevideo(D, ctx, data; maxframes::Int=typemax(Int), chroma::Bool=fal
     end
 end
 
-function picturemsb(dec::CodecDecoder, lsb::Integer)
-    if lsb < dec.prevlsb && dec.prevlsb-lsb >= dec.maxpoclsb ÷ 2
-        return dec.prevmsb + dec.maxpoclsb
-    elseif lsb > dec.prevlsb && lsb-dec.prevlsb > dec.maxpoclsb ÷ 2
-        return dec.prevmsb - dec.maxpoclsb
-    end
-    return dec.prevmsb
-end
+picturemsb(dec::CodecDecoder, lsb::Integer) = pocmsb(dec.prevmsb, dec.prevlsb, lsb, dec.maxpoclsb)
 
 function videobarrier!(ctx, cmd; memory=nothing, image=nothing)
     stage = UInt32(C.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
@@ -297,22 +290,6 @@ function recorddecode!(dec, refslots, out::VideoImage, target::VideoImage, decin
     dec.isfirst = false
     dec.decoded += 1
     return y, uv
-end
-
-"""Write each slice of `au` with a 3-byte Annex-B start code to `dst`. Return the
-slice offsets and the total size rounded up to `alignment`."""
-function uploadbitstream!(dst::Ptr{UInt8}, au, alignment::Integer)
-    offsets = Vector{UInt32}(undef, length(au))
-    off = 0
-    for (i, slice) in enumerate(au)
-        offsets[i] = UInt32(off)
-        unsafe_store!(dst + off, UInt8(0))
-        unsafe_store!(dst + off + 1, UInt8(0))
-        unsafe_store!(dst + off + 2, UInt8(1))
-        GC.@preserve slice unsafe_copyto!(dst + off + 3, pointer(slice), length(slice))
-        off += length(slice) + 3
-    end
-    return offsets, cld(off, alignment) * alignment
 end
 
 """Decode targets per video submission under DPB_AND_OUTPUT_DISTINCT; bounds their memory."""

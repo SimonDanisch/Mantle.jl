@@ -6,6 +6,7 @@
 # What is here is the part that has no backend in it: whether a type can reach
 # memory at all, and what a `Touch` means as a usage.
 using Test, Mantle
+using GPUCompiler
 const M = Mantle
 
 @testset "reflection failure is not an inferred no-access proof" begin
@@ -141,6 +142,26 @@ module AccessHoldsCode
     kernel(p::Ptr{Float32}) = load_or_store(p)
 end
 
+@testset "reading access IR populates the compiler's source cache" begin
+    sig = Tuple{typeof(AccessHoldsCode.kernel), Ptr{Float32}}
+    interp = Base.Compiler.NativeInterpreter()
+    walk = M.Walk(interp, IdDict{Any,M.Summary}(), Base.IdSet{Any}(), 24, sig)
+    ir = M.irfor(walk, sig)
+    @test ir !== nothing
+    match = Base._which(sig; world = Base.Compiler.get_inference_world(interp))
+    mi = Base.Compiler.specialize_method(match)
+    ci = get(Base.Compiler.code_cache(interp), mi, nothing)
+    @test ci isa Core.CodeInstance
+    source = GPUCompiler.CompilerCaching.get_source(ci)
+    @test source isa Core.CodeInfo
+    stored = @atomic :monotonic ci.inferred
+    code = copy(source.code)
+    @test M.irfor(walk, sig) !== nothing
+    @test get(Base.Compiler.code_cache(interp), mi, nothing) === ci
+    @test (@atomic :monotonic ci.inferred) === stored
+    @test GPUCompiler.CompilerCaching.get_source(ci).code == code
+end
+
 @testset "an access summary holds until its own code changes" begin
     cache = M.AccessCache()
     sig = Tuple{typeof(AccessHoldsCode.kernel), Ptr{Float32}}
@@ -155,4 +176,24 @@ end
     Core.eval(AccessHoldsCode, :(load_or_store(p::Ptr{Float32}) = (unsafe_store!(p, 1f0); 0f0)))
     @test touches() == M.WRITE
     @test cache.summaries[sig] !== held
+end
+
+# An outlined table lookup leaves scalar provenance in its caller. Scalar LLVM
+# sqrt reads no memory; the original input load still has to be recorded.
+@noinline access_loaded_value(ptr::Ptr{Float32})=unsafe_load(ptr)
+@inline access_root(x::Float32)=Base.llvmcall(("""
+declare float @llvm.sqrt.f32(float)
+define float @entry(float %x) {
+  %r = call float @llvm.sqrt.f32(float %x)
+  ret float %r
+}
+""","entry"),Float32,Tuple{Float32},x)
+function access_read_root!(out::Ptr{Float32},input::Ptr{Float32})
+    unsafe_store!(out,access_root(access_loaded_value(input)))
+    nothing
+end
+
+@testset "scalar square root after an outlined load" begin
+    @test M.accessof(nothing, access_read_root!, (Ptr{Float32}, Ptr{Float32})) ==
+          [M.NOTOUCH, M.WRITE, M.READ]
 end

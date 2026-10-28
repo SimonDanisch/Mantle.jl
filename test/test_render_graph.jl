@@ -191,6 +191,47 @@ M.target_extent(s::ResizableSource) = s.extent
         M.free!(out)
     end
 
+    @testset "a graph draw is compiled for its attachments' own formats" begin
+        # Through the element type a sRGB target and a UNORM one are the same
+        # `RGBA{N0f8}`, so the same pipeline served both: compiled for the UNORM
+        # format, it drew into a sRGB attachment its pipeline did not declare. The
+        # graph compiles against `target_format` now, which keeps the encoding.
+        g = M.Graph(RG_DEV)
+        plain = M.Transient.Image(g, RGBA{N0f8}, (64, 64))
+        encoded = M.Transient.Image(g, RGBA{N0f8}, (64, 64); srgb = true)
+        @test M.target_format(plain) != M.target_format(encoded)
+        for (name, t) in (("plain", plain), ("encoded", encoded))
+            M.render!(g, name, t => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+                M.draw!(p, RG_PIPE, (RG_TRI,), 3)
+            end
+        end
+        outs = (readout!(g, plain; name = "read plain"), readout!(g, encoded; name = "read encoded"))
+        plan = M.record!(M.Plan(g))
+        @test M.npipelines(plan) == 2
+        M.run!(plan)
+        # Green is 1 in either encoding, so both read back the same triangle.
+        @test greens(pixels(outs[1])) == RG_COVERED
+        @test greens(pixels(outs[2])) == RG_COVERED
+        M.free!(plan)
+        foreach(M.free!, outs)
+    end
+
+    @testset "a graph draw refuses a depth test without a depth attachment" begin
+        # The Vulkan backend compiled graph draws itself and skipped this check,
+        # which hand-recorded draws had, so the pipeline was built against no
+        # depth attachment and drew untested.
+        tested = M.GraphicsPipeline(; vertex = M.VertexShader(rg_vertex; outputs = (tint = NTuple{4,Float32},)),
+                                      fragment = M.FragmentShader(rg_fragment),
+                                      cull = M.NoCull(), depth = M.DepthLess())
+        g = M.Graph(RG_DEV)
+        color = M.Transient.Image(g, RGBA{N0f8}, (64, 64))
+        M.render!(g, "untested", color => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+            M.draw!(p, tested, (RG_TRI,), 3)
+        end
+        readout!(g, color)
+        @test_throws ArgumentError M.Plan(g)
+    end
+
     @testset "two targets that never overlap, in one arena, both render" begin
         # The whole point of placing render targets: `a` is finished before `b`
         # starts, so the compiler is free to give them the same bytes. On Metal
@@ -297,6 +338,31 @@ M.target_extent(s::ResizableSource) = s.extent
         @test count(x -> x < 0.9f0, d) == RG_COVERED
         M.free!(plan)
         M.free!(tri)
+    end
+
+    @testset "a copy into too small a buffer is refused when the plan is built" begin
+        # Each backend checked this itself when it emitted the copy: Vulkan while
+        # recording, Metal while running, with an `error` either way. Core checks
+        # it once per compile.
+        g = M.Graph(RG_DEV)
+        img = M.Transient.Image(g, RGBA{N0f8}, (16, 16))
+        M.render!(g, "fill", img => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+            M.draw!(p, RG_PIPE, (RG_TRI,), 3)
+        end
+        small = M.Buffer(RG_DEV, RGBA{N0f8}, 16 * 16 - 1)
+        M.copy!(g, "read", small, img)
+        @test_throws ArgumentError M.Plan(g)
+        # A region needs only its own pixels.
+        g = M.Graph(RG_DEV)
+        img = M.Transient.Image(g, RGBA{N0f8}, (16, 16))
+        M.render!(g, "fill", img => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+            M.draw!(p, RG_PIPE, (RG_TRI,), 3)
+        end
+        M.copy!(g, "read", small, img; region = (0, 0, 15, 16))
+        plan = M.record!(M.Plan(g))
+        M.run!(plan)
+        M.free!(plan)
+        M.free!(small)
     end
 
     @testset "an indirect draw reads a count a compute pass wrote" begin

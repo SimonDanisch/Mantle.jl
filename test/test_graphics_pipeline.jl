@@ -69,6 +69,21 @@ end
         return
     end
 
+    @testset "a framebuffer's defaults are the same on every backend" begin
+        # The portable defaults were each backend's: a Vulkan framebuffer stored
+        # sRGB-encoded BGRA, a Metal one plain BGRA, so the same draw read back
+        # different bytes. Core chooses them now.
+        api = Mantle.syncbackend(dev)
+        fb = Mantle.Framebuffer(dev, 4, 4)
+        @test eltype(fb) === BGRA{N0f8}
+        @test Mantle.target_format(fb) == Mantle.pixelformat(api, BGRA{N0f8})
+        @test Mantle.depthformat(OffscreenTarget(fb)) == Mantle.pixelformat(api, Float32)
+        encoded = Mantle.Framebuffer(dev, 4, 4; depth = false, srgb = true)
+        @test Mantle.target_format(encoded) == Mantle.pixelformat(api, BGRA{N0f8}; srgb = true)
+        @test Mantle.depthformat(OffscreenTarget(encoded)) === nothing
+        @test_throws ArgumentError Mantle.Framebuffer(dev, 4, 4; color_format = RGBA{Float32}, srgb = true)
+    end
+
     # ── Basic vertex + fragment ──
 
     @testset "solid color triangle" begin
@@ -121,6 +136,24 @@ end
         positions = Mantle.devicearray(TESTBACKEND, Vec3f[Vec3f(-1,-1,0), Vec3f(3,-1,0), Vec3f(-1,3,0)])
         pixels = draw_and_readback(dev, pip, 3; args=(positions,))
         @test all(p -> p.r ≈ 1f0, pixels)  # all red
+    end
+
+    @testset "a vertex body may take a leading VertexIndex on every backend" begin
+        # The spelling a body needs to also run lowered onto a mesh stage, which has
+        # no `vertex_index()` (`lower_geometry_to_mesh`). Only Metal's vertex stage
+        # handed one over; Vulkan's could not compile the body at all.
+        function vid_vert(vid::Mantle.VertexIndex, positions)
+            @inbounds p = positions[vid.value]
+            return (position = Vec4f(p[1], p[2], p[3], 1.0f0),
+                    color = Vec4f(0.0f0, 0.0f0, 1.0f0, 1.0f0))
+        end
+        vid_frag(inputs) = inputs.color
+        pip = GraphicsPipeline(; vertex = VertexShader(vid_vert; outputs = (color = Vec4f,)),
+                                 fragment = FragmentShader(vid_frag),
+                                 blend = Opaque(), cull = NoCull(), depth = DepthOff())
+        positions = Mantle.devicearray(TESTBACKEND, Vec3f[Vec3f(-1,-1,0), Vec3f(3,-1,0), Vec3f(-1,3,0)])
+        pixels = draw_and_readback(dev, pip, 3; args=(positions,))
+        @test all(p -> p.b ≈ 1f0 && p.r ≈ 0f0, pixels)  # all blue
     end
 
     @testset "vertex-to-fragment varying" begin

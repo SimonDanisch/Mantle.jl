@@ -99,11 +99,11 @@ end
 const TIMESTAMP_POOL_SIZE = Ref(MAX_DISPATCH_LOG * 2)
 
 """
-    reset_dispatch_timing!(ctx = vk_context())
+    reset_dispatch_timing!(ctx = Device(VulkanAPI()))
 
 Clear recorded timings and reset the slot counter; `with_dispatch_timing` calls it.
 """
-function reset_dispatch_timing!(ctx::LavaDevice = vk_context())
+function reset_dispatch_timing!(ctx::LavaDevice = Device(VulkanAPI()))
     empty!(ctx.caches.recorded_dispatches)
     ctx.caches.timestamp_next_slot = 0
     return nothing
@@ -130,13 +130,13 @@ function Base.show(io::IO, r::KernelTimingReport)
 end
 
 """
-    dispatch_timing_report(ctx = vk_context(); flush_first=true) -> Vector{KernelTimingReport}
+    dispatch_timing_report(ctx = Device(VulkanAPI()); flush_first=true) -> Vector{KernelTimingReport}
 
 Read the recorded timestamps back, convert to ns and aggregate by kernel name,
 sorted by total time, largest first. `flush_first` waits for submitted work
 first; pass `false` only after synchronizing yourself.
 """
-function dispatch_timing_report(ctx::LavaDevice = vk_context(); flush_first::Bool=true)
+function dispatch_timing_report(ctx::LavaDevice = Device(VulkanAPI()); flush_first::Bool=true)
     pool = ctx.caches.timestamp_pool
     pool === nothing && return KernelTimingReport[]
     isempty(ctx.caches.recorded_dispatches) && return KernelTimingReport[]
@@ -179,7 +179,7 @@ function dispatch_timing_report(ctx::LavaDevice = vk_context(); flush_first::Boo
 end
 
 """
-    with_dispatch_timing(f, ctx = vk_context()) -> Vector{KernelTimingReport}
+    with_dispatch_timing(f, ctx = Device(VulkanAPI())) -> Vector{KernelTimingReport}
 
 Run `f()` with per-dispatch timing on and return the per-kernel report, after
 waiting for submitted work. Restores the previous settings.
@@ -193,7 +193,7 @@ for r in report
 end
 ```
 """
-function with_dispatch_timing(f, ctx::LavaDevice = vk_context())
+function with_dispatch_timing(f, ctx::LavaDevice = Device(VulkanAPI()))
     d = ctx.diag
     prev_timing = d.dispatch_timing
     # `ka_launch!` names a dispatch only with logging on, and records need the name.
@@ -211,7 +211,7 @@ function with_dispatch_timing(f, ctx::LavaDevice = vk_context())
 end
 
 # `ctx`'s timestamp query pool, created on first use. Takes the context, never
-# `vk_context()`: another device's pool on this command buffer is invalid.
+# `Device(VulkanAPI())`: another device's pool on this command buffer is invalid.
 function ensure_timestamp_pool!(ctx::LavaDevice)
     ctx.caches.timestamp_pool === nothing || return ctx.caches.timestamp_pool
     # ns per tick

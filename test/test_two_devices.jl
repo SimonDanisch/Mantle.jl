@@ -72,7 +72,7 @@ below was visible until everything above it was fixed.
    lookup must not allocate and must not be able to miss — is a field hop.
 
 5. **`TESTBACKEND` built inside the library, six places.** An unpinned backend
-   resolves its queue through `vk_context()`, so `fill!`, `mul!`,
+   resolves its queue through `Device(VulkanAPI())`, so `fill!`, `mul!`,
    `coopmat_gemm!`, broadcast `_copyto!` and the identity-matrix constructor all
    dispatched on whichever context was global rather than on the array's own.
    The array read back as zeros and Lava's `sync_access!` guard caught it much
@@ -92,7 +92,7 @@ below was visible until everything above it was fixed.
    invisible to a probe that only runs one kernel.
 
 7. **`_REDUCE_SCRATCH`** — FIXED (now `ctx.caches.reduce_scratch`). As an
-   `IdDict` keyed by context it still allocated its buffer on `vk_context()`:
+   `IdDict` keyed by context it still allocated its buffer on `Device(VulkanAPI())`:
    keyed right, allocated wrong, which reads as correct on any machine with one
    device and is the subtlest shape in this whole list.
 

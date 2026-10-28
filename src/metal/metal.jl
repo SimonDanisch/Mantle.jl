@@ -11,8 +11,7 @@ using Metal: MtlArray
 # Device intrinsics must be `@device_override`s, not plain methods: `KI.barrier`
 # has a host method that errors, and a plain method would replace it on the host.
 using Metal: @device_override
-# GLFW owns the window; `@objc`/`id` put a `CAMetalLayer` on its view.
-using GLFW
+# Core owns the GLFW window; `@objc`/`id` put a `CAMetalLayer` on its view.
 # ObjectiveC 7 gives each `@objc` call its own autorelease pool and Metal.jl returns
 # retained wrappers, so builds must not be wrapped in a global `@autoreleasepool`.
 using Metal.ObjectiveC: @objc, id
@@ -31,33 +30,26 @@ include("kernelinterface.jl")
 include("device_intrinsics.jl")
 include("ka.jl")
 include("raytracing.jl")
-# After raytracing.jl: needs `MetalTLAS`.
+# After raytracing.jl: needs `MetalTLAS` and `MetalBLAS`.
 include("hwtlas.jl")
 
 include("graphics.jl")
 
 # After graphics.jl: needs `Metal.MeshPtr` and the AIR intrinsics.
 include("mesh.jl")
-# After graphics.jl: needs `mtlformat`.
+# After graphics.jl: needs its `nativeformat` table.
 include("images.jl")
-# After graphics.jl: needs `mtlformat`, `framebuffer!` and `commit!`.
+# After graphics.jl: needs its `nativeformat` table, `framebuffer!` and `commit!`.
 include("window.jl")
 
 # Last: recording a plan into an indirect command buffer needs every other file.
 include("record.jl")
 
-# No pipeline thread: Metal.jl compiles on the calling thread. The `atexit` hook
-# retires every live device before Julia's final finalizer pass, so no resource
-# is released through a driver that is already gone.
+# No pipeline thread: Metal.jl compiles on the calling thread. Core's exit hook
+# retires every device (`retireall!`).
 function Mantle.initbackend!(::MetalAPI)
     register_backend!(; name = :metal, priority = 90) do
         Metal.functional() ? Device(MetalAPI()) : nothing
-    end
-    atexit() do
-        for r in METAL.live
-            d = r.value
-            d isa MetalDevice && retire!(d)
-        end
     end
     return nothing
 end

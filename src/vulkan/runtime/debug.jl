@@ -1,5 +1,5 @@
 # Validation is switched on only by building the device with
-# `reset_device!(debug = DebugConfig(...))`. `verify_gpu_av` checks that GPU-AV,
+# `reset_device!(device; debug = DebugConfig(...))`. `verify_gpu_av` checks that GPU-AV,
 # once enabled, actually reports errors on this driver.
 
 # The probe kernel. Kernels are compiled by function, so this cannot be a closure
@@ -13,7 +13,7 @@ function gpuav_check_kernel!(out, bad_idx::Int)
 end
 
 """
-    verify_gpu_av(; timeout = 30.0, ctx = vk_context()) -> Bool
+    verify_gpu_av(; timeout = 30.0, ctx = Device(VulkanAPI())) -> Bool
 
 Run a known out-of-bounds device write and return `true` once GPU-AV reports it
 through the debug-utils callback; throw `LavaError` if no matching message
@@ -24,12 +24,12 @@ layer attaches but does not instrument, and the probe write segfaults the
 process. Success and the throw both reset `ctx`'s device. `sync_val` and
 `best_practices` need no probe.
 """
-function verify_gpu_av(; timeout::Float64=30.0, ctx::LavaDevice = vk_context())
+function verify_gpu_av(; timeout::Float64=30.0, ctx::LavaDevice = Device(VulkanAPI()))
     if !ctx.gpu_assisted
         throw(LavaError("verify_gpu_av",
             "GPU-AV is not enabled (gpu_assisted=false)",
             "Build the device with it on first: " *
-            "`reset_device!(debug = DebugConfig(gpu_av = true, pool_disabled = true))`"))
+            "`reset_device!(device; debug = DebugConfig(gpu_av = true, pool_disabled = true))`"))
     end
     bq  = ctx.default_bq
     dev = ctx.device

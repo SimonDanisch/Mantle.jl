@@ -82,7 +82,7 @@ function create_compute_pipeline_large_stack(ctx::LavaDevice, device::Ptr{Cvoid}
             mark_device_lost!(ctx)
             error("vkCreateComputePipelines timed out after 600s — AMD Windows " *
                   "driver shader compiler hung. Device marked DEVICE_LOST; " *
-                  "call reset_device!() to recover.")
+                  "call reset_device!(device) to recover.")
         end
         ccall((:CloseHandle, "kernel32"), Cint, (Ptr{Cvoid},), handle)
         wait_result != 0 && error("WaitForSingleObject failed: $wait_result")
@@ -121,7 +121,7 @@ function createpipeline(create, ctx::LavaDevice, flags::VK.PipelineCreateFlag, n
 end
 
 """
-    no_pipeline_compilation(f; ctx = vk_context()) -> f()
+    no_pipeline_compilation(f; ctx = Device(VulkanAPI())) -> f()
 
 Run `f` with `ctx`'s driver forbidden to compile pipelines, which proves the
 `VkPipelineCache` seeded from disk serves them (a fast run alone could be the
@@ -131,9 +131,9 @@ A refusal does not throw: [`createpipeline`](@ref) records it and compiles.
     no_pipeline_compilation() do
         run_the_workload()
     end
-    vk_context().diag.pipeline_compiles_refused == 0    # nothing needed the driver's compiler
+    Device(VulkanAPI()).diag.pipeline_compiles_refused == 0    # nothing needed the driver's compiler
 """
-function no_pipeline_compilation(f; ctx::LavaDevice = vk_context())
+function no_pipeline_compilation(f; ctx::LavaDevice = Device(VulkanAPI()))
     d = ctx.diag
     old = d.no_pipeline_compile
     clear_kernel_cache!(ctx)

@@ -1,19 +1,31 @@
-# Metal's acceleration structures, for the verbs in `raytracing/api.jl`. Two ABI
-# differences from Vulkan: `MTLPackedFloat4x3` is the transpose of a row-major
+# Metal's acceleration structures, for the native verbs under `raytracing/api.jl`. Two
+# ABI differences from Vulkan: `MTLPackedFloat4x3` is the transpose of a row-major
 # `Mat3x4f` (reinterpreting silently shears), and an instance names its BLAS by
 # `UInt32` index into `instancedAccelerationStructures`, not by address. Callers
-# write `Raycore.InstanceRecord`s; [`MetalInstanceDescriptor`](@ref) converts.
+# write `Raycore.InstanceRecord`s; core's `instances_kernel!` packs them into
+# [`MetalInstanceDescriptor`](@ref)s (`instancerecord` in `hwtlas.jl`).
 
-# The `MTLBuffer` behind an `MtlArray` and the byte offset into it. Views over
-# pool regions share a buffer; binding at offset 0 reads another region's bytes.
-mtlbuffer(a::MtlArray) = (a.data[].buffer, a.offset * sizeof(eltype(a)))
+# Metal cannot infer residency for a structure a kernel names only by its
+# `gpuResourceID`, and a non-resident structure makes rays miss silently. Through
+# Metal.jl's per-queue residency set rather than `add_allocation!`: the set holds
+# strong references, and only allocations Metal.jl tracks leave it when freed
+# (`forget_resident!`).
+function make_resident!(d::MetalDevice, resources...)
+    Metal.install_queue_residency!(cmdqueue(d), d.dev)
+    for r in resources
+        r === nothing && continue
+        Metal.make_persistently_resident!(r, d.dev)
+    end
+    return nothing
+end
 
 """
     MetalInstanceDescriptor
 
 `MTLAccelerationStructureUserIDInstanceDescriptor` byte for byte, with plain
-`Float32` fields so a kernel can write it (`writeinstances!` in `hwtlas.jl`).
-`transform` is Metal's packed 4×3, the transpose of a `Mat3x4f`'s storage.
+`Float32` fields so a kernel can write it (core's `instances_kernel!`, through
+`instancerecord` in `hwtlas.jl`). `transform` is Metal's packed 4×3, the
+transpose of a `Mat3x4f`'s storage.
 """
 struct MetalInstanceDescriptor
     transform::NTuple{12,Float32}
@@ -26,37 +38,27 @@ end
 @assert sizeof(MetalInstanceDescriptor) == sizeof(MTL.MTLAccelerationStructureUserIDInstanceDescriptor)
 
 """
-    MetalInstanceDescriptor(r::Raycore.InstanceRecord, index, options, keep)
-
-The descriptor of instance `r` of the geometry at zero-based `index` into
-`instancedAccelerationStructures`. `keep` is ANDed into the mask (`0xff` shown,
-`0` hidden). The custom index is truncated to 24 bits, Vulkan's width.
-"""
-@inline MetalInstanceDescriptor(r::Raycore.InstanceRecord, index::UInt32, options::UInt32, keep::UInt32) =
-    MetalInstanceDescriptor(Tuple(transpose(r.transform)), options, r.mask & keep, UInt32(0),
-                            index, r.id & 0x00ffffff)
-
-"""
     MetalTLAS
 
 A built top-level acceleration structure. `blases` keeps the structures the
 instance descriptors index alive; nothing else owns them. `scratch` is the refit
 scratch, at least 1 byte.
 """
-mutable struct MetalTLAS{Tri} <: HWTLAS{Tri}
+mutable struct MetalTLAS <: AccelStructure
     handle::MTL.MTLAccelerationStructure
     desc::Any                    # MTLInstanceAccelerationStructureDescriptor
     blases::Vector{MTL.MTLAccelerationStructure}  # what instances index into
-    # The `MtlVector{MetalInstanceDescriptor}` `desc` names; every refit reads it.
+    # The `MtlVector{MetalInstanceDescriptor}` `desc` names, which it owns; every refit reads it.
     instances::Any
     # `refitScratchBufferSize` can be 0 for a refittable structure, so refit
     # permission is the `refittable` flag, not the scratch size.
     scratch::MTL.MTLBuffer
     refittable::Bool
     count::Int
-    function MetalTLAS{Tri}(handle, desc, blases, instances, scratch, refittable, count) where {Tri}
-        t = new{Tri}(handle, desc, blases, instances, scratch, refittable, count)
-        return finalizer(freebuffers!, t)
+    freed::Bool
+    function MetalTLAS(handle, desc, blases, instances, scratch, refittable, count)
+        t = new(handle, desc, blases, instances, scratch, refittable, count, false)
+        return finalizer(unsafe_free!, t)
     end
 end
 
@@ -66,32 +68,42 @@ end
 A built bottom-level acceleration structure over one geometry. `desc` is kept
 because a refit needs the build's descriptor.
 """
-mutable struct MetalBLAS
+mutable struct MetalBLAS <: AccelStructure
     handle::MTL.MTLAccelerationStructure
     desc::Any
     scratch::MTL.MTLBuffer
     refittable::Bool
-    # The vertex buffer `desc` names (three `Float32` per vertex), which
-    # `Raycore.refit!` overwrites; `nothing` for boxes.
-    vertices::Union{Nothing, MTL.MTLBuffer}
-    nvertices::Int
-    function MetalBLAS(handle, desc, scratch, refittable, vertices, nvertices)
-        b = new(handle, desc, scratch, refittable, vertices, nvertices)
-        return finalizer(freebuffers!, b)
+    # The device arrays `desc` names, which it owns: the vertices and indices, or the
+    # boxes. A refit reads the first, which the caller rewrote (`refitinput`).
+    inputs::Vector{Any}
+    # The device it was built on, which a refit runs on.
+    device::MetalDevice
+    freed::Bool
+    function MetalBLAS(handle, desc, scratch, refittable, inputs, device)
+        b = new(handle, desc, scratch, refittable, inputs, device, false)
+        return finalizer(unsafe_free!, b)
     end
 end
-MetalBLAS(handle, desc, scratch, refittable) = MetalBLAS(handle, desc, scratch, refittable, nothing, 0)
 
-"""
-Finalizer: free the `MTLBuffer`s a structure owns, which are unmanaged.
-`Metal.free` is finalizer-safe. A TLAS's descriptor `MtlArray` frees itself.
-"""
-function freebuffers!(b::MetalBLAS)
+# Free the `MTLBuffer`s a structure owns, which are unmanaged, and its inputs, once: an
+# explicit release and the finalizer both come here. `Metal.free` defers past the work
+# using a buffer and is finalizer-safe. The structure itself leaves the residency set
+# when collected (`newstructure`), as a trace of an older structure may still hold it.
+function unsafe_free!(b::MetalBLAS)
+    b.freed && return nothing
+    b.freed = true
     Metal.free(b.scratch)
-    b.vertices === nothing || Metal.free(b.vertices)
+    foreach(unsafe_free!, b.inputs)
     return nothing
 end
-freebuffers!(t::MetalTLAS) = (Metal.free(t.scratch); nothing)
+
+function unsafe_free!(t::MetalTLAS)
+    t.freed && return nothing
+    t.freed = true
+    Metal.free(t.scratch)
+    unsafe_free!(t.instances)
+    return nothing
+end
 
 """
     newstructure(dev, bytes) -> MTLAccelerationStructure
@@ -142,199 +154,83 @@ function withaccelencoder(f, d::MetalDevice)
     return nothing
 end
 
-"""
-    build_blas(dev, vertices, ntriangles; indices = nothing, nvertices,
-               refittable = false) -> MetalBLAS
+"""Core's build context over a Metal queue. `into` is the queue's device: each build
+encodes into a command buffer of its own and waits for it ([`withaccelencoder`](@ref))."""
+const MetalAccelBuildContext = AccelBuildContext{<:Metal.BatchedCommandQueue,<:MetalDevice}
 
-Build a bottom-level structure over triangles. `vertices` holds `nvertices`
-`Float32` triples (`stride` bytes apart); `indices` (`UInt32`, three per
-triangle) is optional, otherwise consecutive triples form triangles.
-`refittable` sets `MTLAccelerationStructureUsageRefit`, without which Metal
-rejects a refit.
-"""
-function build_blas(d::MetalDevice, vertices::MTL.MTLBuffer, ntriangles::Integer;
-                                     stride::Integer = 12, refittable::Bool = false,
-                                     indices::Union{Nothing, MTL.MTLBuffer} = nothing,
-                                     nvertices::Integer = 3 * ntriangles)
-    geo = MTL.MTLAccelerationStructureTriangleGeometryDescriptor()
-    geo.vertexBuffer = vertices
-    geo.vertexStride = stride
-    geo.triangleCount = ntriangles
-    if indices !== nothing
-        geo.indexBuffer = indices
-        geo.indexType = MTL.MTLIndexTypeUInt32
-    end
-
-    desc = MTL.MTLPrimitiveAccelerationStructureDescriptor()
-    desc.geometryDescriptors = NSArray([geo])
-    refittable && (desc.usage = MTL.MTLAccelerationStructureUsageRefit)
-
-    sizes = MTL.accelerationStructureSizes(d.dev, desc)
-    accel = buildstructure(d, desc, sizes)
-    keep = MTL.MTLBuffer(d.dev, max(sizes.refitScratchBufferSize, 1);
-                         storage = Metal.PrivateStorage)
-    return MetalBLAS(accel, desc, keep, refittable, vertices, Int(nvertices))
-end
-
-"""What `build_accel!`'s `do` block receives. Each build waits on its own command
-buffer ([`withaccelencoder`](@ref)), so the context is the device plus `preserves`,
-host data kept alive until the GPU has read it.
-"""
-struct MetalAccelBuildContext
-    device::MetalDevice
-    preserves::Vector{Any}
-end
-
-"""
-    build_accel!(f, bq::Metal.BatchedCommandQueue)
-
-Run `f` against a build context:
-
-    blas = Mantle.build_accel!(Mantle.batchqueue(Mantle.Device())) do c
-        Mantle.build_blas_aabb(c, aabbs)
-    end
-"""
+# Nothing orders a build's own command buffer after the work open on `bq`, which may
+# write its inputs (core's instance records), so that is committed and waited for first.
 function Mantle.build_accel!(f, bq::Metal.BatchedCommandQueue)
-    # `batchqueue` does not carry its device; builds use the default `Device()`.
-    ctx = MetalAccelBuildContext(Mantle.Device(), Any[])
-    return f(ctx)
+    flush!(bq)
+    return f(AccelBuildContext(bq, deviceof(bq), Any[]))
 end
 
 """
-    build_blas(ctx, vertices, indices; allow_update = false) -> MetalBLAS
-
-The portable triangle build (`raytracing/api.jl`). `vertices` go to a `Shared`
-buffer the BLAS owns for refits.
+A primitive structure over the geometry `geo` names, keeping `inputs`. `refittable`
+sets `MTLAccelerationStructureUsageRefit`, without which Metal rejects a refit.
 """
-function Mantle.build_blas(ctx::MetalAccelBuildContext, vertices::Vector{NTuple{3,Float32}},
-                           indices::Vector{UInt32}; allow_update::Bool = false)
-    d = ctx.device
-    length(indices) % 3 == 0 && !isempty(indices) || throw(ArgumentError(
-        "build_blas: $(length(indices)) indices are not a whole number of triangles"))
-    vbuf, ibuf = GC.@preserve vertices indices (
-        MTL.MTLBuffer(d.dev, sizeof(vertices), pointer(vertices); storage = Metal.SharedStorage),
-        MTL.MTLBuffer(d.dev, sizeof(indices), pointer(indices); storage = Metal.SharedStorage))
-    # The descriptor retains the index buffer, so this reference is freed.
-    blas = build_blas(d, vbuf, length(indices) ÷ 3; indices = ibuf, nvertices = length(vertices),
-                      refittable = allow_update)
-    Metal.free(ibuf)
-    return blas
-end
-
-"""
-    Raycore.refit!(blas::MetalBLAS, vertices) -> blas
-
-Write the moved `vertices` into the structure's vertex buffer and refit in place.
-Throws `ArgumentError` without `allow_update` or for a different vertex count.
-"""
-function Raycore.refit!(blas::MetalBLAS, vertices::AbstractVector)
-    blas.refittable && blas.vertices !== nothing || throw(ArgumentError(
-        "refit!: this BLAS was not built with `allow_update = true`, so its descriptor " *
-        "lacks `MTLAccelerationStructureUsageRefit`; rebuild it instead"))
-    length(vertices) == blas.nvertices || throw(ArgumentError(
-        "refit!: $(length(vertices)) vertices for a BLAS built over $(blas.nvertices); a " *
-        "refit keeps the topology, rebuild for a different mesh"))
-    flat = NTuple{3,Float32}[Tuple(Float32.(v)) for v in vertices]
-    GC.@preserve flat unsafe_copyto!(convert(Ptr{NTuple{3,Float32}}, MTL.contents(blas.vertices)),
-                                     pointer(flat), length(flat))
-    withaccelencoder(Device(MetalAPI())) do enc
-        MTL.refit!(enc, blas.handle, blas.desc, blas.handle, blas.scratch)
-    end
-    return blas
-end
-
-"""
-    build_blas_aabb(ctx, aabbs) -> MetalBLAS
-
-A bottom-level structure over procedural boxes.
-"""
-function Mantle.build_blas_aabb(ctx::MetalAccelBuildContext,
-                                                 aabbs::Vector{Mantle.AABB})
-    d = ctx.device
-    n = length(aabbs)
-    n > 0 || throw(ArgumentError("build_blas_aabb: no boxes to build over"))
-
-    # `(min.xyz, max.xyz)`, stride 24, the layout of Vulkan's `VkAabbPositionsKHR`.
-    boxes = Vector{Float32}(undef, 6n)
-    @inbounds for (i, a) in enumerate(aabbs)
-        o = 6 * (i - 1)
-        boxes[o + 1] = a.min[1]; boxes[o + 2] = a.min[2]; boxes[o + 3] = a.min[3]
-        boxes[o + 4] = a.max[1]; boxes[o + 5] = a.max[2]; boxes[o + 6] = a.max[3]
-    end
-    buf = MTL.MTLBuffer(d.dev, sizeof(boxes), pointer(boxes);
-                        storage = Metal.SharedStorage)
-    push!(ctx.preserves, boxes)
-
-    geo = MTL.MTLAccelerationStructureBoundingBoxGeometryDescriptor()
-    geo.boundingBoxBuffer = buf
-    geo.boundingBoxStride = 24
-    geo.boundingBoxCount  = n
-
+function newblas(d::MetalDevice, geo, refittable::Bool, inputs::Vector{Any})
     desc = MTL.MTLPrimitiveAccelerationStructureDescriptor()
     # `NSArray`, not a typed `Vector`: `@objcwrapper` types are no Julia subtype
     # hierarchy, so `convert` refuses the concrete descriptor.
     desc.geometryDescriptors = NSArray([geo])
-
-    sizes = MTL.accelerationStructureSizes(d.dev, desc)
-    accel = buildstructure(d, desc, sizes)
-    keep = MTL.MTLBuffer(d.dev, max(sizes.refitScratchBufferSize, 1);
-                         storage = Metal.PrivateStorage)
-    # The geometry descriptor retains the box buffer for the `MetalBLAS`'s
-    # lifetime, so this reference is freed.
-    blas = MetalBLAS(accel, desc, keep, false)
-    Metal.free(buf)
-    return blas
-end
-
-"""
-    build_accel!(dev, blases, descriptors, n; refittable = false) -> MetalTLAS
-
-Build a top-level structure over `n` instances already written into
-`descriptors` (a `MtlVector{MetalInstanceDescriptor}`), each indexing `blases`.
-The structure keeps `descriptors` for refits.
-"""
-function build_accel!(d::MetalDevice, blases::Vector{MetalBLAS}, descriptors::MtlArray,
-                                       n::Integer; refittable::Bool = false)
-    eltype(descriptors) === MetalInstanceDescriptor || throw(ArgumentError(
-        "build_accel!: descriptors must be MetalInstanceDescriptor, got $(eltype(descriptors))"))
-    n <= length(descriptors) || throw(ArgumentError(
-        "build_accel!: $n instances but $(length(descriptors)) descriptors"))
-    # Concretely typed: `NSArray` takes a `Vector{<:ObjectiveC.Object}`.
-    handles = MTL.MTLAccelerationStructure[b.handle for b in blases]
-    buf, off = mtlbuffer(descriptors)
-    desc = MTL.MTLInstanceAccelerationStructureDescriptor()
-    # The user-ID descriptor: MSL reads `userID` as `user_instance_id`, Vulkan's
-    # instance custom index.
-    desc.instanceDescriptorType = MTL.MTLAccelerationStructureInstanceDescriptorTypeUserID
-    desc.instanceDescriptorBuffer = buf
-    desc.instanceDescriptorBufferOffset = off
-    desc.instanceCount = n
-    desc.instancedAccelerationStructures = NSArray(handles)
     refittable && (desc.usage = MTL.MTLAccelerationStructureUsageRefit)
-
     sizes = MTL.accelerationStructureSizes(d.dev, desc)
     accel = buildstructure(d, desc, sizes)
     # `max(…, 1)`: a zero-length `MTLBuffer` is rejected.
     keep = MTL.MTLBuffer(d.dev, max(sizes.refitScratchBufferSize, 1);
                          storage = Metal.PrivateStorage)
-    return MetalTLAS{Raycore.Triangle{UInt32}}(accel, desc, handles, descriptors,
-                                              keep, refittable, Int(n))
+    return MetalBLAS(accel, desc, keep, refittable, inputs, d)
 end
 
-"""
-    refit_tlas!(dev, tlas)
+function buildnative!(ctx::MetalAccelBuildContext, input::TriangleInput, allow_update::Bool)
+    geo = MTL.MTLAccelerationStructureTriangleGeometryDescriptor()
+    geo.vertexBuffer, geo.vertexBufferOffset = boundbuffer(pointer(input.vertices))
+    geo.vertexStride = sizeof(NTuple{3,Float32})
+    geo.indexBuffer, geo.indexBufferOffset = boundbuffer(pointer(input.indices))
+    geo.indexType = MTL.MTLIndexTypeUInt32
+    geo.triangleCount = length(input.indices) ÷ 3
+    return newblas(ctx.into, geo, allow_update, Any[input.vertices, input.indices])
+end
 
-Refit `tlas` in place from its rewritten instance descriptors (same instances,
-new transforms, ids and masks). A refit does not re-cluster, so instances that
-move far degrade traversal until a rebuild.
-"""
-function refit_tlas!(d::MetalDevice, tlas::MetalTLAS)
-    tlas.refittable || throw(ArgumentError(
-        "refit_tlas!: this structure was not built with `refittable = true`, so " *
-        "its descriptor lacks `MTLAccelerationStructureUsageRefit` and Metal will " *
-        "reject the refit. Rebuild instead."))
-    withaccelencoder(d) do enc
-        MTL.refit!(enc, tlas.handle, tlas.desc, tlas.handle, tlas.scratch)
+# `AABB` is two `Point3f`: `MTLAxisAlignedBoundingBox`'s layout, 24 bytes a box.
+function buildnative!(ctx::MetalAccelBuildContext, input::BoxInput, allow_update::Bool)
+    geo = MTL.MTLAccelerationStructureBoundingBoxGeometryDescriptor()
+    geo.boundingBoxBuffer, geo.boundingBoxBufferOffset = boundbuffer(pointer(input.boxes))
+    geo.boundingBoxStride = sizeof(AABB)
+    geo.boundingBoxCount = length(input.boxes)
+    return newblas(ctx.into, geo, allow_update, Any[input.boxes])
+end
+
+# The user-ID descriptor: MSL reads `userID` as `user_instance_id`, Vulkan's instance
+# custom index. The structure keeps its BLASes' handles, which the descriptors index.
+function buildnative!(ctx::MetalAccelBuildContext, input::InstanceInput, allow_update::Bool)
+    d = ctx.into
+    # Concretely typed: `NSArray` takes a `Vector{<:ObjectiveC.Object}`.
+    handles = MTL.MTLAccelerationStructure[b.handle for b in input.blases]
+    desc = MTL.MTLInstanceAccelerationStructureDescriptor()
+    desc.instanceDescriptorType = MTL.MTLAccelerationStructureInstanceDescriptorTypeUserID
+    desc.instanceDescriptorBuffer, desc.instanceDescriptorBufferOffset = boundbuffer(pointer(input.records))
+    desc.instanceCount = input.n
+    desc.instancedAccelerationStructures = NSArray(handles)
+    allow_update && (desc.usage = MTL.MTLAccelerationStructureUsageRefit)
+    sizes = MTL.accelerationStructureSizes(d.dev, desc)
+    accel = buildstructure(d, desc, sizes)
+    keep = MTL.MTLBuffer(d.dev, max(sizes.refitScratchBufferSize, 1);
+                         storage = Metal.PrivateStorage)
+    # Non-resident structures are not mapped for the dispatch: every ray misses silently.
+    make_resident!(d, accel, handles...)
+    return MetalTLAS(accel, desc, handles, input.records, keep, allow_update, input.n)
+end
+
+function refitnative!(ctx::MetalAccelBuildContext, as::Union{MetalBLAS,MetalTLAS})
+    withaccelencoder(ctx.into) do enc
+        MTL.refit!(enc, as.handle, as.desc, as.handle, as.scratch)
     end
-    return tlas
+    return as
 end
+
+refittable(as::Union{MetalBLAS,MetalTLAS}) = as.refittable
+refitinput(b::MetalBLAS) = first(b.inputs)
+refitinput(t::MetalTLAS) = t.instances
+deviceof(b::MetalBLAS) = b.device

@@ -181,7 +181,7 @@ function GPUArrays._copyto!(dest::AnyLavaArray, bc::Broadcast.Broadcasted;
     axes(dest) == axes(bc) || Broadcast.throwdm(axes(dest), axes(bc))
     isempty(dest) && return dest
     n = length(dest)
-    # The array's device, not the global `vk_context()`, which may be another GPU.
+    # The array's device, not the global `Device(VulkanAPI())`, which may be another GPU.
     backend = KernelAbstractions.get_backend(dest)
     wg, u, nd = broadcastlaunch(n)
     if ndims(dest) > 1 && IndexStyle(dest) === IndexLinear() && flatok(dest, bc)
@@ -243,7 +243,7 @@ firstdevicearray(x::LinearAlgebra.Adjoint) = firstdevicearray(parent(x))
 firstdevicearray(::Any) = nothing
 function Base.similar(bc::Base.Broadcast.Broadcasted{LavaArrayStyle{N}}, ::Type{T}, dims) where {T,N}
     a = firstdevicearray(bc)
-    bq = a === nothing ? vk_context().default_bq : queueof(a)
+    bq = a === nothing ? Device(VulkanAPI()).default_bq : queueof(a)
     # dims can be axes (OneTo) or plain integers
     LavaArray{T}(undef, map(Base.to_dim, dims); bq)
 end

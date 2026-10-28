@@ -77,6 +77,7 @@ using ColorTypes.FixedPointNumbers: FixedPoint, N0f8
 using ColorTypes: FixedPointNumbers
 using Raycore: Ray
 import Raycore
+import GLFW
 
 include("memory/interval.jl")
 include("memory/model.jl")
@@ -92,6 +93,7 @@ include("runtime/backends.jl")
 include("runtime/hostwait.jl")   # every host wait on the device; backends call it
 include("runtime/cache.jl")
 include("runtime/backendhooks.jl")  # declared here, answered in vulkan/ or metal/
+include("video/bitstream.jl")      # host-side codec parsing every decoder reads through
 include("runtime/format.jl")
 include("runtime/api.jl")
 include("memory/array.jl")    # names `Device`, from api.jl
@@ -123,6 +125,7 @@ include("graphics/mesh.jl")        # needs the same state vocabulary
 # Lowering reads both pipeline descriptions.
 include("graphics/lowering.jl")
 include("graphics/commands.jl")
+include("graphics/window.jl")      # needs the frame verbs above
 include("graphics/record.jl")
 include("graphics/builtins.jl")
 
@@ -191,8 +194,7 @@ export defaultbackend, availablebackends, eachbackend, register_backend!
 export devicearray
 export bind_textures
 
-export begin_pass!, end_pass!, draw_in_pass!, draw_indexed_in_pass!,
-       draw_indirect_in_pass!, set_viewport!, reset_device!
+export reset_device!
 
 export isdepth, target_extent, checkextents, refit!,
        collect!
@@ -206,7 +208,7 @@ export stagefunction, stageoutputs, stageinputs, stageconfig, flatoutputs,
     smoothoutputs, outputtype, ntextures
 export lastgeometrystage, fragmentinputs, fragmentinputtype
 export pass!, viewport!, bindings!, PassRecorder
-export setviewport!, colorimage, depthimage, currentimage, blittarget, todevice
+export setviewport!, colorimage, depthimage, currentimage, depthformat, todevice
 export lower_geometry_to_mesh, GeometryAsMesh, GeometryPipeline
 export GraphicsPipeline, Rasterizer
 export DrawIndirectCommand
@@ -223,7 +225,7 @@ export Topology, TriangleList, TriangleStrip, LineList, LineStrip, PointList,
        PatchList, LineListAdjacency, LineStripAdjacency
 
 export Mat3x4f, identity_transform, quat_to_rot3x3, build_4x3_pervec
-export AABB, AABBsGeometry, TrianglesGeometry, GeometryType
+export AABB
 export ConvexShape, UnitCube, support
 export GJKResult, gjk, EPAResult, epa
 export ContactRecord, NO_CONTACT, narrow_phase_kernel, narrow_phase_contacts_kernel
@@ -373,8 +375,10 @@ Create the selected device, install it as process default and return it."""
 defaultdevice!(select::DeviceSelector) = defaultdevice!(Device(select))
 
 function __init__()
+    initdevices!((VulkanAPI, MetalAPI, WebGPUAPI, ROCmAPI))
     @static Sys.isapple() && initbackend!(MetalAPI())
     @static (!Sys.isapple() || VK.HAS_LOADER) && initbackend!(VulkanAPI())
+    atexit(retireall!)
     return nothing
 end
 

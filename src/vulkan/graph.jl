@@ -5,20 +5,18 @@
 # ([`headbarrier!`](@ref)) orders one plan's reads before the next plan's writes.
 pool(d::LavaDevice) = d.pool
 
-function Device(::VulkanAPI; select = nothing, debug::Union{Nothing,DebugConfig} = nothing)
-    # Without `select` or `debug`: the process default. Otherwise a new device
-    # that is not made the default (see `defaultdevice!`).
-    select === nothing && debug === nothing && return vk_context()
-    return LavaDevice(; select, debug = something(debug, DebugConfig()))
+# `invokelatest` so inference records no backedge from `Device(VulkanAPI())`, which
+# every Lava operation reaches, to the constructor: invalidating the constructor
+# (loading GLMakie does) would re-infer the whole package on the next GPU call (~41 s).
+function makedevice(::VulkanAPI, select, debug::DebugConfig)
+    dev = Base.invokelatest(LavaDevice; select, debug)::LavaDevice
+    # What attached, not what was asked: a run without GPU-AV reads like a clean run.
+    debug.gpu_av && !dev.gpu_assisted && @warn "GPU-AV was requested but did NOT attach " *
+        "(gpu_assisted=false): a clean run now means the instrument was off, not that there " *
+        "is no fault. Check VK_EXT_validation_features + VK_LAYER_KHRONOS_validation on this " *
+        "loader/driver."
+    return dev
 end
-
-"""
-    defaultdevice!(d::LavaDevice) -> d
-
-Make `d` the process default for `Device(VulkanAPI())` and `defaultbackend()`.
-The previous default stays alive with its arrays.
-"""
-defaultdevice!(d::LavaDevice) = (bind_context!(d); d)
 
 build_accel!(f, d::LavaDevice) = build_accel!(f, d.default_bq)
 
@@ -65,26 +63,14 @@ submissions(dev::LavaDevice) = dev.diag.flush_counter[]
 retire!(dev::LavaDevice) = mark_device_lost!(dev)
 retired(dev::LavaDevice) = device_lost(dev)
 
-"""
-    reset_device!(dev::LavaDevice; debug = dev.debug) -> LavaDevice
-
-Retire `dev` (save its pipeline cache, release its pool, set the lost flag) and
-build a device on the same physical device. If `dev` is the process default, the
-new device becomes the default.
-"""
-function reset_device!(dev::LavaDevice; debug::DebugConfig = dev.debug)
-    # `select` takes the enumeration index; a new instance enumerates in the
-    # same order.
+# The same physical device, by its enumeration index, which a new instance keeps; the
+# pipeline cache is saved and the pool released while `dev` still owns them.
+function remakedevice(dev::LavaDevice, debug::DebugConfig)
     select = findfirst(pd -> pd.vks == dev.physical_device.vks,
                        unwrap(VK.enumerate_physical_devices(dev.instance)))
-    if VK_CONTEXT_REF[] === dev
-        reset_device!(; select, debug)
-        return vk_context()
-    end
     save_pipeline_cache!(dev)
     destroy_pool!(dev)
-    mark_device_lost!(dev)
-    return Base.invokelatest(LavaDevice; select, debug)::LavaDevice
+    return makedevice(VulkanAPI(), select, debug)
 end
 
 # Bypasses the pool and returns `nothing` on refusal; `try_vk_alloc` discards the
@@ -94,14 +80,6 @@ function tryallocate(dev::LavaDevice, ::Type{T}, dims::Dims{N}) where {T,N}
     buf isa AllocFailure && return nothing
     return LavaArray{T,N}(GPUArrays.DataRef(vk_free!, buf), dims)
 end
-
-"""
-    screenshot(w::VulkanWindow) -> Matrix
-
-The window contents as a `(width, height)` matrix of BGRA byte tuples. The first
-index is x, so `permutedims` it before saving it as an image.
-"""
-screenshot(w::VulkanWindow) = readback_window(w)
 
 # Persistent `Buffer` and `GPURef` are core types over regions of the same pool
 # as transients; this file supplies the Vulkan primitives.
@@ -143,19 +121,10 @@ passed(bq::SubmitChannel{<:VulkanQueue}, v) = query_timeline(bq) >= v
 
 passed(d::LavaDevice, f) = passed(d.default_bq, f)
 
-"""
-    waitfor(d::LavaDevice, f) -> Bool
-
-Wait for the timeline to reach `f`. Returns `false` for an `f` past the newest
-submission, which nothing will signal; core's `waitfor!` raises the error.
-"""
-function waitfor(d::LavaDevice, f)
-    passed(d, f) && return true
-    f > driver(d.default_bq).next_timeline && return false
-    wait_timeline!(d.default_bq, UInt64(f))
-    checkexceptions!(d)
-    return true
-end
+# The device's timeline is its primary channel's; a kernel that threw is
+# reported after the wait (`checkexceptions!`).
+issued(d::LavaDevice) = issued(d.default_bq)
+awaittoken!(d::LavaDevice, f::UInt64) = (awaittoken!(d.default_bq, f); checkexceptions!(d))
 
 """
     deviceview(dev, a::DeviceArray) -> LavaArray
@@ -243,7 +212,7 @@ end
 function makeimage(dev::LavaDevice, ::Type{T}, width::Int, height::Int,
                    srgb::Bool, usage::VK.ImageUsageFlag, source) where {T}
     ctx = dev
-    fmt = vkformat(VulkanAPI(), T; srgb)
+    fmt = pixelformat(VulkanAPI(), T; srgb)
     checkusage(ctx, fmt, usage)
     img = image_2d(ctx, width, height, fmt, usage)
     return VulkanTransientImage{T}(width, height, fmt, usage, img,
@@ -552,47 +521,41 @@ end
 
 syncbackend(::LavaDevice) = VulkanAPI()
 
-"""
-    compiledraw(c, p::Pass, d, argoff) -> CompiledDraw
+# One image barrier per image transition, everything else in the pass's memory
+# barrier (core's `passbarriers`).
+imagebarriers(::LavaDevice, g, ts::Vector{Transition}) =
+    [ImageBarrier(g.ids.by_id[t.resource], t) for t in ts]
+passbarrier(::LavaDevice, g, ts::Vector{Transition}) = build_pass_barrier(g, ts)
 
-Compile a draw: the pipeline for its shaders against the pass's attachments, and
-the size of its argument block at core's offset `argoff`.
 """
-function compiledraw(c::Compile{LavaDevice}, p::Pass, d, argoff::Int)
-    native = compile_vulkan_draw(c.graph.dev, d.shader,
-        VK.Format[target_format(t) for t in p.targets],
-        p.depth === nothing ? VK.FORMAT_UNDEFINED : target_format(p.depth),
-        drawargs(d.args), d.frag_args; bindings=d.bindings)
-    shader, compiled = native.shader, native.pipeline
-    # A rebindable cell is kept as is so a rebind reaches the packer; a plan
-    # holding one is never recorded.
-    packed = packedargs(d.args, d.args, d.frag_args)
-    info = shader.push_info
-    nbytes = info.arg_buffer_size + compute_inline_extra_from_byval(info.byval_llvm_sizes, info.arg_buffer_size)
-    indices = d.indices === nothing ? nothing : resolve(c.graph.dev, d.indices)
-    return CompiledDraw(compiled, shader, packed, d.count, drawviewport(p, d),
-                        d.bindings, indices, d.instances, argoff, nbytes)
+One dispatch compiled for this backend, so a frame only packs arguments and
+records: the launch plan (pipeline and argument layout), the iteration plan, the
+kernel function after `Adapt` and the declared arguments. `argoff` and `indirect`
+are where core placed its arguments and its indirect command, fixed at compile.
+Concrete throughout, as in `CompiledDraw`.
+"""
+struct LavaDispatch{L,I,K,A<:Tuple,R}
+    launch::L
+    iter::I
+    kernel::K
+    args::A
+    ndrange::R
+    tlas::Bool                          # whether the pipeline was built for ray query
+    argoff::Int
+    argsize::Int
+    indirect::Int
 end
 
-"""
-The pass's barriers as this backend emits them: one image barrier per image
-transition, since layout changes are per image, and everything else in the
-pass's memory barrier.
-"""
-function passbarriers(c::Compile{LavaDevice}, p::Pass)
-    g = c.graph
-    need = c.prepass[p]
-    isimage(t) = t.resource != 0 && resourcekind(g.ids.by_id[t.resource]) isa ImageKind
-    imgs = [ImageBarrier(g.ids.by_id[t.resource], t) for t in need if isimage(t)]
-    return imgs, need, build_pass_barrier(g, filter(!isimage, need))
-end
+argsize(d::LavaDispatch) = d.argsize
+indirectindex(d::LavaDispatch) = d.indirect
 
 """
-    compile_dispatch(c, d::Dispatch, argoff, indirect) -> CompiledDispatch
+    compile_dispatch(c, d::Dispatch, argoff, indirect) -> LavaDispatch
 
 Resolve once what KA works out per launch: the iteration plan for the ndrange
 and the launch plan, which compiles the kernel, for the argument types. Recording
 then only packs and emits; this is the only place a Mantle frame compiles a kernel.
+An ndrange given as a resource is its `count` now, as a draw's is.
 """
 function compile_dispatch(c::Compile{LavaDevice}, d::Dispatch, argoff::Int, indirect::Int)
     dev = c.graph.dev
@@ -603,43 +566,34 @@ function compile_dispatch(c::Compile{LavaDevice}, d::Dispatch, argoff::Int, indi
     buildskernel(d.kernel, dev) ||
         return kicompile_dispatch(c, dev, d, argoff, indirect)
     obj = kernelfor(d, dev)
-    raw = rawargs(d.args)
+    raw = resolve(dev, d.args)
     args = readonlyargs(c.graph, argument_usage(dev, d.kernel, d.args, d.ndrange, d.group),
                         raw, devargs(adaptor(dev.default_bq), raw))
-    nd = dispatchrange(d.ndrange)
-    # `callgroup`: `nothing` when `kernelfor` baked the group into the kernel type
-    # (passing it again keys a duplicate plan), the group for a `DynamicSize` kernel.
-    wgs = callgroup(obj, d.group)
-    iter = get_or_build_iter_plan(obj, nd, wgs, dev)
-    tlas = find_tlas_in_args(raw)
-    all_args = (obj.f, iter.ka_ctx, args...)
-    launch = launch_plan(dev.default_bq, obj.f, all_args, iter.ws_3d, tlas !== nothing)
-    CompiledDispatch(launch, iter, nd, obj, wgs, obj.f, d.args, d.ndrange,
-                     tlas !== nothing, argoff, launch.total_size, indirect)
+    iter = get_or_build_iter_plan(obj, dispatchrange(d.ndrange), callgroup(obj, d.group), dev)
+    tlas = find_tlas_in_args(raw) !== nothing
+    launch = launch_plan(dev.default_bq, obj.f, (obj.f, iter.ka_ctx, args...), iter.ws_3d, tlas)
+    LavaDispatch(launch, iter, obj.f, d.args, d.ndrange, tlas, argoff, launch.total_size, indirect)
 end
 
 """
-    kicompile_dispatch(compile, dev, dispatch, argoff, indirect) -> CompiledDispatch
+    kicompile_dispatch(compile, dev, dispatch, argoff, indirect) -> LavaDispatch
 
-Compile a plain-function `KernelInterface` kernel into the same
-`CompiledDispatch` as the KA path. With no `KA.Kernel`, `iter.ka_ctx` is
-`nothing`, `all_args[1]` is a zero-sized `nothing` that `ka_launch!` drops, and
-the extents come from [`ki_launch_extents`](@ref), as for the immediate launch.
+Compile a plain-function `KernelInterface` kernel into the same `LavaDispatch` as
+the KA path. With no `KA.Kernel`, `iter.ka_ctx` is `nothing`, `all_args[1]` is a
+zero-sized `nothing` that `ka_launch!` drops, and the extents come from
+[`ki_launch_extents`](@ref), as for the immediate launch.
 """
 function kicompile_dispatch(c::Compile{LavaDevice}, dev::LavaDevice, d::Dispatch,
                             argoff::Int, indirect::Int)
-    raw = rawargs(d.args)
+    raw = resolve(dev, d.args)
     args = readonlyargs(c.graph, argument_usage(dev, d.kernel, d.args, d.ndrange, d.group),
                         raw, devargs(adaptor(dev.default_bq), raw))
-    nd = dispatchrange(d.ndrange)
     kern = kikernel(d.kernel, dev, args)
-    wg, blocks = ki_launch_extents(kern, nd, d.group)
+    wg, blocks = ki_launch_extents(kern, dispatchrange(d.ndrange), d.group)
     iter = IterPlan(nothing, pad_to_3d(dev, blocks), wg, prod(blocks))
-    tlas = find_tlas_in_args(raw)
-    all_args = (nothing, args...)
-    launch = launch_plan(dev.default_bq, d.kernel, all_args, iter.ws_3d, tlas !== nothing)
-    CompiledDispatch(launch, iter, nd, kern, nothing, d.kernel, d.args, d.ndrange,
-                     tlas !== nothing, argoff, launch.total_size, indirect)
+    tlas = find_tlas_in_args(raw) !== nothing
+    launch = launch_plan(dev.default_bq, d.kernel, (nothing, args...), iter.ws_3d, tlas)
+    LavaDispatch(launch, iter, d.kernel, d.args, d.ndrange, tlas, argoff, launch.total_size, indirect)
 end
 
 """
@@ -653,46 +607,34 @@ contents, so a `rebind!` reaches the next run. A plan holding a cell is not
 function packdraw!(e::Emitter, d::CompiledDraw)
     am = e.args
     off = d.argoff
-    return pack_gfx_args!(e.owner, rawargs(drawargs(d.args)),
-                          am.ptr + off, am.address + off, d.shader.push_info)
+    return pack_gfx_args!(e.owner, resolve(e.ctx, drawargs(d.args)), d.compiled.shader.push_info,
+                          argsite(e), am.ptr + off, am.address + off)
 end
 
 """
-    collect!(prof::Profiler, dev) -> prof
+    readstamps(dev, prof) -> Vector
 
-Read the last profiled frame's timestamps without waiting
-(`WITH_AVAILABILITY_BIT`; `WAIT_BIT` would stall every frame). An unavailable
-frame is a skipped sample.
+Each pass's timestamp pair from the query pool, without waiting
+(`WITH_AVAILABILITY_BIT`; `WAIT_BIT` would stall every frame): `nothing` where
+either query is not available yet.
 """
-function collect!(prof::Profiler, dev::LavaDevice)
-    # Core sets `pending` per submission, not per emission: a recording emits its
-    # timestamps once but writes them every run.
-    prof.pending || return prof
-    ctx = dev
+function readstamps(dev::LavaDevice, prof::Profiler)
     # Two words per slot: the value and whether it is there yet.
     raw = Vector{UInt64}(undef, 2 * prof.nslots)
-    ok = GC.@preserve raw begin
+    GC.@preserve raw begin
         VK.get_query_pool_results(
-            ctx.device, prof.pool, UInt32(0), UInt32(prof.nslots),
+            dev.device, prof.pool, UInt32(0), UInt32(prof.nslots),
             sizeof(raw), Ptr{Nothing}(pointer(raw)), UInt64(2 * sizeof(UInt64));
             flags = VK.QUERY_RESULT_64_BIT |
                     VK.QUERY_RESULT_WITH_AVAILABILITY_BIT)
     end
-    prof.pending = false
-    for i in 1:length(prof.gpu_ns)
+    return map(1:length(prof.gpu_ns)) do i
         lo, hi = 2 * (2i - 2) + 1, 2 * (2i - 1) + 1     # value words of the pair
-        raw[lo + 1] == 0 && continue                     # start not available
-        raw[hi + 1] == 0 && continue                     # end not available
-        # RADV reports a reset, unwritten query as available with value 0, where
-        # Vulkan says unavailable. A GPU timestamp is never 0, so skip zeros.
-        (raw[lo] == 0 || raw[hi] == 0) && continue
-        # Skip a frame already sampled whose slots the next frame has not reset.
-        raw[lo] == prof.sampled[i] && continue
-        prof.sampled[i] = raw[lo]
-        ns = elapsed(raw[lo], raw[hi], prof.period_ns)
-        ns === nothing || sample!(prof.gpu_ns[i], ns)
+        # Not yet available. RADV reports a reset, unwritten query as available
+        # with value 0, where Vulkan says unavailable; a GPU timestamp is never 0.
+        raw[lo + 1] == 0 || raw[hi + 1] == 0 || raw[lo] == 0 || raw[hi] == 0 ?
+            nothing : (raw[lo], raw[hi])
     end
-    prof
 end
 
 
@@ -777,10 +719,8 @@ function withpredicate(f, e::Emitter, (pred, i)::Tuple{Any,Int})
     end
 end
 
-# In a recording an update pass emits nothing: stores inside the command buffer
-# would replay this run's values forever. The run writes them in front of the
-# recording (`emitupdates!`); a one-shot writes them where the pass is.
-emitupdate!(::Emitter{<:Recording}, ::Plan, ::PassPlan) = nothing
+# A one-shot writes the stores where the pass is, in the stream; a recording
+# never gets here (`emitplan!`).
 function emitupdate!(e::Emitter{<:OneShot}, pl::Plan, pp::PassPlan)
     anydirty(pl.hostwritten) || return nothing
     emitbarriers!(e, pp)
@@ -813,8 +753,6 @@ plan's queue: from `rest` (the usage the plan left it in) to `TRANSFER_SRC`, the
 copy into a `Readback` region, and back to `rest` for the next run's barriers.
 """
 function readback_target(dev::LavaDevice, t::VulkanTransientImage{T}, rest::Type) where {T}
-    t.image === nothing &&
-        error("this target has not been placed yet; readback needs a compiled plan")
     w, h = size(t)
     bq = batchqueue(dev)
     return readbackimage(dev, bq, T, w, h) do mb, off
@@ -827,19 +765,21 @@ function readback_target(dev::LavaDevice, t::VulkanTransientImage{T}, rest::Type
     end
 end
 
-# One begin/end per pass, with the clear as pass configuration.
-# `transition = false`: `emitbarriers!` already set the layouts.
-beginrender!(e::Emitter, ::Plan, pp::PassPlan) =
+# One begin/end per pass, with the clear as pass configuration; the emitter is the
+# pass's handle. `transition = false`: `emitbarriers!` already set the layouts.
+function beginrender!(e::Emitter, ::Plan, pp::PassPlan)
     beginattachments!(e, pp.pass.targets, pp.pass.loads, pp.pass.depth, pp.pass.depth_load;
                       transition = false)
-endrender!(e::Emitter, ::Nothing) = (end_pass!(e); nothing)
+    return e
+end
+endrender!(e::Emitter, ::Emitter) = (end_pass!(e); nothing)
 
 
 emitpreparebarrier!(e::Emitter) = (emit_barrier!(e, preparebarrier()); nothing)
 
 """Invocations per workgroup of the compiled iteration plan, by which core's
 prepare divides a device-written count."""
-workgroupsize(d::CompiledDispatch) = UInt32(prod(d.iter.ws_3d))
+workgroupsize(d::LavaDispatch) = UInt32(prod(d.iter.ws_3d))
 
 """
     preparebarrier()
@@ -865,24 +805,21 @@ end
 # Not cached in a global: a backend reads no process-global state, and building
 # it costs three small allocations per device-sized dispatch per recording.
 
-# `{L,K,A,I}` follows `CompiledDispatch`'s declaration order: `I` is the
-# iteration plan type the lookup below asserts.
 """
-    emitdispatch!(e, d::CompiledDispatch, name)
+    emitdispatch!(e, d::LavaDispatch, name)
 
-Pack one dispatch's arguments into the plan's memory and emit it. Nothing here
-compiles or allocates: an unchanged ndrange reuses the compiled iteration plan,
-a moved one costs a shape-keyed lookup.
+Pack one dispatch's arguments into the plan's memory and emit it over its
+compiled iteration plan. Nothing here compiles or allocates.
 """
-function emitdispatch!(e::Emitter, d::CompiledDispatch{L,K,A,I},
-                       name::AbstractString) where {L,K,A,I}
-    nd = dispatchrange(d.ndrange)
-    it = nd == d.nd0 ? d.iter :
-         get_or_build_iter_plan(d.obj, nd, d.group, e.ctx)::I
+# Not specialised on the dispatch: a recording emits it once, and only packing its arguments
+# (`packdispatch!`) depends on their types. Specialised, the whole launch compiled again for
+# every new kernel type.
+function emitdispatch!(e::Emitter, @nospecialize(d::LavaDispatch), name::AbstractString)
+    it = d.iter
     it.nblocks == 0 && return nothing
     am = e.args
     tlas = packdispatch!(e, d, it)
-    emitlaunch!(e, d.ndrange, lp_of(d), am.address + d.argoff, it, tlas,
+    emitlaunch!(e, d.ndrange, d.launch, am.address + d.argoff, it, tlas,
                 indirectof(am, d.indirect), name)
     nothing
 end
@@ -895,17 +832,6 @@ adaptor(e::Emitter) = LavaAdaptor(e.owner)
 # At compile there is no owner; the conversion holds nothing.
 adaptor(::SubmitChannel{<:VulkanQueue}) = LavaAdaptor(nothing)
 
-
-# Portable constructors, on the backend's own device rather than the default
-# context.
-Framebuffer(d::LavaDevice, w::Integer, h::Integer; kw...) = VulkanFramebuffer(w, h; ctx = d, kw...)
-# Not sRGB, unlike `VulkanWindow`'s default: a portable window stores what the
-# shader wrote, as on Metal.
-Window(d::LavaDevice, w::Integer, h::Integer; color_format::Type = BGRA{N0f8},
-       srgb::Bool = false, kw...) =
-    VulkanWindow(w, h; ctx = d, color_format, srgb, kw...)
-Texture2D(d::LavaDevice, data::AbstractArray; kw...) = VulkanTexture2D(data; ctx = d, kw...)
-Sampler(d::LavaDevice; kw...) = VulkanSampler(; ctx = d, kw...)
 
 # A `LavaArray`, which is capacity-aware on `resize!`, unlike the generic
 # fallback in `memory/array.jl`.
@@ -930,7 +856,7 @@ A command buffer of the plan's own for the recording walk, packing into the
 plan's argument memory. `range` is ignored: a Vulkan command buffer grows.
 """
 openrecording(dev::LavaDevice, pl::Plan, ::AbstractUnitRange) =
-    Emitter(recording!(dev.default_bq), pl.args)
+    Emitter(recording!(dev.default_bq, pl), pl.args)
 
 # `runscalls` stays `false` (core's default): a host call would run once at
 # record time instead of on every replay, and in an unrecorded walk it would
@@ -940,53 +866,14 @@ openrecording(dev::LavaDevice, pl::Plan, ::AbstractUnitRange) =
 """
     closerecording!(e::Emitter, plan) -> Recording
 
-Seal the command buffer and record in the plan's patch table where each packed
-device address landed, so a resource that later moves (`resize!`, arena growth)
-is patched at submission instead of re-recorded. `seal!` gives the recording the
-channel's holds until `release!`, since it is resubmitted every run.
+Seal the command buffer. Every pack registered its device addresses in the plan's
+patch table as it wrote them (`patchsite`), so a resource that later moves
+(`resize!`, arena growth) is patched at submission instead of re-recorded. `seal!`
+gives the recording the channel's holds until `release!`, since it is resubmitted
+every run.
 """
-function closerecording!(e::Emitter{<:Recording}, pl::Plan)
-    rec = e.owner
-    seal!(rec)
-    for (addr, at) in rec.patches
-        push!(get!(Vector{Tuple{Any,Int}}, pl.patchtab, addr),
-              patchtarget(pl, rec, at))
-    end
-    empty!(rec.patches)
-    return rec
-end
+closerecording!(e::Emitter{<:Recording}, ::Plan) = seal!(e.owner)
 
-"""
-    patchtarget(plan, rec, at) -> (region, offset)
-
-Where the packed pointer at `at` lives, for later move patches: the plan's
-argument memory, or a scratch region the recording owns (`get_arg_buffer`).
-Throws for any other memory, which the recording does not own.
-"""
-function patchtarget(pl::Plan, rec::Recording, at::Ptr{UInt8})
-    u = UInt64(at)
-    am = pl.args
-    base = UInt64(am.ptr)
-    base <= u < base + length(am.store) && return (am.store, Int(u - base))
-    for r in rec.regions
-        blk = memoryof(r)::BufferBlock
-        rb = UInt64((blk.ref[]::VkManagedBuffer).mapped_ptr) + UInt64(offset(r))
-        rb <= u < rb + length(r) && return (r, Int(u - rb))
-    end
-    throw(LavaError("record!",
-        "a packed pointer landed at $(at) — outside the plan's argument memory and every scratch region the recording owns",
-        "An unmodelled launch packed into batch scratch while a plan was being recorded; model it as a dispatch so its arguments live in the plan."))
-end
-
-
-"""Once per frame: poll events and update the swapchain. `sync_swapchain!`
-refuses a closed window, since a destroyed GLFW handle segfaults; a window whose
-close button was clicked can still be drawn to."""
-function beginframe!(win::VulkanWindow)
-    GLFW.PollEvents()
-    sync_swapchain!(win)
-    return nothing
-end
 
 recordsplans(::LavaDevice) = true
 
@@ -1003,7 +890,7 @@ function openrun(dev::LavaDevice, pl::Plan)
     if !isempty(surfaces)
         length(surfaces) == 1 || throw(ArgumentError(
             "run!: a plan draws to at most one surface; this one has $(length(surfaces))"))
-        only(surfaces).win.acquired || throw(ArgumentError(
+        only(surfaces).win.surface.acquired || throw(ArgumentError(
             "run!: the frame's image was not acquired; `beforeframe!` acquires it before " *
             "the plan is refit, and `execute!` records against that image"))
     end
@@ -1019,7 +906,7 @@ function closerun!(dev::LavaDevice, pl::Plan, e::Union{Nothing,Emitter})
     bq = dev.default_bq
     surfaces = pl.graph.surfaces
     if !isempty(surfaces)
-        win = only(surfaces).win
+        win = only(surfaces).win.surface
         presentready!(e, win)
         seal!(e.owner)
         return submit_and_present!(bq, win, e.owner)
@@ -1032,14 +919,13 @@ end
 # No recording: a headless plan holding a rebindable cell (see `recordable`)
 # submits only the one-shot the walk filled.
 submitrecording!(bq, ::Nothing, e::Emitter) = submitrecording!(bq, (), e)
-submitrecording!(bq, rec::Recording, e) = submitrecording!(bq, (rec,), e)
 
 """
 Submit the run's front one-shot, if any, then the recording pieces as core groups
 them (`submissionbatches`). With a front the submission holds the pieces; without
 one the plan owns them. `recs` is kept from `record!`, so a run allocates nothing.
 """
-function submitrecording!(bq, recs::Union{Tuple,Vector{Recording}}, e)
+function submitrecording!(bq, recs::Union{Tuple{},Tuple{Recording},Vector{Recording}}, e)
     front = e === nothing ? nothing : e.owner::OneShot
     if front !== nothing
         for r in recs
@@ -1047,9 +933,6 @@ function submitrecording!(bq, recs::Union{Tuple,Vector{Recording}}, e)
         end
     end
     tok = submitlist!(bq, front, recs)
-    for r in recs
-        r.token = tok
-    end
     handover!(bq, tok, front; tag = :run)
     return tok
 end
@@ -1067,14 +950,14 @@ function abandonrun!(dev::LavaDevice, e::Emitter)
 end
 
 """
-    present_frame!(dev::LavaDevice, win::VulkanWindow) -> token
+    present_frame!(dev::LavaDevice, win::VulkanSwapchain) -> token
 
 Present the acquired image of a frame nothing drew into, transitioning it from
 `UNDEFINED` (`presentuntouched!`). A drawn frame is in
 `COLOR_ATTACHMENT_OPTIMAL` and is presented by `closerun!`; Vulkan cannot query
 an image's layout, so the two cases need separate paths.
 """
-function present_frame!(dev::LavaDevice, win::VulkanWindow)
+function present_frame!(dev::LavaDevice, win::VulkanSwapchain)
     o = oneshot(dev.default_bq) do e
         presentuntouched!(e, win)
     end
@@ -1086,7 +969,7 @@ submit-and-present as a drawn frame so the slot's semaphores stay paired and its
 token is set. A no-op if nothing is acquired or the device is lost."""
 function abandonframe!(dev::LavaDevice, pl::Plan)
     for s in pl.graph.surfaces
-        win = s.win
+        win = s.win.surface
         (win.acquired && !device_lost(dev)) || continue
         o = oneshot(dev.default_bq) do e
             presentuntouched!(e, win)
@@ -1106,22 +989,15 @@ end
 
 
 """
-    emitdraw!(e, ::Nothing, d::CompiledDraw)
+    drawcompiled!(e, e, d::CompiledDraw)
 
 Pack one draw's arguments into the plan's slot and emit it. A separate function
 so the loop over differently parameterised draws dispatches once per draw. It
 allocates and holds nothing: the plan owns the memory, the recording the resources.
 """
-function emitdraw!(e::Emitter, ::Nothing, d::CompiledDraw)
+function drawcompiled!(e::Emitter, ::Emitter, d::CompiledDraw)
     packdraw!(e, d)
-    # A draw's own viewport overrides the pass's full-target one, so several axes
-    # share a pass.
-    d.viewport === nothing || set_viewport!(e, d.viewport...)
-    # Through the binding, so a `DrawBinding` draw uses this run's count, index
-    # buffer, instances and texture table.
-    bind = boundbindings(d.args, d.bindings)
-    bind === nothing || use_bindings!(e, d.compiled, bind)
-    emit_draw!(e, d.compiled, boundcount(d.args, d.count), e.args.address + d.argoff,
+    emit_draw!(e, d.compiled.pipeline, boundcount(d.args, d.count), e.args.address + d.argoff,
                boundindices(d.args, d.indices), boundinstances(d.args, d.instances))
 end
 
@@ -1156,28 +1032,30 @@ function emit_draw!(e, pipe, n, addr::UInt64, indices, inst::Int)
                           indices_offset = UInt64(pool_offset(mb) + indices.offset))
 end
 
+"""The plan's argument memory as a pack's destination ([`patchsite`](@ref))."""
+argsite(e::Emitter) = patchsite(e.owner, e.args.store, e.args.ptr)
+
 """
-    packdispatch!(e, d::CompiledDispatch, it) -> tlas
+    packdispatch!(e, d::LavaDispatch, it) -> tlas
 
 Write one dispatch's arguments into the plan's argument memory and return the
 TLAS they name, if any. Done once at `record!`: the command buffer holds the
 address of these bytes, so their values are fixed for the plan's life; a value
 that changes is a [`GPURef`](@ref), packed as its address.
 """
-function packdispatch!(e::Emitter, d::CompiledDispatch, it)
+function packdispatch!(e::Emitter, d::LavaDispatch, it)
     am = e.args
     off = d.argoff
     lp = d.launch
-    raw = rawargs(d.args)
+    raw = resolve(e.ctx, d.args)
     # Adapt holds nothing, so hold the original leaves here; this also registers
     # their buffers for submission ordering, so a replay cannot race a host write.
     holdleaves!(e.owner, d.kernel)
     holdleaves!(e.owner, raw)
     # Not wrapped by `readonlyargs`: a `Lava.Const` packs as the array it wraps.
     args = devargs(adaptor(e), raw)
-    pack_args_direct!(e.owner, am.ptr + off, am.address + off, lp.offsets,
-                           lp.arg_buffer_size, lp.byval_sizes,
-                           (d.kernel, it.ka_ctx, args...))
+    pack_args_direct!(e.owner, argsite(e), am.ptr + off, am.address + off, lp.offsets,
+                      lp.arg_buffer_size, lp.byval_sizes, (d.kernel, it.ka_ctx, args...))
     return d.tlas ? find_tlas_in_args(raw) : nothing
 end
 

@@ -563,11 +563,33 @@ function passed end
     waitfor(dev, f) -> Bool
 
 Block until [`passed`](@ref)`(dev, f)` and return whether it did. Returns
-`false` without waiting when `f` names work not yet submitted: forcing a submit
-would split an open recording, so the caller grows the pool instead. Never
-submits or flushes.
+`false` without waiting when `f` names work not yet submitted (past
+[`issued`](@ref)): forcing a submit would split an open recording, so the caller
+grows the pool instead. The wait is the backend's ([`awaittoken!`](@ref)). Also
+asked of a backend's queue or channel, which answer the same verbs.
 """
-function waitfor end
+function waitfor(x, f)
+    passed(x, f) && return true
+    UInt64(f) > issued(x) && return false
+    awaittoken!(x, UInt64(f))
+    return true
+end
+
+"""
+    issued(dev) -> UInt64
+
+The newest token a submission already made will signal; a larger one names work
+not submitted yet, which no wait can reach.
+"""
+function issued end
+
+"""
+    awaittoken!(dev, f::UInt64)
+
+Block until the timeline reaches `f`, which a submission already made will
+signal (`f <= issued(dev)`), and report a failure the wait observed.
+"""
+function awaittoken! end
 
 """
     retire!(pool, dev, r::Region)

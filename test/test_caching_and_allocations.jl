@@ -4,7 +4,7 @@
 # the pool's accounting of an allocation and its free, and that long runs of
 # compile/dispatch cycles and broadcasts give their memory back.
 #
-# Written against the Vulkan backend's internals (`vk_context().caches`, the
+# Written against the Vulkan backend's internals (`Device(VulkanAPI()).caches`, the
 # batch queue's one-shots, `gpu_live_bytes`, `live_buffer_count`), and asserted
 # now through what those stood for: the compile counter, and the bytes the
 # device's pool has handed out.
@@ -90,7 +90,7 @@ end
 
     # ── 2. Pipeline cache eviction ──
     # Dropped: it bounded the Vulkan backend's in-memory pipeline dict
-    # (`MAX_PIPELINE_CACHE_SIZE`, `vk_context().caches.pipelines`), a knob no other
+    # (`MAX_PIPELINE_CACHE_SIZE`, `Device(VulkanAPI()).caches.pipelines`), a knob no other
     # backend has. That the latest of five distinct kernels still runs is what
     # every other testset here already shows.
 

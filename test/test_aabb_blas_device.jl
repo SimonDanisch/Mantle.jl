@@ -1,25 +1,21 @@
 # Procedural boxes made and moved on the device: a kernel writes them into
-# `Mantle.aabbinput`, the bottom-level structure is built from that buffer, a kernel
+# `Mantle.inputarray`, the bottom-level structure is built from that buffer, a kernel
 # moves them, and `Raycore.refit!` refits the structure from the same buffer. Nothing
 # goes through the host, which is what a particle simulation rebuilding its neighbour
 # structure every step needs.
 #
-# Each query point walks the boxes its inline ray query is offered and counts those
-# that contain it, so "did the structure move" is a count, not a judgement: a refit
-# that left the structure where it was would still offer the old boxes at the old
-# points. The walk uses Vulkan's ray-query intrinsics, so the test runs on Vulkan.
+# Each query point walks the boxes its ray query is offered (core's query verbs) and
+# counts those that contain it, so "did the structure move" is a count, not a
+# judgement: a refit that left the structure where it was would still offer the old
+# boxes at the old points.
 
 using Test, Mantle, Raycore, Adapt
 import KernelAbstractions as KA
 using KernelAbstractions: @kernel, @index, @Const
-using GeometryBasics: Point3f
-include(joinpath(@__DIR__, "..", "testbackend.jl"))
+using GeometryBasics: Point3f, Vec3f
+include(joinpath(@__DIR__, "testbackend.jl"))
 
-if TESTBACKEND isa Mantle.LavaDevice && Mantle.supports_hwtlas(TESTBACKEND) &&
-   Mantle.supports_procedural_traversal(TESTBACKEND)
-
-using Mantle.Lava: lava_ray_query_init, lava_ray_query_proceed, lava_ray_query_get_type,
-                   lava_ray_query_get_primitive_index
+if Mantle.supports_hwtlas(TESTBACKEND) && Mantle.supports_procedural_traversal(TESTBACKEND)
 
 @kernel function centred_boxes!(boxes, @Const(c), r::Float32)
     i = @index(Global)
@@ -34,20 +30,22 @@ end
 end
 
 # How many boxes round the centres `c` contain each query point, through the structure.
+# A transparent query offers every box: nothing is committed, so it runs to the end.
 @kernel function count_containing!(n, @Const(q), @Const(c), r::Float32, accel)
     i = @index(Global)
     @inbounds x = q[i]
-    lava_ray_query_init(UInt32(256), UInt32(0xff), x[1], x[2], x[3], 0f0, 1f0, 0f0, 0f0, 1f-4)
+    query = Mantle.query_begin_transparent(accel, Raycore.Ray(o = x, d = Vec3f(0, 1, 0), t_max = 1f-4),
+                                           UInt32(0xff))
     k = Int32(0)
-    while lava_ray_query_proceed()
-        if lava_ray_query_get_type(false) == UInt32(1)
-            j = lava_ray_query_get_primitive_index(false) + UInt32(1)
-            @inbounds p = c[j]
+    while Mantle.query_next!(query)
+        if Mantle.candidate_is_box(query)
+            @inbounds p = c[Mantle.candidate_primitive_index(query)]
             if abs(x[1] - p[1]) <= r && abs(x[2] - p[2]) <= r && abs(x[3] - p[3]) <= r
                 k += Int32(1)
             end
         end
     end
+    Mantle.query_end!(query)
     @inbounds n[i] = k
 end
 
@@ -63,7 +61,7 @@ end
     start = [Point3f(0, 0, 0), Point3f(5, 0, 0), Point3f(10, 0, 0)]
     r = 1f0
     centres = Mantle.devicearray(TESTBACKEND, start)
-    boxes = Mantle.aabbinput(TESTBACKEND, length(start))
+    boxes = Mantle.inputarray(TESTBACKEND, Mantle.AABB, length(start))
     centred_boxes!(TESTBACKEND, 64)(boxes, centres, r; ndrange = length(start))
     blas = Mantle.build_accel!(ctx -> Mantle.build_blas_aabb(ctx, boxes; allow_update = true), Mantle.batchqueue(TESTBACKEND))
     tlas = Mantle.HWTLAS{Raycore.Triangle{UInt32}}(TESTBACKEND)
@@ -85,7 +83,7 @@ end
     @test counts(start, centres, r, accel) == Int32[0, 0, 0]
 
     # A refit cannot change the number of boxes.
-    @test_throws ArgumentError Raycore.refit!(blas, Mantle.aabbinput(TESTBACKEND, 2))
+    @test_throws ArgumentError Raycore.refit!(blas, Mantle.inputarray(TESTBACKEND, Mantle.AABB, 2))
 end
 
 end

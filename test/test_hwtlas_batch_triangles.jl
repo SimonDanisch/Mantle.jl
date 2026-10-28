@@ -85,7 +85,7 @@ else
     @testset "build_blas_aabb errors loudly without hardware acceleration structures" begin
         # Saying so beats a driver-level fault. This used to be checked by
         # switching a Vulkan context's ray-query flag off by hand.
-        @test_throws ErrorException Mantle.build_accel!(Mantle.batchqueue(Mantle.Device(TESTBACKEND))) do ctx
+        @test_throws ArgumentError Mantle.build_accel!(Mantle.batchqueue(Mantle.Device(TESTBACKEND))) do ctx
             Mantle.build_blas_aabb(ctx, [Mantle.AABB(Point3f(0, 0, 0), Point3f(1, 1, 1))])
         end
     end

@@ -31,6 +31,11 @@ function kaaccesssignature(obj, iter::IterPlan, argT::Tuple)
     return interp, obj.f, tt
 end
 
+# A KA kernel is inferred at its launch's workgroup size, which Lava compiles in;
+# the launch is flat (`get_or_build_iter_plan`).
+kernelinterpreter(::LavaDevice, kernel, tt, threads::Integer) =
+    Lava.kernelinterpreter(kernel, tt; workgroup_size = (Int(threads), 1, 1))
+
 """
     cachedtouches(dev, sig, skip) -> view or nothing
 
@@ -40,8 +45,11 @@ and building the interpreter and walk again only to reach this entry allocated m
 than the rest of the launch (`test_dispatch_allocation.jl`).
 """
 function cachedtouches(dev::LavaDevice, @nospecialize(sig::Type), skip::Int)
-    t = get(summaries!(accesscache(dev)), sig, nothing)
-    return t === nothing ? nothing : view(t, (skip + 1):length(t))
+    summary = get(summaries!(accesscache(dev)), sig, nothing)
+    summary === nothing && return nothing
+    holds(summary, Base.get_world_counter()) || return nothing
+    touches = summary.touches
+    return view(touches, (skip + 1):length(touches))
 end
 
 """

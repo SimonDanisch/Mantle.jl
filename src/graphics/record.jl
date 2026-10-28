@@ -151,7 +151,7 @@ function blit!(device, target::RenderTarget, source; clear::Bool = true)
     w, h = target_extent(target)
     checkblitsize(source, w, h)
     args = (resolve(dev, source), Int32(w), Int32(h))
-    compiled = compile_draw(dev, BLIT_PIPELINE, (blittarget(target),), nothing, (), args)
+    compiled = compile_draw(dev, BLIT_PIPELINE, (target_format(target),), nothing, (), args)
     pass!(dev, target; clear = clear ? (0f0, 0f0, 0f0, 1f0) : nothing) do p
         viewport!(p, 0, 0, w, h)
         draw!(p, compiled, args, 3)
@@ -174,8 +174,9 @@ function draw!(device, pipeline::Union{GraphicsPipeline, MeshPipeline},
     # Manual draws resolve arguments here; graph draws resolve them during placement.
     args = argmap(a -> resolve(dev, a), args)
     frag_args = argmap(a -> resolve(dev, a), frag_args)
-    checkdepthtarget(pipeline.depth, depthtarget(target) !== nothing)
-    compiled = compile_draw(dev, pipeline, (blittarget(target),), depthtarget(target),
+    checkdepthtarget(pipeline.depth, depthformat(target) !== nothing)
+    checkstages(dev, pipeline)
+    compiled = compile_draw(dev, pipeline, (target_format(target),), depthformat(target),
                             args, frag_args; bindings)
     pass!(dev, target; clear = clear_color, depth_clear) do p
         bindings === nothing || bindings!(p, compiled, bindings)
@@ -184,13 +185,9 @@ function draw!(device, pipeline::Union{GraphicsPipeline, MeshPipeline},
     return nothing
 end
 
-"""depthtarget(target) -> element type or nothing
+"""depthformat(target) -> native format or nothing
 
-Depth format for compile_draw. Existing framebuffer depth attachments are Float32."""
-depthtarget(t::OffscreenTarget) = depthimage(t.fb) === nothing ? nothing : Float32
-depthtarget(::WindowTarget) = nothing
-
-"""blittarget(target) -> element type
-
-Color element type for compile_draw; target_format returns the native API format."""
-function blittarget end
+The native format of a render target's depth attachment, or `nothing` without one;
+a framebuffer's comes from its backend."""
+depthformat(t::OffscreenTarget) = depthimage(t.fb) === nothing ? nothing : depthformat(t.fb)
+depthformat(::WindowTarget) = nothing

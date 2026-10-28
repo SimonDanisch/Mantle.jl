@@ -15,7 +15,7 @@ abstract type Texture{T, N} end
 """
     Texture2D{T}
 
-A two-dimensional texture; backends provide the concrete type (`VulkanTexture2D`).
+A two-dimensional texture; backends provide the concrete type (`maketexture`).
 """
 abstract type Texture2D{T} <: Texture{T, 2} end
 
@@ -93,14 +93,77 @@ function copytexels! end
 Base.eltype(::Texture{T}) where {T} = T
 
 """
-    Framebuffer(backend, width, height; depth = true, color_format = …)
+    Framebuffer(device, width, height; depth = true, color_format = BGRA{N0f8}, srgb = false)
 
-Colour and depth attachments a pass renders into, off-screen. Constructed through
-the abstract type with a backend as the first argument, which dispatch needs once
-two backends are loaded; each answers with its own (`VulkanFramebuffer`,
-`MetalFramebuffer`).
+Colour and depth attachments a pass renders into, off-screen: a colour target of
+element type `color_format` (`srgb` picks the encoding form) and, with `depth`, a
+`Float32` depth target. The backend answers with its own type
+(`makeframebuffer`).
 """
 abstract type Framebuffer end
+
+function Framebuffer(dev::Device, width::Integer, height::Integer; depth::Bool = true,
+                     color_format::Type = BGRA{N0f8}, srgb::Bool = false)
+    api = syncbackend(dev)
+    return makeframebuffer(dev, Int(width), Int(height), pixelformat(api, color_format; srgb),
+                           depth ? pixelformat(api, Float32) : nothing)
+end
+
+"""
+    makeframebuffer(device, width, height, color, depth) -> Framebuffer
+
+The backend's offscreen target with a colour attachment of native format `color`
+and a depth attachment of native format `depth`, or none for `nothing`.
+"""
+function makeframebuffer end
+
+"""
+    Texture2D(device, data::AbstractMatrix; mipmap = false)
+
+A sampled 2D texture holding `data` (host or device), with the element type naming
+the format (`sampledformat`). `data[x, y]`: the first index is horizontal, as in
+GLMakie; the upload copies the column-major bytes as they are, so a Julia column
+is one image row. `mipmap = true` makes the full mip chain, regenerated from level
+0 at every upload.
+"""
+function Texture2D(dev::Device, data::AbstractMatrix{T}; mipmap::Bool = false) where {T}
+    w, h = size(data)
+    levels = mipmap ? floor(Int, log2(max(w, h))) + 1 : 1
+    t = maketexture(dev, T, sampledformat(syncbackend(dev), T), w, h, levels)
+    upload_texture_data!(t, data)
+    return t
+end
+
+"""
+    maketexture(device, T, format, width, height, levels) -> Texture2D{T}
+
+The backend's empty sampled texture of native `format` with `levels` mip levels,
+which `upload_texture_data!` fills.
+"""
+function maketexture end
+
+"""
+    Sampler(device; filter = :linear, wrap = :repeat, anisotropy = 0)
+
+How a texture is sampled: `filter` `:nearest` or `:linear`, `wrap` `:repeat`,
+`:clamp`, `:mirror` or `:clamp_border` (transparent black outside), and up to
+`anisotropy` anisotropic samples, 0 for none. Mip levels are blended linearly.
+"""
+function Sampler(dev::Device; filter::Symbol = :linear, wrap::Symbol = :repeat, anisotropy::Real = 0)
+    filter in (:nearest, :linear) || throw(ArgumentError(
+        "unknown filter :$filter; expected :nearest or :linear"))
+    wrap in (:repeat, :clamp, :mirror, :clamp_border) || throw(ArgumentError(
+        "unknown wrap :$wrap; expected :repeat, :clamp, :mirror or :clamp_border"))
+    anisotropy >= 0 || throw(ArgumentError("anisotropy is a sample count, got $anisotropy"))
+    return makesampler(dev, filter, wrap, Float32(anisotropy))
+end
+
+"""
+    makesampler(device, filter, wrap, anisotropy) -> Sampler
+
+The backend's sampler for keywords [`Sampler`](@ref) has checked.
+"""
+function makesampler end
 
 """
     WindowTarget(window)
@@ -133,30 +196,9 @@ format type, `VK.Format` or `MTLPixelFormat`, through [`eltypefor`](@ref).
 """
 function eltypeof end
 
-"""
-    eltypefor(format, f) -> Type
-
-The attachment element type that the backend's `format(T; srgb)` maps to `f`, in
-its plain or sRGB form. sRGB and UNORM share a memory layout, so both read back as
-the same colorant.
-"""
-function eltypefor(format, f)
-    for T in (BGRA{N0f8}, RGBA{N0f8}, RGBA{Float16}, RGBA{Float32}, Float32, UInt32, SVector{2,UInt32})
-        srgb = T <: Union{BGRA{N0f8},RGBA{N0f8}}
-        (format(T) == f || srgb && format(T; srgb) == f) && return T
-    end
-    throw(ArgumentError("no Julia element type is registered for the format $f"))
-end
-
-# The element type a pipeline is compiled against: the target's format read back
-# as the Julia type it was lowered from. In core, since two loaded backends cannot
-# both define it.
-blittarget(t::OffscreenTarget) = eltypeof(target_format(t.fb))
-
-# A graph names a framebuffer as an attachment directly and `attachment_format`
-# asks its `eltype`; without this the pipeline is compiled for `Any`.
+# A graph names a framebuffer as an attachment directly; its pixel type is what a
+# readback of it holds.
 Base.eltype(fb::Framebuffer) = eltypeof(target_format(fb))
-blittarget(t::WindowTarget) = eltypeof(target_format(t.window))
 target_format(t::OffscreenTarget) = target_format(t.fb)
 target_format(t::WindowTarget) = target_format(t.window)
 

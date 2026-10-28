@@ -37,7 +37,8 @@ mutable struct LoopVisitEmitter
 end
 Mantle.emithead!(::LoopVisitEmitter, plan::Mantle.Plan) = nothing
 Mantle.emitloophead!(::LoopVisitEmitter, plan::Mantle.Plan, range) = nothing
-Mantle.emitpasses!(e::LoopVisitEmitter, plan::Mantle.Plan, range) = (append!(e.indices,range);nothing)
+Mantle.emitpasses!(e::LoopVisitEmitter, plan::Mantle.Plan, range; stores::Bool=true) =
+    (append!(e.indices,range);nothing)
 
 @testset "Nested native repeat scheduling and recorded replay" begin
     dev = Mantle.Device(TESTBACKEND)

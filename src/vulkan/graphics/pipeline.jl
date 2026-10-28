@@ -176,10 +176,10 @@ and stays spellable as itself rather than as a one-element vector.
 colorformats(f::VK.Format) = [f]
 colorformats(f::AbstractVector{VK.Format}) = collect(f)
 
-# Julia element types (`RGBA{Float32}`, `BGRA{N0f8}`), lowered by `vkformat` as
+# Julia element types (`RGBA{Float32}`, `BGRA{N0f8}`), lowered by `pixelformat` as
 # for transient images, so every `color_format=` here accepts both spellings.
-colorformats(T::Type) = [vkformat(VulkanAPI(), T)]
-colorformats(ts::AbstractVector{<:Type}) = [vkformat(VulkanAPI(), T) for T in ts]
+colorformats(T::Type) = [pixelformat(VulkanAPI(), T)]
+colorformats(ts::AbstractVector{<:Type}) = [pixelformat(VulkanAPI(), T) for T in ts]
 
 vk_topology(::TriangleList)  = VK.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
 vk_topology(::TriangleStrip) = VK.PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
@@ -440,12 +440,12 @@ End the dynamic rendering pass the emitter opened.
 end_pass!(e::Emitter) = VK.cmd_end_rendering(e.cmd)
 
 """
-    set_viewport!(e, x, y, w, h)
+    setviewport!(e, x, y, w, h)
 
-The portable viewport verb (`graphics/commands.jl`): sets the viewport and the
-scissor it implies ([`scissorrect`](@ref)).
+The portable viewport verb (`graphics/record.jl`) on an emitter's open pass: sets
+the viewport and the scissor it implies ([`scissorrect`](@ref)).
 """
-function set_viewport!(e::Emitter, x::Real, y::Real, w::Real, h::Real)
+function setviewport!(e::Emitter, x::Real, y::Real, w::Real, h::Real)
     VK.cmd_set_viewport(e.cmd, [VK.Viewport(Float32(x), Float32(y), Float32(w), Float32(h), 0f0, 1f0)])
     sx, sy, sw, sh = scissorrect(x, y, w, h)
     VK.cmd_set_scissor(e.cmd, [VK.Rect2D(VK.Offset2D(sx, sy), VK.Extent2D(UInt32(sw), UInt32(sh)))])

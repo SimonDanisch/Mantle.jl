@@ -221,11 +221,6 @@ function compile_pipeline(d::MetalDevice, p::Mantle.MeshPipeline,
                           color_formats::Vector{MTL.MTLPixelFormat},
                           depth_format::Union{Nothing,MTL.MTLPixelFormat},
                           mesh_bufs::Type, frag_bufs::Type)
-    p.object === nothing ||
-        error("this backend has no object stage yet: Metal.jl emits no `air.object` " *
-              "program, so a MeshPipeline's mesh threadgroups are dispatched by the " *
-              "host. Build the pipeline without one and pass the group count to `draw!`.")
-
     dev = d.dev
     cfg = Mantle.meshconfig(p)
     Obj = mesh_object_of(p)
@@ -250,8 +245,7 @@ function compile_pipeline(d::MetalDevice, p::Mantle.MeshPipeline,
                                     stagename(Mantle.stagefunction(p.fragment), "_fs"))
 
     # Keyed on stage function identity: a recompiled stage is a new key.
-    key = (:mesh, CacheIdentity((mstage, fstage)), Tuple(color_formats),
-           depth_format, pipeline_state_key(p), cfg.threads)
+    key = pipelinekey((mstage, fstage), color_formats, depth_format, p, cfg.threads)
     return get!(d.pipelines, key) do
         mfun, mlib = mstage
         ffun, flib = fstage

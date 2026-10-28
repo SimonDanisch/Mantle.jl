@@ -1,13 +1,4 @@
-"""
-Incremental TLAS whose batch registration, mutation and commit decision live in
-core (`raytracing/mutation.jl`). Subtypes have the fields `blas_list`,
-`instances`, `root_aabb`, `dirty`, `transforms_dirty` and `static_tlas`, and
-implement `buildgeometry!`, `instancearray`, `updatebatch!`, `canrefit`,
-`build!` and `AdaptedAccel`.
-"""
-abstract type BatchedTLAS{Tri} <: HWTLAS{Tri} end
-
-"""Portable batch state; `blas` is a native object or its native table index."""
+"""Portable batch state: the native bottom-level structure `blas` its instances name."""
 mutable struct InstanceBatch{Tri,Geometry,Records}
     blas::Geometry
     records::Records

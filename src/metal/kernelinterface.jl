@@ -38,18 +38,21 @@ end
 # `KI.Kernel(backend, f)` around a plain function, on the device or on Metal.jl's
 # backend (`KA.get_backend` of an `MtlArray`): its argument types are known only
 # at launch, so it compiles for the launch arguments and answers its workgroup
-# limit from the device until then.
-const MetalKIBackend = Union{Metal.MetalBackend,MetalDevice}
+# limit from the device until then. Per backend type, not over their `Union`: Metal.jl
+# answers `Kernel{MetalBackend}` for its compiled kernels, and only these methods, on a
+# plain function, are more specific.
+for K in (:(KI.Kernel{Metal.MetalBackend, <:Function}), :(KI.Kernel{<:MetalDevice, <:Function}))
+    @eval begin
+        KI.max_work_group_size(k::$K) = KI.max_work_group_size(k.backend)
 
-KI.max_work_group_size(k::KI.Kernel{<:MetalKIBackend, <:Function}) = KI.max_work_group_size(k.backend)
-
-function KI.launch(k::KI.Kernel{<:MetalKIBackend, <:Function}, groups::Dims{3}, items::Dims{3},
-                   args::Tuple; kwargs...)
-    # A top-level `Buffer` or `GPURef` resolves to the array over its region, as in
-    # `dispatch!`; Metal.jl's compiler rejects it whole as a non-bitstype argument.
-    args = argmap(storage, args)
-    tt = Tuple{map(a -> Core.Typeof(KI.argconvert(k.backend, a)), args)...}
-    KI.launch(KI.kernel_function(k.backend, k.kern, tt), groups, items, args; kwargs...)
+        function KI.launch(k::$K, groups::Dims{3}, items::Dims{3}, args::Tuple; kwargs...)
+            # A top-level `Buffer` or `GPURef` resolves to the array over its region, as in
+            # `dispatch!`; Metal.jl's compiler rejects it whole as a non-bitstype argument.
+            args = argmap(storage, args)
+            tt = Tuple{map(a -> Core.Typeof(KI.argconvert(k.backend, a)), args)...}
+            KI.launch(KI.kernel_function(k.backend, k.kern, tt), groups, items, args; kwargs...)
+        end
+    end
 end
 
 # Mantle's entry points meet Metal.jl's backend as often as the device, since

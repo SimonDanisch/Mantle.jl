@@ -60,7 +60,7 @@ Base.length(b::MetadataBatch) = b.n
     middle = add(Int[], 1)
     add([21], 0) # Geometry without live instances still occupies metadata space.
     last = add([31, 32, 33], 2)
-    @test Mantle.sethidden!(bs, first, true)
+    @test Mantle.setbatch!(bs, first, :hidden, true)
     result = Mantle.trianglemetadata(Int, bs)
     @test result.triangles == [11, 12, 21, 31, 32, 33]
     @test result.hits == UInt32[Mantle.NOTRIANGLES, Mantle.NOTRIANGLES,
@@ -83,23 +83,17 @@ function Adapt.adapt_storage(to::ProjectionAdaptor, values::Vector{Symbol})
     return (:device,name)
 end
 
-@testset "acceleration projection preserves scene policy and conversion order" begin
+@testset "acceleration projection drops the owner and adapts every field in order" begin
     owner = Ref{Any}(); owner[] = owner
     empty = (:empty,9)
     accel = Mantle.AdaptedAccel(owner,[:triangles],[:offsets],empty,
                                [:scene],[:procedural],[:instances])
-    for convert_scene in (false,true)
-        to = ProjectionAdaptor(Symbol[])
-        conversion = convert_scene ? Base.Fix1(Adapt.adapt,to) : identity
-        projected = Mantle.adaptaccel(to,accel,conversion)
-        @test projected.hwtlas === nothing
-        @test projected.empty === empty
-        for field in (:triangles,:offsets,:procedural,:instances)
-            @test getproperty(projected,field) == (:device,field)
-        end
-        expected_scene = convert_scene ? (:device,:scene) : accel.scene
-        @test projected.scene === expected_scene
-        @test to.visited == (convert_scene ? [:triangles,:offsets,:scene,:procedural,:instances] :
-                                                            [:triangles,:offsets,:procedural,:instances])
+    to = ProjectionAdaptor(Symbol[])
+    projected = Mantle.adaptaccel(to,accel)
+    @test projected.hwtlas === nothing
+    @test projected.empty === empty
+    for field in (:triangles,:offsets,:scene,:procedural,:instances)
+        @test getproperty(projected,field) == (:device,field)
     end
+    @test to.visited == [:triangles,:offsets,:scene,:procedural,:instances]
 end

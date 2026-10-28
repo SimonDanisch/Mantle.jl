@@ -145,6 +145,16 @@ end
 
     # SPIR-V's builtins are 0-based and KI's are 1-based, so every one of these
     # is a `+ 1` that has to be there exactly once.
+    @testset "a plain function launches on the backend its array reports" begin
+        # `KI.get_backend` of an `MtlArray` is Metal.jl's backend, not the device;
+        # a kernel built around a plain function launches there too. On Metal
+        # this was ambiguous with Metal.jl's methods for its compiled kernels.
+        a = Mantle.devicearray(backend, zeros(Float32, 5))
+        KI.Kernel(KI.get_backend(a), ki_fill_kernel)(a; ndrange = length(a))
+        KI.synchronize(backend)
+        @test Array(a) == ones(Float32, 5)
+    end
+
     @testset "indexing is 1-based" begin
         n, wg = 64, 16
 

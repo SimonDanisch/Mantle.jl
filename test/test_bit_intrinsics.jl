@@ -26,3 +26,49 @@ end
     @test Array(swapped) == bswap.(h)
     @test Array(reversed) == bitreverse.(h)
 end
+
+# Both directions, distinct operands and counts at zero, width and beyond.
+# Comparing the full intrinsic name with "llvm.fshl" selected the right-shift
+# lowering for every left shift; the suffix carries the integer width.
+for (T, width) in ((UInt16, 16), (UInt32, 32), (UInt64, 64)), (fn, intrinsic) in
+        ((:funnel_left, "llvm.fshl"), (:funnel_right, "llvm.fshr"))
+    ir = """
+    declare i$width @$intrinsic.i$width(i$width, i$width, i$width)
+    define i$width @entry(i$width %a, i$width %b, i$width %s) {
+      %r = call i$width @$intrinsic.i$width(i$width %a, i$width %b, i$width %s)
+      ret i$width %r
+    }
+    """
+    @eval @inline $fn(a::$T, b::$T, s::$T) =
+        Base.llvmcall(($ir, "entry"), $T, Tuple{$T, $T, $T}, a, b, s)
+end
+KA.@kernel function funnel_kernel!(left, right, a, b, s)
+    i = KA.@index(Global)
+    @inbounds begin
+        left[i] = funnel_left(a[i], b[i], s[i])
+        right[i] = funnel_right(a[i], b[i], s[i])
+    end
+end
+
+@testset "funnel shifts reduce counts modulo the width" begin
+    backend = TESTBACKEND
+    @testset "funnel shifts of a $T" for T in (UInt16, UInt32, UInt64)
+        width = 8 * sizeof(T)
+        counts = T[0, 1, width-1, width, width+1, 2width-1, 2width, typemax(T)]
+        a = repeat(T[0x1234, 0x8a57, typemax(T), 0]; inner = length(counts))
+        b, s = reverse(a), repeat(counts, 4)
+        mask = (big(1) << width) - 1
+        # Concatenate in a wider integer, shift, then take the requested half.
+        left = [T(((((big(x) << width) | big(y)) << Int(z % T(width))) >> width) & mask)
+                for (x, y, z) in zip(a, b, s)]
+        right = [T((((big(x) << width) | big(y)) >> Int(z % T(width))) & mask)
+                 for (x, y, z) in zip(a, b, s)]
+        da, db, ds = map(h -> Mantle.devicearray(backend, h), (a, b, s))
+        dl = Mantle.devicearray(backend, zeros(T, length(s)))
+        dr = Mantle.devicearray(backend, zeros(T, length(s)))
+        funnel_kernel!(backend)(dl, dr, da, db, ds; ndrange = length(s))
+        Mantle.waitidle(Mantle.Device(backend))
+        @test Array(dl) == left
+        @test Array(dr) == right
+    end
+end

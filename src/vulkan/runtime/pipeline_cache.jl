@@ -134,7 +134,7 @@ function register_pipeline_cache_atexit!()
     _PIPELINE_CACHE_ATEXIT_REGISTERED[] = true
     atexit() do
         try
-            ctx = VK_CONTEXT_REF[]
+            ctx = existingdefault(VulkanAPI())
             ctx === nothing && return
             save_pipeline_cache!(ctx)
         catch ex

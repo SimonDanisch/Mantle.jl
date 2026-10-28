@@ -29,10 +29,10 @@ emitted before the predicate scope now, on every backend, which is where the
 fold always belonged.
 
 Run on every device, not only one with conditional rendering: without it the
-fold IS the discard, so the slot has to read zero there too. A backend that
-records a device range at its ceiling and lets the kernel's own bounds check
-drop the surplus threads (Metal, see `recordedrange`) has no indirect slot and
-no prepare; on it only the result is asserted.
+fold IS the discard, so the slot has to read zero there too. A dispatch that
+keeps no indirect slot (one that launches its device range at the ceiling and
+lets the kernel's own bounds check drop the surplus threads) has no prepare; on
+it only the result is asserted.
 """
 
 using Test, Mantle, KernelAbstractions

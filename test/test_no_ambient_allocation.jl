@@ -78,7 +78,7 @@ end
         endswith(f, ".jl") || continue
         # `array/lavaarray.jl` is where the constructors are DEFINED; its own
         # `LavaArray(...)` are the definitions, not calls, and the one ambient
-        # default (`LavaArray(data)`'s `bq = vk_context().default_bq`) lives here.
+        # default (`LavaArray(data)`'s `bq = Device(VulkanAPI()).default_bq`) lives here.
         endswith(f, "lavaarray.jl") && continue
         push!(files, relpath(joinpath(d, f), root))
     end

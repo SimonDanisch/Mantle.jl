@@ -1,5 +1,5 @@
 using Test, Mantle
-const VD = Mantle.VideoDecode
+const VD = Mantle.Bitstream
 
 @testset "shared Annex-B splitting" begin
     a, b = UInt8[0x65,0x88,0x80], UInt8[0x41,0xaa,0x80]
@@ -28,4 +28,12 @@ end
             @test range == cld(length(expected),32)*32
         end
     end
+end
+
+@testset "a picture order count's msb follows a wrapped lsb" begin
+    # H.264 8.2.1.1: the lsb moved by half the range or more wrapped.
+    @test VD.pocmsb(0, 250, 2, 256) == 256       # forward past the top
+    @test VD.pocmsb(256, 2, 250, 256) == 0       # back below zero
+    @test VD.pocmsb(512, 10, 20, 256) == 512     # no wrap
+    @test VD.pocmsb(512, 20, 10, 256) == 512
 end

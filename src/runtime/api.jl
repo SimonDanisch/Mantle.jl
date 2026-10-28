@@ -8,7 +8,9 @@ A device owns its graphs, resources and submit channels, and is a
 KernelAbstractions backend. Device(api) returns its cached default; select
 creates an independent device without installing it. Device(backend) returns a
 device unchanged and resolves a vendor backend to its device.
-See devices, selectdevice and defaultdevice!."""
+See devices, selectdevice and defaultdevice!. Every device keeps the
+`DebugConfig` it was made with in its `debug` field, and the channels
+`allocate_batch_queue!` handed out in its `channels` field."""
 abstract type Device <: KernelAbstractions.Backend end
 Device(d::Device) = d
 abstract type Resource end
@@ -28,8 +30,17 @@ todevice(b::KernelAbstractions.Backend) = Device(b)
 
 A presentation window; the short form uses defaultbackend(). isopen only queries
 state. run! pumps events, submits and presents; frame slots provide pacing.
-By default shaders write display-referred values; srgb=true encodes linear values."""
-abstract type Window end
+By default shaders write display-referred values; srgb=true encodes linear values.
+
+Core owns the platform window `handle` (GLFW) and whose frame it is (`acquirer`, the
+task holding an acquired image, `nothing` between frames); the backend owns
+`surface`, what frames draw into (`graphics/window.jl`)."""
+mutable struct Window{S}
+    handle::GLFW.Window
+    surface::S
+    acquirer::Union{Nothing,Task}
+    open::Bool
+end
 
 Window(width::Integer, height::Integer; kw...) =
     Window(defaultbackend(), width, height; kw...)

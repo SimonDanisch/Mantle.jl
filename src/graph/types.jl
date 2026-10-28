@@ -314,33 +314,6 @@ struct CompiledDraw{P,S,A,C,V,B,I}
 end
 
 """
-One dispatch, compiled when the plan is, so a frame only writes arguments and
-records. A per-frame KernelAbstractions launch recompiles whenever the world counter
-changes (any method definition), about 20 ms between acquire and present. `kernel`
-is the kernel function after `Adapt`, checked at plan build to be a singleton,
-since a closure over device arrays would go stale.
-"""
-struct CompiledDispatch{L,K,A<:Tuple,I,N,R,O,G}
-    # Concrete throughout, as in `CompiledDraw`. `L` is the backend's launch plan.
-    launch::L
-    iter::I                             # IterPlan for `nd0`
-    nd0::N                              # the ndrange the iteration plan was built for
-    obj::O                              # the KA kernel, for an ndrange that moves
-    # The workgroup `obj` needs at the call, or `nothing` when its type carries one
-    # (see `callgroup`).
-    group::G
-    kernel::K
-    args::A
-    ndrange::R
-    tlas::Bool                          # whether the pipeline was built for ray query
-    argoff::Int
-    argsize::Int
-    # The plan indirect command holding this dispatch's workgroup counts, 0 for a
-    # host ndrange. Fixed at compile, like `argoff`.
-    indirect::Int
-end
-
-"""
 Argument memory owned by the plan: every draw's and dispatch's arguments, laid out
 once at compile, then one 256-byte indirect command per device-sized dispatch.
 Written once at `record!` and never again, so one copy suffices and no ring is
@@ -376,9 +349,9 @@ it, including the swapchain image's transition from whatever state acquire left.
 struct PassPlan{D,B}
     pass::Pass
     draws::Vector{CompiledDraw}
-    # What a compiled dispatch is on this backend: a `CompiledDispatch` when
-    # recording commands, a callable when driving KernelAbstractions. A parameter so
-    # the per-frame loop specialises.
+    # What a compiled dispatch is on this backend: its own compiled type when it
+    # records commands (`compile_dispatch`), a callable (`Launch`, `Call`) when it
+    # drives KernelAbstractions. A parameter so the per-frame loop specialises.
     dispatches::Vector{D}
     images::Vector{B}        # layout changes, one barrier each
     pre::Vector{Transition}      # what this pass needs before it runs
@@ -499,6 +472,9 @@ mutable struct Compile{D} <: Compilation
     prepass::IdDict{Pass,Vector{Transition}}
     passes::Vector{PassPlan}                          # Pipelines
     pipelines::Set{Any}
+    # Whether the device records every pass (`recordspasses`): otherwise the plan
+    # is walked every run, and its dispatches are compiled for that.
+    recordsall::Bool
 end
 
 """

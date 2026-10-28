@@ -1,6 +1,6 @@
 # Mantle's Vulkan backend. Lava is only the Julia→SPIR-V compiler and names no
 # Vulkan type (`Lava/test/test_compiler_runtime_split.jl`); the emitter reads
-# `Lava.TargetFeatures`, set by `bind_context!`, and SPIR-V lives in Lava while
+# the device's `Lava.TargetFeatures` (`ctx.features`), and SPIR-V lives in Lava while
 # pipelines live here. Included into `Mantle`, not a submodule, because these
 # files add methods to Mantle's own functions.
 
@@ -95,11 +95,7 @@ function initbackend!(::VulkanAPI)
     # Never the default on a Mac: Metal is the GPU there, Vulkan a CPU driver
     # chosen by name.
     @static Sys.isapple() || register_backend!(; name = :vulkan, priority = 100) do
-        vulkan_available() ? vk_context() : nothing
+        vulkan_available() ? Device(VulkanAPI()) : nothing
     end
     init_pipeline_thread!()
-    atexit() do
-        mark_all_devices_lost!()
-        bind_context!(nothing)
-    end
 end

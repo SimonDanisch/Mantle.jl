@@ -15,7 +15,6 @@ end
 # Lets a caller check that new data fits before uploading in place, which keeps a
 # recorded plan's baked descriptor set pointing at the right image.
 Base.size(t::VulkanTexture2D) = (t.width, t.height)
-Base.eltype(::VulkanTexture2D{T}) where {T} = T
 mipmapped(t::VulkanTexture2D) = t.levels > 1
 
 """Reusable sampler configuration."""
@@ -27,60 +26,37 @@ struct VulkanSampler <: Sampler
     ctx::LavaDevice
 end
 
-function VulkanSampler(; ctx::LavaDevice, filter::Symbol=:linear, wrap::Symbol=:repeat, anisotropy::Real=0.0f0)
-    dev = ctx.device
-
-    vk_filter = filter == :nearest ? VK.FILTER_NEAREST :
-                filter == :linear  ? VK.FILTER_LINEAR :
-                error("Unknown filter: $filter")
-
-    vk_wrap = wrap == :repeat      ? VK.SAMPLER_ADDRESS_MODE_REPEAT :
-              wrap == :clamp       ? VK.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE :
-              wrap == :mirror      ? VK.SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT :
-              wrap == :clamp_border ? VK.SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER :
-              error("Unknown wrap mode: $wrap")
-
-    # No upper LOD clamp, so a mipmapped texture samples every level; one
-    # without mipmaps has only level 0.
-    sampler = VK.Sampler(dev,
+# Core's `Sampler` (`graphics/resources.jl`) checked the keywords. No upper LOD clamp,
+# so a mipmapped texture samples every level; one without mipmaps has only level 0.
+function makesampler(ctx::LavaDevice, filter::Symbol, wrap::Symbol, anisotropy::Float32)
+    vk_filter = filter === :nearest ? VK.FILTER_NEAREST : VK.FILTER_LINEAR
+    vk_wrap = wrap === :repeat ? VK.SAMPLER_ADDRESS_MODE_REPEAT :
+              wrap === :clamp  ? VK.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE :
+              wrap === :mirror ? VK.SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT :
+                                 VK.SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER
+    sampler = VK.Sampler(ctx.device,
         vk_filter, vk_filter,
         VK.SAMPLER_MIPMAP_MODE_LINEAR,
         vk_wrap, vk_wrap, vk_wrap,
         0.0f0,  # mip LOD bias
         anisotropy > 0,
-        Float32(anisotropy),
+        anisotropy,
         false, VK.COMPARE_OP_ALWAYS,
         0.0f0, VK.LOD_CLAMP_NONE,
         VK.BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
         false,
     )
-
-    VulkanSampler(sampler, filter, wrap, Float32(anisotropy), ctx)
+    return VulkanSampler(sampler, filter, wrap, anisotropy, ctx)
 end
 
-"""
-    VulkanTexture2D(data::AbstractMatrix; ctx, filter=:linear, wrap=:repeat, mipmap=false)
-
-A 2D texture from `data[x, y]`, which may already be on the device
-([`upload_texture_data!`](@ref) dispatches on it). `mipmap = true` builds the full
-mip chain on the device at every upload, so a texture shown smaller than its size
-does not alias; off by default because it mixes neighbouring glyphs in an atlas.
-"""
-function VulkanTexture2D(data::AbstractMatrix{T}; ctx::LavaDevice, filter=:linear, wrap=:repeat, mipmap::Bool=false) where T
-    # The first index is horizontal (as on Metal and in GLMakie): the upload copies
-    # the column-major bytes as they are, so a Julia column is one image row.
-    w, h = size(data)
-    format = vksampledformat(T)
-    levels = mipmap ? floor(Int, log2(max(w, h))) + 1 : 1
-    mipmap && checkmipmappable(ctx, format)
-
+# Core's `Texture2D` (`graphics/resources.jl`) chose the format and the mip levels.
+function maketexture(ctx::LavaDevice, ::Type{T}, format::VK.Format, w::Int, h::Int, levels::Int) where {T}
+    levels > 1 && checkmipmappable(ctx, format)
     image = image_2d(ctx, w, h, format, VK.IMAGE_USAGE_SAMPLED_BIT | VK.IMAGE_USAGE_TRANSFER_DST_BIT |
-                     (mipmap ? VK.IMAGE_USAGE_TRANSFER_SRC_BIT : VK.ImageUsageFlag(0)); levels)
+                     (levels > 1 ? VK.IMAGE_USAGE_TRANSFER_SRC_BIT : VK.ImageUsageFlag(0)); levels)
     memory = alloc_image_memory(ctx, image)
     view = image_view(ctx, image, format; levels)
-    tex = VulkanTexture2D{T}(image, memory, view, w, h, format, levels, ctx)
-    upload_texture_data!(tex, data)
-    return tex
+    return VulkanTexture2D{T}(image, memory, view, w, h, format, levels, ctx)
 end
 
 """Throw unless `format` supports the linear-filtered blits that make mip levels."""

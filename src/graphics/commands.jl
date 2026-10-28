@@ -2,52 +2,6 @@
 # implemented by a backend.
 
 """
-    begin_pass!(emitter, color_views, color_images, extent; clear_color, depth_view, ...)
-
-Begin a render pass on `emitter`; must be matched by [`end_pass!`](@ref). A draw
-outside a pass is an error, since a driver that accepts one draws nothing and
-reports nothing.
-"""
-function begin_pass! end
-
-"""
-    end_pass!(emitter)
-
-End the render pass begun by [`begin_pass!`](@ref).
-"""
-function end_pass! end
-
-"""
-    draw_in_pass!(emitter, pipeline, count; instances = 1)
-
-Issue a non-indexed draw inside an open pass.
-"""
-function draw_in_pass! end
-
-"""
-    draw_indexed_in_pass!(emitter, pipeline, count; indices_buffer, instances = 1)
-
-Issue an indexed draw inside an open pass.
-"""
-function draw_indexed_in_pass! end
-
-"""
-    draw_indirect_in_pass!(emitter, pipeline, commands; first = 1, count = 1)
-
-Issue draws whose parameters the device reads from `commands`, as
-[`DrawIndirectCommand`](@ref) records, so a culling pass can set the vertex
-counts without a host round trip.
-"""
-function draw_indirect_in_pass! end
-
-"""
-    set_viewport!(emitter, x, y, width, height)
-
-Set the viewport rectangle for subsequent draws.
-"""
-function set_viewport! end
-
-"""
     present_frame!(device, window)
 
 Show what was drawn, ordered behind the frame's work: presenting an image the
@@ -146,6 +100,8 @@ function readback_target(pl::Plan, t)
     rest = restingusage(pl, t)
     rest === nothing && throw(ArgumentError(
         "readback_target: the plan never uses this target, so it holds nothing to read"))
+    t.image === nothing && throw(ArgumentError(
+        "readback_target: this target holds no image; its plan was freed"))
     return readback_target(pl.graph.dev, t, rest)
 end
 
@@ -226,8 +182,10 @@ function use_bindings! end
 Compile a [`GraphicsPipeline`](@ref) for the attachments it draws into. Called
 once per draw at compile time, not per frame; a backend is expected to cache.
 
-`color_formats` are element types, as a `Transient.Image` is named.
-`vert_args`/`frag_args` are the resolved values, not their types, because a
+`color_formats` and `depth_format` are the attachments' native formats
+([`target_format`](@ref), [`depthformat`](@ref)), not element types, which lose
+the sRGB encoding a target may have. `vert_args`/`frag_args` are the resolved
+values, not their types, because a
 backend derives a stage's device signature by adapting each value as a launch
 would. `bindings` is the texture table from [`bind_textures`](@ref) or `nothing`;
 Vulkan builds the pipeline layout around its descriptor set layout, Metal ignores

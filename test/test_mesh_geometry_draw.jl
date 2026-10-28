@@ -144,6 +144,16 @@ mp_pipeline(f; threads = 1) = Mantle.MeshPipeline(;
         @test drawn(dev, p, 1) == px
     end
 
+    @testset "an object stage is refused by name on every backend" begin
+        # Each backend refused it itself, Vulkan with an `ArgumentError` and Metal
+        # with a bare `error`; core refuses it before compiling.
+        base = mp_pipeline(mp_mesh)
+        p = Mantle.MeshPipeline(; mesh = base.mesh, fragment = base.fragment,
+                                  object = Mantle.ObjectShader(identity),
+                                  cull = base.cull, depth = base.depth)
+        @test_throws ArgumentError drawn(dev, p, 1)
+    end
+
     @testset "a Flat output may be written per vertex" begin
         # Mantle's contract is Vulkan's: EVERY declared output is written by
         # `set_mesh_vertex!` and `Flat` only says how the varying is interpolated —
@@ -293,7 +303,7 @@ function lg_draw(dev, p, args, count; n = 64, indices = nothing, instances = 1,
                  viewport = (0, 0, n, n))
     fb = Mantle.Framebuffer(TESTBACKEND, n, n; depth = false, color_format = BGRA{N0f8})
     target = Mantle.OffscreenTarget(fb)
-    compiled = Mantle.compile_draw(dev, p, (Mantle.blittarget(target),), nothing,
+    compiled = Mantle.compile_draw(dev, p, (Mantle.target_format(target),), nothing,
                                    args, args)
     Mantle.pass!(dev, target; clear = (0f0, 0f0, 0f0, 1f0)) do pr
         Mantle.viewport!(pr, viewport...)

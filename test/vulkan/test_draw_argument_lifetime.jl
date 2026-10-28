@@ -14,7 +14,7 @@ function check_draw_argument_lifetime(ctx)
             vertex=Mantle.VertexShader(held_draw_vertex),
             fragment=Mantle.FragmentShader(held_draw_fragment),
             depth=Mantle.DepthOff(), cull=Mantle.NoCull())
-        draw = Mantle.compile_draw(dev,description,(RGBA{Float32},),nothing,args,())
+        draw = Mantle.compile_draw(dev,description,(Mantle.pixelformat(Mantle.VulkanAPI(),RGBA{Float32}),),nothing,args,())
         fb = Mantle.Framebuffer(dev,8,8;depth=false,color_format=RGBA{Float32})
         Mantle.flush!(dev.default_bq); Mantle.waitidle(dev); Mantle.drain!(dev.default_bq)
         buffer = points.buf[]

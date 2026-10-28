@@ -54,6 +54,50 @@ include(joinpath(@__DIR__, "testbackend.jl"))
     end
 end
 
+struct YieldingWindowSurface
+    entered::Channel{Nothing}
+    resume::Channel{Nothing}
+    fail::Bool
+end
+Mantle.fitsurface!(::YieldingWindowSurface, ::Int, ::Int) = false
+Mantle.closesurface!(::YieldingWindowSurface) = nothing
+function Mantle.acquire_next_image!(surface::YieldingWindowSurface)
+    surface.fail && error("acquire failed")
+    put!(surface.entered, nothing)
+    take!(surface.resume)
+    return nothing
+end
+
+@testset "a window is owned while its acquire yields" begin
+    surface = YieldingWindowSurface(Channel{Nothing}(1), Channel{Nothing}(1), false)
+    w = Mantle.Window(Mantle.platformwindow(16, 16, "acquire ownership"), surface, nothing, true)
+    owner = @async Mantle.acquire_next_image!(w)
+    take!(surface.entered)
+    try
+        @test w.acquirer === owner
+        if w.acquirer === owner
+            @test_throws ErrorException Mantle.acquire_next_image!(w)
+            @test_throws ErrorException Mantle.fitwindow!(w)
+            @test_throws ErrorException close(w)
+            @test isopen(w)
+        end
+    finally
+        put!(surface.resume, nothing)
+        wait(owner)
+        Mantle.presented!(w)
+        close(w)
+    end
+
+    surface = YieldingWindowSurface(Channel{Nothing}(1), Channel{Nothing}(1), true)
+    w = Mantle.Window(Mantle.platformwindow(16, 16, "failed acquire"), surface, nothing, true)
+    try
+        @test_throws ErrorException Mantle.acquire_next_image!(w)
+        @test w.acquirer === nothing
+    finally
+        close(w)
+    end
+end
+
 include(joinpath(@__DIR__, "spinwork.jl"))
 
 @testset "a frame's waits let the thread's other tasks run" begin

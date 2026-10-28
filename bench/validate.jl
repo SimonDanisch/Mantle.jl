@@ -37,7 +37,7 @@ built without the layer produces no messages, which reads the same as a device
 that produced none.
 """
 function requiresync()
-    ctx = Mantle.vk_context()
+    ctx = Mantle.Device(Mantle.VulkanAPI())
     ctx.debug.sync_val || error(
         "this device has no synchronization validation. It is fixed at device " *
         "creation, so call `syncdevice!()` first — and note that invalidates " *

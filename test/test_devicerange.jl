@@ -137,11 +137,103 @@ end
     # synchronises and 0.585 s of a 0.602 s frame on an M5. The kernel must
     # bound itself either way.
     #
-    # Asked of the dispatch, `devicesized`, which each backend declares. It was
+    # Asked of the dispatch, `devicesized`: whether its backend kept the indirect
+    # slot core gave it (`indirectindex`). It was
     # asked through `recordsplans` until 2026-09-26, which is a different
     # property: ROCm records a plan (as a HIP graph) and has no indirect dispatch,
     # so it launched the ceiling where the test expected whole workgroups.
     mark = only(only(pp.dispatches) for pp in pl.passes if pp.pass.name == "mark")
     launched = M.devicesized(mark) ? cld(want, group) * group : cap
     @test count(==(1.0f0), Array(M.storage(dst))) == launched
+end
+
+@kernel function dr_mark_at!(dst, n, at::Int32)
+    i = @index(Global)
+    @inbounds if i <= n[at]
+        dst[i] = 1.0f0
+    end
+end
+
+# Counters of several queues in one buffer, each dispatch sized by its own (`at`).
+# Read as element 1, the dispatch over the second launched one workgroup for a
+# count of 5 and marked 64 of its 777.
+@testset "a DeviceRange counts element `at` of its buffer" begin
+    dev = M.Device(TESTBACKEND)
+    cap, counts = 4096, Int32[5, 777, 3]
+    n = M.Buffer(dev, counts)
+    for (at, ceiling) in ((2, cap), (3, cap), (2, nothing))
+        g = M.Graph(dev)
+        dst = M.Buffer(dev, zeros(Float32, cap))
+        M.dispatch!(g, dr_mark_at!, (dst, n, Int32(at)), M.DeviceRange(n; max = ceiling, at);
+                    group = 64, name = "mark")
+        pl = M.Plan(g)
+        M.recordable(dev, pl) && M.record!(pl)
+        M.run!(pl)
+        M.waitfor!(pl)
+        @test count(==(1.0f0), Array(M.storage(dst))) == counts[at]
+        M.free!(pl)
+    end
+    # An eager launch reads the same element.
+    dst = M.Buffer(dev, zeros(Float32, cap))
+    k = dr_mark_at!(TESTBACKEND, 64)
+    k(M.storage(dst), M.storage(n), Int32(2); ndrange = M.DeviceRange(M.storage(n); max = cap, at = 2))
+    M.waitidle(dev)
+    @test count(==(1.0f0), Array(M.storage(dst))) == counts[2]
+    @test_throws ArgumentError M.DeviceRange(n; at = 0)
+end
+
+# A plain KernelInterface kernel, which takes its group from `KI.launch_geometry`
+# rather than KernelAbstractions' partition (that one already refuses a group with
+# more axes than the range).
+import KernelInterface as KI
+function dr_kimark!(dst, n)
+    i = KI.get_global_id().x
+    i <= n[1] && (@inbounds dst[i] = 1.0f0)
+    return nothing
+end
+
+# A device count is one-dimensional. With group = (8, 8) one backend turned 300
+# items into 5 workgroups of 64 covering x = 1:40, and another into 38 workgroups
+# of 8 x 8 that ran every item eight times: each backend read the group's size
+# differently (product vs x extent). Refused at `dispatch!` on every backend now.
+@testset "a DeviceRange group extends along x only" begin
+    dev = M.Device(TESTBACKEND)
+    cap, want = 4096, 300
+    n = M.Buffer(dev, Int32[want])
+    for group in ((8, 8), (1, 64))
+        g = M.Graph(dev)
+        dst = M.Buffer(dev, zeros(Float32, cap))
+        @test_throws ArgumentError M.dispatch!(g, dr_kimark!, (dst, n),
+                                               M.DeviceRange(n; max = cap); group)
+    end
+    # A trailing axis of one is still a row.
+    g = M.Graph(dev)
+    dst = M.Buffer(dev, zeros(Float32, cap))
+    M.dispatch!(g, dr_kimark!, (dst, n), M.DeviceRange(n; max = cap);
+                group = (64, 1), name = "mark")
+    pl = M.Plan(g)
+    M.recordable(dev, pl) && M.record!(pl)
+    M.run!(pl)
+    M.waitfor!(pl)
+    @test count(==(1.0f0), Array(M.storage(dst))) == want
+    M.free!(pl)
+end
+
+# Without `max` a `DeviceRange` kernel is compiled against core's ceiling, and the
+# prepare sizes the launch from the device count without clamping it. The ceiling
+# was 1M items, so a count of 1.5M launched every invocation and KA's index check
+# against the compiled range silently dropped all past 1,048,576, on every backend.
+@testset "a device count past any fixed ceiling runs whole" begin
+    dev = M.Device(TESTBACKEND)
+    want = 1_500_000
+    dst = M.Buffer(dev, zeros(Float32, want))
+    n = M.Buffer(dev, Int32[want])
+    g = M.Graph(dev)
+    M.dispatch!(g, dr_mark!, (dst, n), M.DeviceRange(n); group = 256, name = "mark")
+    pl = M.Plan(g; budget = Inf)
+    M.recordable(dev, pl) && M.record!(pl)
+    M.run!(pl)
+    M.waitfor!(pl)
+    @test count(==(1.0f0), Array(M.storage(dst))) == want
+    M.free!(pl)
 end

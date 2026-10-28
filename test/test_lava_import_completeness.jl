@@ -341,8 +341,17 @@ end
     # the graph verb (`graph/build.jl`), the HW-TLAS residency grant on a `MetalDevice`
     # (`src/metal/hwtlas.jl`) and the lifetime/pool retirement. `src/metal/` calls none of
     # Metal's.
-    known = [(:bind_buffer!, :Metal), (:dispatch!, :Metal), (:make_resident!, :Metal),
-             (:retire!, :Metal),
+    # `query_next!` and `commit_triangle!` against Metal, reviewed 2026-10-28: Metal.jl's
+    # ray-query wrappers (`src/device/intrinsics/raytracing.jl`, added 2026-10-27) spell
+    # two of core's ray-query verbs (`graph/backend.jl`). Mantle's Metal backend answers
+    # its verbs by calling Metal.jl's, qualified (`src/metal/hwtlas.jl`); neither
+    # extends the other.
+    # AcceleratedKernels 0.5.11 adds its own workspace Plan, nbytes and storage.
+    # None is exported; Mantle's graph plan and resource vocabulary remain separate.
+    known = [(:Plan, :AcceleratedKernels), (:nbytes, :AcceleratedKernels),
+             (:storage, :AcceleratedKernels),
+             (:bind_buffer!, :Metal), (:dispatch!, :Metal), (:make_resident!, :Metal),
+             (:retire!, :Metal), (:query_next!, :Metal), (:commit_triangle!, :Metal),
              (:stage_output_type, :Metal), (:link_kernel, :Metal), (:declare!, :GPUCompiler), (:Attribute, :LLVM), (:Backend, :KernelAbstractions),
              (:Launch, :KernelAbstractions), (:Loop, :LLVM),
              (:access, :LLVM), (:claim!, :Metal), (:disjoint, :LLVM),

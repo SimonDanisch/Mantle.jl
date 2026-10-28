@@ -51,37 +51,14 @@ import Vulkan.VkCore: VkMemoryBarrier, VK_STRUCTURE_TYPE_MEMORY_BARRIER,
 const STAGE2_ALL_COMMANDS = VK.PipelineStageFlag2(VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
 
 """
-    recpatch!(owner, address, at)
+    patchsite(owner, target, base)
 
-Record that the eight bytes at host pointer `at`, in memory the recording owns,
-hold device address `address`. `pack_arg!` calls it for every pointer it writes.
-A [`Recording`](@ref) collects them for the plan's patch table, which a resource
-move consults (`closerecording!`); other owners ignore them.
+Where a pack into `target` (host address `base`) registers its device pointers
+with core's `notepacked!`: a [`Recording`](@ref)'s plan, whose patch table a
+resource move consults. A one-shot is never replayed, so its packs register nothing.
 """
-recpatch!(owner, address::UInt64, at::Ptr{UInt8}) = nothing
-recpatch!(rec::Recording, address::UInt64, at::Ptr{UInt8}) =
-    (push!(rec.patches, (address, at)); nothing)
-
-"""
-    recpatchfields!(owner, T, at)
-
-[`recpatch!`](@ref) every nonzero device pointer inside the packed `T` at `at`.
-Which fields hold pointers is core's `devicepointeroffsets`; collecting host
-pointers and resolving them to `(region, offset)` at seal (`patchtarget`) is
-this backend's. Not a method of core's `notepacked!`: core never calls it, and
-`test/test_backend_vocabulary.jl` rejects backend methods on core functions
-outside the vocabulary.
-"""
-@inline function recpatchfields!(owner, ::Type{T}, at::Ptr{UInt8}) where {T}
-    fields = devicepointeroffsets(T)
-    isempty(fields) && return nothing
-    for f in fields
-        addr = unsafe_load(Ptr{UInt64}(at + f))
-        addr == 0 && continue
-        recpatch!(owner, addr, at + f)
-    end
-    return nothing
-end
+patchsite(::Closed, target, base::Ptr{UInt8}) = nothing
+patchsite(rec::Recording, target, base::Ptr{UInt8}) = PatchSite(rec.plan, target, base)
 
 """Allocate one primary command buffer from the queue's pool. It stays with its
 `OneShot`, which core pools; a `Recording` borrows it until `release!`."""
@@ -100,13 +77,13 @@ const BEGIN_INFO_SIMULTANEOUS =
     VK._CommandBufferBeginInfo(flags = VK.COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT)
 
 """
-    recording!(bq) -> Recording
+    recording!(bq, plan) -> Recording
 
-Open and begin a plan's command buffer with `SIMULTANEOUS_USE`, which is
+Open and begin `plan`'s command buffer with `SIMULTANEOUS_USE`, which is
 required: there is one recording per plan, and `run!` may submit it again while
 the previous run is still pending.
 """
-function recording!(bq::SubmitChannel{<:VulkanQueue})
+function recording!(bq::SubmitChannel{<:VulkanQueue}, pl::Plan)
     ownthread(bq)
     refuselost(deviceof(bq), "recording!")
     # Same pool as a one-shot: core's `acquire!` sweeps, returns a reset buffer
@@ -115,8 +92,7 @@ function recording!(bq::SubmitChannel{<:VulkanQueue})
     o = acquire!(bq)
     throw_if_error(bq, "vkBeginCommandBuffer",
         VK._begin_command_buffer(o.cmd, BEGIN_INFO_SIMULTANEOUS))
-    return Recording(bq, o.cmd, Region[], Any[], UInt64(0), true,
-                     Tuple{UInt64,Ptr{UInt8}}[], nothing, VkManagedBuffer[])
+    return Recording(bq, o.cmd, Region[], Any[], true, pl, nothing, VkManagedBuffer[])
 end
 
 """Close a command buffer: nothing more may be emitted, and it can be submitted.
@@ -143,17 +119,17 @@ submissionholds!(::SubmitChannel, ::Recording) = nothing
 
 Give back the recording's regions, holds, descriptor sets and command buffer;
 running it afterwards is an error. `Mantle.free!` on a plan calls it. Waits for
-the recording's last submission: the regions are only retired, but the command
-buffer goes on to serve one-shots, and re-beginning one the device still reads
-is undefined behaviour.
+the plan's last run (core's `argtoken`, 0 if it never ran), which every piece of
+its recording was in: the regions are only retired, but the command buffer goes
+on to serve one-shots, and re-beginning one the device still reads is undefined
+behaviour.
 """
 function release!(rec::Recording)
     bq = queueof(rec)
     dev = deviceof(bq)
-    let tok = rec.token
+    let tok = argtoken(rec.plan.args)
         tok == 0 || waitfor!(bq, tok)
     end
-    rec.token = 0
     rec.open && seal!(rec)          # takes the hold frame if it is still open
     # The hold list goes back to the channel's spares; `sealed!` takes a fresh
     # frame if this is recorded again.
@@ -423,7 +399,7 @@ function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Clos
         throw(LavaError("vkQueueSubmit2",
             "queue submission failed with $(submit_result) " *
             "($(ncb) command buffer(s), last dispatch: $(driver(bq).last_dispatch_info))",
-            "If the device is lost, call reset_device!() or restart Julia."))
+            "If the device is lost, call reset_device!(device) or restart Julia."))
     end
 
     # Submitted: this token is now the last work naming these buffers.
@@ -514,7 +490,7 @@ end
     bindtlas!(emitter, pipeline, tlas)
 
 Bind an acceleration structure at set 0, binding 0, and hold everything a ray
-query reads. A no-op for `nothing`; the `VulkanTLAS` method is in
+query reads. A no-op for `nothing`; the `BatchedTLAS` method is in
 `raytracing/hwtlas.jl`.
 """
 @inline bindtlas!(::Emitter, ::LavaComputePipeline, ::Nothing) = nothing
@@ -600,21 +576,6 @@ escape, so this allocates nothing.
 end
 
 """
-Barrier between an unmodelled prepare and the indirect launch that reads what it
-wrote, inside one one-shot: makes the prepare's shader writes visible to the
-indirect read and the launch's own reads. Plans get this from `emitprepares!`.
-`dst_stage` and `extra_dst_access` name the consumer (compute or ray tracing).
-"""
-@inline function indirectbarrier!(e::Emitter, dst_stage::VK.PipelineStageFlag,
-                                  extra_dst_access::VK.AccessFlag)
-    dst_access = VkAccessFlags(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT) |
-                 VkAccessFlags(extra_dst_access)
-    memorybarrier!(e.cmd,e.ctx,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,dst_stage,
-                   VK_ACCESS_SHADER_WRITE_BIT,dst_access)
-    return nothing
-end
-
-"""
     query_timeline(bq::SubmitChannel{<:VulkanQueue}) -> UInt64
 
 Current counter of `timelineof(bq)`. Raw and allocation-free because every sweep
@@ -638,7 +599,7 @@ so the throw only fires if the device died in between.
     e = unwrap_error(result)::VK.VulkanError
     throw(LavaVulkanError("get_semaphore_counter_value", Int32(e.code), e.msg,
         e.code == VK.ERROR_DEVICE_LOST ?
-            "Device lost. Call reset_device!() to reinitialize, or restart Julia." :
+            "Device lost. Call reset_device!(device) to reinitialize, or restart Julia." :
             "Timeline semaphore query failed with an unexpected VkResult. " *
             "This is a driver bug, stack corruption, or an invalid semaphore handle."))
 end
@@ -713,18 +674,11 @@ function wait_timeline!(bq::SubmitChannel{<:VulkanQueue}, val::UInt64)
     return nothing
 end
 
-"""
-    waitfor!(bq, token)
-
-Block until this queue's timeline reaches `token`. A token belongs to one queue's
-timeline; the device-level `waitfor!(dev, tok)` waits on the primary queue and is
-wrong for work submitted on another.
-"""
-function waitfor!(bq::SubmitChannel{<:VulkanQueue}, tok::UInt64)
-    passed(bq, tok) && return nothing
-    wait_timeline!(bq, tok)
-    return nothing
-end
+# This queue's timeline: its newest submission's value, and a wait on it. A token
+# belongs to one queue's timeline: the device's waits on its primary queue and is
+# wrong for work submitted on another.
+issued(bq::SubmitChannel{<:VulkanQueue}) = driver(bq).next_timeline
+awaittoken!(bq::SubmitChannel{<:VulkanQueue}, tok::UInt64) = (wait_timeline!(bq, tok); nothing)
 
 # Fallible Vulkan calls go through `throw_if_error`, or `mark_if_lost!` for
 # callers with their own recovery, so every DEVICE_LOST sets the flag the entry
@@ -747,7 +701,7 @@ end
 
 device_lost_hint(call) =
     "Vulkan device is lost during $(call). " *
-    "Call reset_device!() to reinitialize, or restart Julia."
+    "Call reset_device!(device) to reinitialize, or restart Julia."
 
 """
     throw_if_error(bq::SubmitChannel{<:VulkanQueue}, result)
@@ -858,10 +812,10 @@ function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
                             "$(length(bq.outstanding)) submission(s) outstanding)",
                             "The GPU faulted — a dispatch wrote out of bounds or hung. " *
                             "Raising `driver(bq).flush_timeout_ns` cannot help; call " *
-                            "`reset_device!()` to reinitialize. To find the " *
+                            "`reset_device!(device)` to reinitialize. To find the " *
                             "dispatch: `journalctl -k` for an NVIDIA Xid names the fault " *
                             "class, and " *
-                            "`reset_device!(debug = DebugConfig(gpu_av = true, " *
+                            "`reset_device!(device; debug = DebugConfig(gpu_av = true, " *
                             "gpu_av_shaders = [\"my_kernel\"], pool_disabled = true))` " *
                             "instruments the shaders — that rebuilds the device, so every " *
                             "LavaArray alive is invalid afterwards, and `verify_gpu_av()` " *
@@ -924,7 +878,7 @@ function throw_with_validation_context(call_name::String, err_result,
         bq::Union{Nothing,SubmitChannel{<:VulkanQueue}}=nothing)
     # `bq`'s context, or the bound one without `bq`: its messages, and dispatch
     # logging re-enabled so the next run records names.
-    ctx = bq === nothing ? VK_CONTEXT_REF[] : deviceof(bq)
+    ctx = bq === nothing ? existingdefault(VulkanAPI()) : deviceof(bq)
     ctx === nothing || (ctx.diag.dispatch_logging = true)
     vk_err = unwrap_error(err_result)
     msgs = get_validation_messages(ctx)
@@ -954,7 +908,7 @@ Crashed submission's dispatch: $prev_info
 Triggered by recording: $curr_info
 $validation_detail
 $dispatch_detail""",
-        "DEVICE_LOST usually means invalid SPIR-V, out-of-bounds BDA access, or GPU timeout (Xid 109). Check dispatch log above for the crashing kernel. Call reset_device!() to reinitialize."
+        "DEVICE_LOST usually means invalid SPIR-V, out-of-bounds BDA access, or GPU timeout (Xid 109). Check dispatch log above for the crashing kernel. Call reset_device!(device) to reinitialize."
     ))
 end
 

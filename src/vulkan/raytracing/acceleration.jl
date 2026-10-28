@@ -1,16 +1,56 @@
-# Native AS construction; allocation holds and retirement belong to core.
+# Native AS construction; validation, uploads and the refit sequence are core's
+# (`raytracing/api.jl`), allocation holds and retirement too.
+
+# Geometry descriptors select native packing and size queries by dispatch.
+
+abstract type GeometryType end
+
+"""
+    TrianglesGeometry(vertex_format, vertex_addr, vertex_stride, max_vertex,
+                      index_type, index_addr, transform_addr=UInt64(0))
+
+Triangle geometry for a BLAS. Maps to `VK_GEOMETRY_TYPE_TRIANGLES_KHR`.
+"""
+struct TrianglesGeometry <: GeometryType
+    vertex_format::UInt32
+    vertex_addr::UInt64
+    vertex_stride::UInt64
+    max_vertex::UInt32
+    index_type::UInt32
+    index_addr::UInt64
+    transform_addr::UInt64
+end
+TrianglesGeometry(; vertex_format, vertex_addr, vertex_stride, max_vertex,
+                    index_type, index_addr, transform_addr=UInt64(0)) =
+    TrianglesGeometry(vertex_format, vertex_addr, vertex_stride, max_vertex,
+                      index_type, index_addr, transform_addr)
+
+"""
+    AABBsGeometry(aabb_addr, aabb_stride=UInt64(24))
+
+Procedural-AABB geometry for a BLAS. Maps to `VK_GEOMETRY_TYPE_AABBS_KHR`.
+The buffer at `aabb_addr` contains `n` `VkAabbPositionsKHR` records of
+`aabb_stride` bytes each (24 by default: 6 x Float32).
+"""
+struct AABBsGeometry <: GeometryType
+    aabb_addr::UInt64
+    aabb_stride::UInt64
+end
+AABBsGeometry(; aabb_addr, aabb_stride=UInt64(24)) =
+    AABBsGeometry(aabb_addr, aabb_stride)
+
 
 """Native triangle or procedural BLAS. Core retires its handle and owned buffers
 after their last submission. `geom` and `count` are what it was built
 from, so a refit (MODE_UPDATE_KHR) rebuilds it in place; `update_scratch` is that
 refit's scratch size, `nothing` unless built with `allow_update`."""
-mutable struct LavaBLAS
+mutable struct LavaBLAS <: AccelStructure
     accel::VK.AccelerationStructureKHR
     # Core tracks AS last use and destruction through its backing storage.
     storage::LavaArray{UInt8, 1}
     address::UInt64  # AS device address (for HWTLAS instances)
-    # Input arrays this BLAS owns: the vertices (as bytes) and indices, or the
-    # boxes. Refits rewrite the first in place.
+    # Input arrays this BLAS owns: the vertices and indices, or the boxes. Refits
+    # read the first, which the caller rewrote (`refitinput`).
     preserves::Vector{LavaArray}
     geom::GeometryType
     count::UInt32
@@ -20,7 +60,7 @@ end
 """Native instance hierarchy retaining referenced BLASes and its instance records
 (`preserves`), with the refit state of a [`LavaBLAS`](@ref). Core retires its
 handle and storage after their last use."""
-mutable struct LavaTLAS
+mutable struct LavaTLAS <: AccelStructure
     accel::VK.AccelerationStructureKHR
     storage::LavaArray{UInt8, 1}
     blases::Vector{LavaBLAS}
@@ -143,13 +183,12 @@ function buildstructure!(ctx::VulkanAccelBuildContext, geom::GeometryType, count
     return accel, storage, address, allow_update ? UInt64(sizes.update_scratch_size) : nothing
 end
 
-"""Refuse a refit of a structure built without `allow_update`, before its inputs change."""
-refitcapable(as::Union{LavaBLAS,LavaTLAS}) = as.update_scratch === nothing && throw(ArgumentError(
-    "refit: the structure was built with allow_update = false; rebuild it with allow_update = true."))
+refittable(as::Union{LavaBLAS,LavaTLAS}) = as.update_scratch !== nothing
+refitinput(as::Union{LavaBLAS,LavaTLAS}) = first(as.preserves)
+deviceof(as::Union{LavaBLAS,LavaTLAS}) = KA.get_backend(as.storage)
 
 """Refit `as` in place (MODE_UPDATE_KHR) from its inputs, which the caller rewrote."""
-function refitstructure!(ctx::VulkanAccelBuildContext, as::Union{LavaBLAS,LavaTLAS})
-    refitcapable(as)
+function refitnative!(ctx::VulkanAccelBuildContext, as::Union{LavaBLAS,LavaTLAS})
     holdbuild!(ctx, as)
     asbuildbarrier!(ctx)
     build_as_on_gpu(ctx, as.accel, buildscratch!(ctx, as.update_scratch), as.geom;
@@ -168,133 +207,38 @@ function newblas!(ctx::VulkanAccelBuildContext, geom::GeometryType, count::Integ
     return blas
 end
 
-"""build_blas(ctx, vertices, indices; allow_update) -> LavaBLAS
-
-Record triangle geometry inside build_accel!. LavaArray inputs are read in
-place and require AS_INPUT_USAGE; Vector inputs are uploaded first. Core tracks
-input dependencies and retains resources through the submission.
-"""
-function build_blas(ctx::VulkanAccelBuildContext, vertices::LavaArray{NTuple{3,Float32},1},
-                    indices::LavaArray{UInt32,1}; allow_update::Bool=false)
+# Device arrays only (`buildinput`), made by `inputarray` with `AS_INPUT_USAGE`.
+function buildnative!(ctx::VulkanAccelBuildContext, input::TriangleInput, allow_update::Bool)
+    vertices, indices = input.vertices, input.indices
     geom = TrianglesGeometry(; vertex_format = UInt32(VK.FORMAT_R32G32B32_SFLOAT),
         vertex_addr = bda_address(vertices), vertex_stride = UInt64(sizeof(NTuple{3,Float32})),
         max_vertex = UInt32(length(vertices) - 1), index_type = UInt32(VK.INDEX_TYPE_UINT32),
         index_addr = bda_address(indices), transform_addr = UInt64(0))
-    return newblas!(ctx, geom, length(indices) ÷ 3, allow_update,
-                    LavaArray[reinterpret(UInt8, vertices), indices])
+    return newblas!(ctx, geom, length(indices) ÷ 3, allow_update, LavaArray[vertices, indices])
 end
 
-build_blas(ctx::VulkanAccelBuildContext, vertices::Vector{NTuple{3,Float32}}, indices::Vector{UInt32};
-           kw...) =
-    build_blas(ctx, LavaArray(vertices; ctx.bq, extra_usage=AS_INPUT_USAGE),
-               LavaArray(indices; ctx.bq, extra_usage=AS_INPUT_USAGE); kw...)
-
-"""refit_blas!(ctx, blas, vertices)
-
-Rewrite the retained vertex buffer and refit in place. Requires allow_update=true
-and the original vertex count; rejects misuse with ArgumentError. Rebuild when
-geometry changes enough to degrade traversal quality."""
-function refit_blas!(ctx::VulkanAccelBuildContext, blas::LavaBLAS,
-                     vertices::Vector{NTuple{3,Float32}})
-    blas.geom isa TrianglesGeometry || throw(ArgumentError("refit_blas!: this BLAS holds no triangles."))
-    refitcapable(blas)
-    vbytes = first(blas.preserves)
-    sizeof(vertices) == length(vbytes) || throw(ArgumentError(
-        "refit_blas!: vertex count changed ($(sizeof(vertices)) bytes vs " *
-        "$(length(vbytes)) at build). MODE_UPDATE_KHR cannot change " *
-        "topology — rebuild the BLAS instead."))
-    # Refit reuses the original vertex allocation and address.
-    GC.@preserve vbytes upload_typed!(vbytes.buf[], vertices; offset = vbytes.offset)
-    return refitstructure!(ctx, blas)
+# `AABB` is two `Point3f`: VkAabbPositionsKHR's layout, 24 bytes a box.
+function buildnative!(ctx::VulkanAccelBuildContext, input::BoxInput, allow_update::Bool)
+    geom = AABBsGeometry(; aabb_addr = bda_address(input.boxes), aabb_stride = UInt64(sizeof(AABB)))
+    return newblas!(ctx, geom, length(input.boxes), allow_update, LavaArray[input.boxes])
 end
 
-# Host-vector refits run on this device’s dispatch channel.
-Raycore.refit!(blas::LavaBLAS, vertices::AbstractVector) =
-    build_accel!(batchqueue(KA.get_backend(blas.storage))) do ctx
-        refit_blas!(ctx, blas, NTuple{3,Float32}[Tuple(Float32.(v)) for v in vertices])
-    end
-
-"""aabbinput(dev, n) -> LavaArray{AABB,1}
-
-Allocate n AS-readable boxes on `dev` for kernels to write before build/refit."""
-aabbinput(backend::LavaDevice, n::Integer) =
-    LavaArray{AABB,1}(undef, (Int(n),); bq = batchqueue(backend), extra_usage = AS_INPUT_USAGE)
-
-"""build_blas_aabb(ctx, aabbs; allow_update=false) -> LavaBLAS
-
-Build procedural geometry from the first `n` AS-readable device boxes (all by
-default); Vector inputs upload once. Requires ray-query support. The BLAS retains
-its boxes for refits."""
-function build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::LavaArray{AABB,1};
-                         allow_update::Bool=false, n::Integer=length(aabbs))
-    0 < n <= length(aabbs) || throw(ArgumentError(
-        "build_blas_aabb: $n boxes of an array of $(length(aabbs))"))
-    (deviceof(ctx.bq)).ray_query_available || error(
-        "build_blas_aabb: this Vulkan device does not support " *
-        "VK_KHR_ray_query. Procedural-AABB BLASes are only useful with " *
-        "ray_query in this codebase. Build on a device that supports it.")
-    # `AABB` is two `Point3f`: VkAabbPositionsKHR's layout, 24 bytes a box.
-    geom = AABBsGeometry(; aabb_addr = bda_address(aabbs), aabb_stride = UInt64(sizeof(AABB)))
-    return newblas!(ctx, geom, n, allow_update, LavaArray[aabbs])
-end
-
-build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::Vector{AABB}; allow_update::Bool=false) =
-    build_blas_aabb(ctx, LavaArray(aabbs; bq = ctx.bq, extra_usage = AS_INPUT_USAGE); allow_update)
-
-"""refit_blas!(ctx, blas, aabbs)
-
-Refit procedural geometry built with allow_update=true. Reads the original
-AS-readable buffer, or copies equal-length replacement boxes into it on device."""
-function refit_blas!(ctx::VulkanAccelBuildContext, blas::LavaBLAS, aabbs::LavaArray{AABB,1})
-    blas.geom isa AABBsGeometry || throw(ArgumentError(
-        "refit_blas!: this BLAS holds no boxes; it is not a refittable procedural BLAS."))
-    refitcapable(blas)
-    own = first(blas.preserves)
-    length(aabbs) == length(own) || throw(ArgumentError(
-        "refit_blas!: box count changed ($(length(aabbs)) vs $(length(own)) at build). " *
-        "MODE_UPDATE_KHR cannot change the primitive count — rebuild instead."))
-    aabbs === own || copyto!(own, aabbs)
-    return refitstructure!(ctx, blas)
-end
-
-# On the device's dispatch channel, after the kernels that wrote the boxes.
-Raycore.refit!(blas::LavaBLAS, aabbs::LavaArray{AABB,1}) =
-    build_accel!(batchqueue(KA.get_backend(blas.storage))) do ctx
-        refit_blas!(ctx, blas, aabbs)
-    end
-
-"""build_tlas(ctx, instance_buf, n; allow_update=false, blases=LavaBLAS[]) -> LavaTLAS
-
-Build from AS_INPUT_USAGE device records without a CPU readback. Pass their
-referenced blases so every trace retains both hierarchy levels. The caller owns
-the BLASes; releasing the TLAS only drops its references. The TLAS owns
-`instance_buf`, which a refit reuses."""
-function build_tlas(ctx::VulkanAccelBuildContext, instance_buf::LavaArray{VulkanInstanceRecord, 1},
-                    n::Integer; allow_update::Bool=false, blases::Vector{LavaBLAS}=LavaBLAS[])
-    n <= length(instance_buf) || throw(ArgumentError(
-        "build_tlas: n = $n exceeds the instance buffer's $(length(instance_buf)) records"))
-    geom = VulkanInstancesGeometry(bda_address(instance_buf))
-    accel, storage, _, update = buildstructure!(ctx, geom, n, allow_update)
-    tlas = LavaTLAS(accel, storage, unique(blases), LavaArray[instance_buf], geom, UInt32(n), update)
+# The TLAS keeps its BLASes so every trace holds both levels, and owns its records, which
+# a refit reads.
+function buildnative!(ctx::VulkanAccelBuildContext, input::InstanceInput, allow_update::Bool)
+    geom = VulkanInstancesGeometry(bda_address(input.records))
+    accel, storage, _, update = buildstructure!(ctx, geom, input.n, allow_update)
+    tlas = LavaTLAS(accel, storage, unique(input.blases), LavaArray[input.records], geom,
+                    UInt32(input.n), update)
     finalizer(unsafe_free!, tlas)
-    holdbuild!(ctx,tlas)
+    holdbuild!(ctx, tlas)
     return tlas
 end
 
+inputarray(d::LavaDevice, ::Type{T}, n::Integer) where {T} =
+    LavaArray{T,1}(undef, Int(n); bq = batchqueue(d), extra_usage = AS_INPUT_USAGE)
+
 const VkBRI = VK.VulkanCore.LibVulkan.VkAccelerationStructureBuildRangeInfoKHR
-
-"""refit_tlas!(ctx, tlas, instance_buf, n)
-
-Refit from fresh AS-readable instance records. Requires allow_update=true and
-the original instance count. Reuses native AS storage; scratch is submit-scoped."""
-function refit_tlas!(ctx::VulkanAccelBuildContext, tlas::LavaTLAS,
-                     instance_buf::LavaArray{VulkanInstanceRecord, 1}, n::Integer)
-    n <= length(instance_buf) || throw(ArgumentError(
-        "refit_tlas!: n = $n exceeds the instance buffer's $(length(instance_buf)) records"))
-    tlas.geom, tlas.count = VulkanInstancesGeometry(bda_address(instance_buf)), UInt32(n)
-    holdbuild!(ctx, instance_buf)
-    return refitstructure!(ctx, tlas)
-end
 
 # scratch=true applies the device’s required AS-scratch BDA alignment.
 const AS_INPUT_USAGE = UInt32(

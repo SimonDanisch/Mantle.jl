@@ -5,16 +5,6 @@ Cache device-independent SPIR-V against current CodeInstance identity."""
 get_or_compile_gfx(@nospecialize(f), @nospecialize(tt), stage::Symbol; config=nothing) =
     cached_gfx_shader(f, tt, stage; config)
 
-"""
-The key of a compiled pipeline: its shaders by identity (not their functions, so a
-stage recompiled after an edit gives a new pipeline) and the state baked in.
-"""
-function pipeline_cache_key(shaders::Tuple, pipeline, color_format, depth_format, descriptor_set_layout)
-    formats = color_format isa Union{Tuple,AbstractVector} ? Tuple(color_format) : (color_format,)
-    return (CacheIdentity(shaders), formats, depth_format, pipeline_state_key(pipeline),
-            descriptor_set_layout !== nothing)
-end
-
 """Compile native raster stages/pipeline and return (vertex_shader, pipeline)."""
 function ensure_compiled_with_shader!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_vertex, tt_fragment;
                               color_format=VK.FORMAT_B8G8R8A8_SRGB,
@@ -40,8 +30,8 @@ function ensure_compiled_with_shader!(pipeline::GraphicsPipeline, vert_fn, frag_
     te = pipeline.tess_eval === nothing ? nothing :
          get_or_compile_gfx(pipeline.tess_eval, tt_vertex, :tess_eval; config=tess_cfg)
 
-    cache_key = pipeline_cache_key((vert, frag, geom, tc, te), pipeline, color_format,
-                                   depth_format, descriptor_set_layout)
+    cache_key = pipelinekey((vert, frag, geom, tc, te), colorformats(color_format), depth_format,
+                            pipeline, descriptor_set_layout !== nothing)
     compiled = get!(ctx.caches.gfx_pipelines, cache_key) do
         return create_graphics_pipeline(vert.spirv_bytes, frag.spirv_bytes;
             ctx, blend=pipeline.blend, cull=pipeline.cull,
@@ -63,15 +53,11 @@ function ensure_compiled_with_shader!(pipeline::MeshPipeline, mesh_fn, frag_fn, 
                               depth_format=VK.FORMAT_UNDEFINED,
                               descriptor_set_layout=nothing,
                               ctx::LavaDevice)
-    pipeline.object === nothing || throw(ArgumentError(
-        "ensure_compiled!: this pipeline has an object stage, and the Vulkan " *
-        "backend dispatches its mesh threadgroups from the host. The task stage " *
-        "is what an object stage lowers onto here, and nothing emits one yet."))
     mesh = get_or_compile_gfx(mesh_fn, tt_mesh, :mesh; config = Mantle.meshconfig(pipeline))
     frag = get_or_compile_gfx(frag_fn, tt_fragment, :fragment)
 
-    cache_key = pipeline_cache_key((mesh, frag), pipeline, color_format, depth_format,
-                                   descriptor_set_layout)
+    cache_key = pipelinekey((mesh, frag), colorformats(color_format), depth_format, pipeline,
+                            descriptor_set_layout !== nothing)
     compiled = get!(ctx.caches.gfx_pipelines, cache_key) do
         # No `topology`: a mesh stage's output primitive is an execution mode of
         # its entry point, carried by `MeshConfig`.
@@ -95,7 +81,10 @@ function resolve_shader_pair(pipeline, vert_tt::Type, frag_tt::Type)
     vout = Mantle.outputtype(last)
     # Both stages must agree on Flat interpolation, including integer varyings.
     flats = Mantle.flatoutputs(last)
-    wrapped_vert = VertexWrapper{typeof(Mantle.stagefunction(pipeline.vertex)), flats}()
+    # A body declaring a leading `VertexIndex` is handed one, as on every backend.
+    vf = Mantle.stagefunction(pipeline.vertex)
+    vid = KI.wantsvertexindex(vf, Tuple(vert_tt.parameters))
+    wrapped_vert = VertexWrapper{typeof(vf), flats, vid}()
     wrapped_frag = FragmentWrapper{typeof(Mantle.stagefunction(pipeline.fragment)), vout, flats}()
     return wrapped_vert, vert_tt, wrapped_frag, frag_tt
 end
@@ -125,12 +114,12 @@ end
 
 # Portable draw sequencing lives in graphics/record.jl.
 """Hold original argument leaves, adapt to device values, and pack into caller-owned
-mapped argument memory. Shared by graph slots and manual draw scratch."""
-function pack_gfx_args!(owner::Closed, args, ptr::Ptr{UInt8}, address::UInt64,
-                        info::PushConstantInfo)
+mapped argument memory (`dest...`, as `pack_args_direct!` takes it). Shared by graph
+slots and manual draw scratch."""
+function pack_gfx_args!(owner::Closed, args, info::PushConstantInfo, dest...)
     holdleaves!(owner, args)
     converted = devargs(LavaAdaptor(owner), args)
-    pack_args_direct!(owner, ptr, address, info.arg_offsets, info.arg_buffer_size,
+    pack_args_direct!(owner, dest..., info.arg_offsets, info.arg_buffer_size,
                       info.byval_llvm_sizes, converted)
     return nothing
 end
@@ -140,12 +129,12 @@ function pack_gfx_args_bda(batch::O, args, push_info::PushConstantInfo) where {O
     (push_info.push_size == 0 || isempty(args)) && return UInt64(0)
     total_size = push_info.arg_buffer_size + compute_inline_extra_from_byval(push_info.byval_llvm_sizes, push_info.arg_buffer_size)
     arg_buf = get_arg_buffer(batch, total_size)
-    pack_gfx_args!(batch, args, arg_buf.mapped_ptr, arg_buf.address, push_info)
+    pack_gfx_args!(batch, args, push_info, arg_buf)
     return arg_buf.address
 end
 
 """Transition the drawn swapchain image from COLOR_ATTACHMENT_OPTIMAL to PRESENT_SRC; retain its window."""
-function presentready!(e::Emitter, win::VulkanWindow)
+function presentready!(e::Emitter, win::VulkanSwapchain)
     image = win.images[win.current_image_idx + 1]
     imagebarrier!(e.cmd, image,
         VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -158,7 +147,7 @@ function presentready!(e::Emitter, win::VulkanWindow)
 end
 
 """Discard an acquired, undrawn image and transition UNDEFINED to PRESENT_SRC; retain its window."""
-function presentuntouched!(e::Emitter, win::VulkanWindow)
+function presentuntouched!(e::Emitter, win::VulkanSwapchain)
     image = win.images[win.current_image_idx + 1]
     imagebarrier!(e.cmd, image,
         VK.IMAGE_LAYOUT_UNDEFINED, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -171,10 +160,9 @@ end
 
 """submit_and_present!(bq, win, frame) -> token
 
-Submit a sealed frame with image-available wait and per-image render-finished
-signal, keep its token for the frame slot, then present. The caller records the
-final image transition."""
-function submit_and_present!(bq::SubmitChannel{<:VulkanQueue}, win::VulkanWindow,
+Submit a sealed frame with image-available wait, per-image render-finished signal
+and frame-slot token, then present. The caller records the final image transition."""
+function submit_and_present!(bq::SubmitChannel{<:VulkanQueue}, win::VulkanSwapchain,
                              frame::OneShot)
     win.acquired || error("present_frame!: no image acquired (call acquire_next_image! first)")
     fi = win.current_frame

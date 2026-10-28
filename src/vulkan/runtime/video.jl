@@ -41,6 +41,9 @@ import ..VideoImage, ..LavaArray, ..pool_offset,
 
 import ..feed!, ..decodemore!, ..remaining
 
+# The bitstream itself is core's (`video/bitstream.jl`).
+using ..Bitstream
+
 # Parent names defined after this include, such as `alloc_image_memory`.
 const MANTLE = parentmodule(@__MODULE__)
 
@@ -50,132 +53,8 @@ const MANTLE = parentmodule(@__MODULE__)
     error("video decode: $what returned VkResult $r")
 end
 
-mutable struct BR; d::Vector{UInt8}; p::Int; end
-rb1(b)=(byte=b.d[(b.p>>3)+1]; v=(byte>>(7-(b.p&7)))&0x01; b.p+=1; Int(v))
-rbn(b,n)=(v=0; for _ in 1:n; v=(v<<1)|rb1(b); end; v)
-ue(b)=(z=0; while b.p<8*length(b.d) && rb1(b)==0; z+=1; end; z==0 ? 0 : ((1<<z)-1+rbn(b,z)))
-se(b)=(k=ue(b); iseven(k) ? -(k>>1) : (k+1)>>1)
-function unescape(d)
-    out=UInt8[]; z=0
-    for b in d
-        if z>=2 && b==0x03; z=0; continue; end
-        push!(out,b); z = b==0 ? z+1 : 0
-    end; out
-end
-split_nals(d) = split_nals(d, nal -> (Int(nal[1]&0x1f), Int((nal[1]>>5)&3), nal))
-
-function split_nals(d, header)
-    starts = Int[]
-    i = 1
-    while i <= length(d)-3
-        if d[i]==0 && d[i+1]==0 && d[i+2]==1
-            push!(starts,i+3)
-            i += 3
-        else
-            i += 1
-        end
-    end
-    return map(eachindex(starts)) do k
-        first = starts[k]
-        last = k < length(starts) ? starts[k+1]-4 : length(d)
-        while last > first && d[last]==0
-            last -= 1
-        end
-        header(d[first:last])
-    end
-end
 pbytes(v::UInt32)=(UInt8(v&0xff),UInt8((v>>8)&0xff),UInt8((v>>16)&0xff),UInt8((v>>24)&0xff))
 packflags(vals)=(v=UInt32(0); for (i,x) in enumerate(vals); v|=(UInt32(x&1)<<(i-1)); end; v)
-const HIGHSET=Set([100,110,122,244,44,83,86,118,128,138,139,134,135])
-
-function parse_sps(nal)
-    b=BR(unescape(nal[2:end]),0)
-    profile=rbn(b,8); cflags=rbn(b,8); level=rbn(b,8); sps_id=ue(b)
-    chroma=1; sepcol=0; bdl=0; bdc=0; qpp=0; scal=0
-    if profile in HIGHSET
-        chroma=ue(b); chroma==3 && (sepcol=rb1(b)); bdl=ue(b); bdc=ue(b); qpp=rb1(b); scal=rb1(b)
-        scal==1 && error("seq scaling matrix not handled")
-    end
-    log2fn=ue(b); poct=ue(b); log2poc=0; dpoaz=0
-    if poct==0; log2poc=ue(b)
-    elseif poct==1; dpoaz=rb1(b); se(b); se(b); nc=ue(b); for _ in 1:nc; se(b); end; end
-    maxref=ue(b); gaps=rb1(b); wmbs=ue(b); hmap=ue(b); fmo=rb1(b)
-    mbaff = fmo==0 ? rb1(b) : 0; direct8=rb1(b); crop=rb1(b); cl=cr=ct=cb=0
-    crop==1 && (cl=ue(b);cr=ue(b);ct=ue(b);cb=ue(b)); vui=rb1(b)
-    (;profile,cflags,level,sps_id,chroma,sepcol,bdl,bdc,qpp,log2fn,poct,log2poc,dpoaz,maxref,gaps,wmbs,hmap,fmo,mbaff,direct8,crop,cl,cr,ct,cb,vui)
-end
-function parse_pps(nal)
-    b=BR(unescape(nal[2:end]),0)
-    pps_id=ue(b); sps_id=ue(b); entropy=rb1(b); bottom=rb1(b); nsg=ue(b)
-    nsg>0 && error("slice groups not handled")
-    nl0=ue(b); nl1=ue(b); wp=rb1(b); wbi=rbn(b,2); qp=se(b); qs=se(b); cqp=se(b)
-    dbf=rb1(b); cintra=rb1(b); redun=rb1(b); t8=0; cqp2=cqp
-    if b.p < 8*length(b.d)-8; t8=rb1(b); ps=rb1(b); ps==1 && error("pic scaling not handled"); cqp2=se(b); end
-    (;pps_id,sps_id,entropy,bottom,nl0,nl1,wp,wbi,qp,qs,cqp,dbf,cintra,redun,t8,cqp2)
-end
-# Slice header fields needed for POC and the DPB; assumes frame_mbs_only.
-function parse_slice(nal, sps)
-    nrid=Int((nal[1]>>5)&3); idr=(nal[1]&0x1f)==5
-    b=BR(unescape(nal[2:end]),0)
-    first_mb=ue(b); stype=ue(b)%5; ppsid=ue(b)
-    sps.sepcol==1 && rbn(b,2)
-    fnum=rbn(b, sps.log2fn+4)
-    idrid = idr ? ue(b) : 0
-    poclsb = sps.poct==0 ? rbn(b, sps.log2poc+4) : 0
-    (;nrid,idr,first_mb,stype,fnum,idrid,poclsb)
-end
-
-# H.264 7.3.3.3: parse MMCO reference marking after the optional slice fields.
-function parse_mmco(nal, sps, pps)
-    nrid=Int((nal[1]>>5)&3)
-    nrid==0 && return (false, Tuple{Int,Int,Int}[])
-    idr=(nal[1]&0x1f)==5
-    b=BR(unescape(nal[2:end]),0)
-    ue(b); stype=ue(b)%5; ue(b)                       # first_mb, slice_type, pps_id
-    sps.sepcol==1 && rbn(b,2)
-    rbn(b, sps.log2fn+4)                              # frame_num
-    idr && ue(b)                                      # idr_pic_id
-    if sps.poct==0
-        rbn(b, sps.log2poc+4); pps.bottom==1 && se(b)
-    elseif sps.poct==1 && sps.dpoaz==0
-        se(b); pps.bottom==1 && se(b)
-    end
-    pps.redun==1 && ue(b)                             # redundant_pic_cnt
-    stype==1 && rb1(b)                                # direct_spatial_mv_pred_flag
-    nrl0=pps.nl0+1; nrl1=pps.nl1+1
-    if stype==0 || stype==1                           # num_ref_idx_active_override
-        if rb1(b)==1; nrl0=ue(b)+1; stype==1 && (nrl1=ue(b)+1); end
-    end
-    modlist()=(rb1(b)==1 && while true; idc=ue(b); idc==3 && break; (idc==0||idc==1||idc==2) && ue(b); end)
-    stype!=2 && stype!=4 && modlist()                 # ref_pic_list_modification l0
-    stype==1 && modlist()                             # ref_pic_list_modification l1
-    if (pps.wp==1 && stype==0) || (pps.wbi==1 && stype==1)   # pred_weight_table (skip)
-        ue(b); sps.chroma!=0 && ue(b)
-        for cnt in (stype==1 ? (nrl0,nrl1) : (nrl0,))
-            for _ in 1:cnt
-                rb1(b)==1 && (se(b); se(b))
-                sps.chroma!=0 && rb1(b)==1 && (se(b);se(b);se(b);se(b))
-            end
-        end
-    end
-    if idr; rb1(b); rb1(b); return (false, Tuple{Int,Int,Int}[]); end
-    adaptive=rb1(b)==1
-    ops=Tuple{Int,Int,Int}[]
-    if adaptive
-        while true
-            op=ue(b); op==0 && break
-            arg=0; lt=0
-            (op==1||op==3) && (arg=ue(b))             # difference_of_pic_nums_minus1
-            op==2 && (arg=ue(b))                      # long_term_pic_num
-            (op==3||op==6) && (lt=ue(b))              # long_term_frame_idx
-            op==4 && (arg=ue(b))                      # max_long_term_frame_idx_plus1
-            push!(ops,(op,arg,lt))
-            length(ops)>64 && break
-        end
-    end
-    (adaptive, ops)
-end
-
 const LEVELMAP=Dict(10=>0,11=>1,12=>2,13=>3,20=>4,21=>5,22=>6,30=>7,31=>8,32=>9,40=>10,41=>11,42=>12,50=>13,51=>14,52=>15,60=>16,61=>17,62=>18)
 function std_sps(s)
     csf(i)=(s.cflags>>(7-i))&1

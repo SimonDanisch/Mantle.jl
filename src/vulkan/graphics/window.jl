@@ -1,15 +1,12 @@
-# GLFW windows with Vulkan surfaces and swapchains; needs VK_KHR_surface and the
-# platform's surface extension.
-
-import GLFW
+# Vulkan's half of core's `Window` (`graphics/window.jl`): a surface on the GLFW window
+# and its swapchain; needs VK_KHR_surface and the platform's surface extension.
 
 """
-    VulkanWindow
+    VulkanSwapchain
 
-A GLFW window with a Vulkan surface and swapchain.
+A Vulkan surface on a platform window and the swapchain presenting into it.
 """
-mutable struct VulkanWindow <: Window
-    handle::GLFW.Window
+mutable struct VulkanSwapchain
     surface::VK.SurfaceKHR
     swapchain::Union{Nothing, VK.SwapchainKHR}
     images::Vector{VK.Image}
@@ -19,6 +16,8 @@ mutable struct VulkanWindow <: Window
     # surface offered. `_SRGB` encodes on write (shaders write linear), `_UNORM`
     # stores as-is (shaders write display-referred).
     preferred_format::VK.Format
+    # Kept for rebuilds on resize, as the format is.
+    vsync::Bool
     extent::VK.Extent2D
     # `image_available` and `slot_tokens` per frame slot, `render_finished` per image.
     image_available::Vector{VK.Semaphore}
@@ -34,70 +33,39 @@ mutable struct VulkanWindow <: Window
     # `readback_window` hands undrawn images back.
     holdsframe::Vector{Bool}
     acquired::Bool
-    # The task holding the acquired image, `nothing` between frames. While set,
-    # another acquire and a readback are refused.
-    acquirer::Union{Nothing, Task}
-    # Framebuffer size the swapchain was built for. Resizes are not reliably
-    # reported (OUT_OF_DATE is optional, SUBOPTIMAL is a success code, Xwayland
-    # sends neither), so `sync_swapchain!` compares against this.
+    # Framebuffer size the swapchain was built for (`fitsurface!`).
     fb_size::Tuple{Int,Int}
     # Swapchain and surface belong to this device.
     ctx::LavaDevice
 end
 
 """
-    VulkanWindow(width, height; ctx, title="Lava", vsync=true, color_format=VK.FORMAT_B8G8R8A8_SRGB, srgb=false)
-
-A window with a Vulkan surface and swapchain. `color_format`, a `VK.Format` or a
-Julia element type, decides what shaders write: `_SRGB` takes linear values and
-encodes them, `_UNORM` stores already gamma-encoded values as they are. Falls back
-to the surface's first format when the requested one is not offered.
+A surface on the GLFW window `handle` and a swapchain of `width` x `height`. `T`
+decides what shaders write: an `_SRGB` format (`srgb = true`) takes linear values
+and encodes them, `_UNORM` stores already gamma-encoded values as they are. Falls
+back to the surface's first format when the requested one is not offered.
 """
-function VulkanWindow(width::Integer, height::Integer;
-                      ctx::LavaDevice,
-                      title::String="Lava", vsync::Bool=true,
-                      color_format::Union{VK.Format,Type}=VK.FORMAT_B8G8R8A8_SRGB,
-                      srgb::Bool=false)
-    # Lowered as `VulkanFramebuffer` lowers it, for the portable `Mantle.Window`.
-    color_format isa Type && (color_format = vkformat(VulkanAPI(), color_format; srgb))
-
-    # No OpenGL context.
-    GLFW.Init()
-    GLFW.WindowHint(GLFW.CLIENT_API, GLFW.NO_API)
-    GLFW.WindowHint(GLFW.RESIZABLE, true)
-
-    handle = GLFW.CreateWindow(width, height, title)
-    # Window hints are process-global: left at `NO_API`, the next OpenGL window
-    # (GLMakie's) has no context to make current.
-    GLFW.DefaultWindowHints()
-
+function windowsurface(ctx::LavaDevice, handle::GLFW.Window, ::Type{T}, width::Int, height::Int;
+                       vsync::Bool, srgb::Bool) where {T}
+    color_format = pixelformat(VulkanAPI(), T; srgb)
     surface_ptr = GLFW.CreateWindowSurface(ctx.instance.vks, handle)
     surface_ptr == C_NULL && throw(LavaError("window creation", "GLFW CreateWindowSurface failed",
                                 "Ensure Vulkan drivers support window surfaces"))
     surface = VK.SurfaceKHR(surface_ptr, ctx.instance, ctx.instance.refcount)
-
-    win = VulkanWindow(
-        handle, surface, nothing,
-        VK.Image[], VK.ImageView[],
-        color_format, color_format,
-        VK.Extent2D(width, height),
-        VK.Semaphore[], VK.Semaphore[], UInt64[],
-        1,  # current_frame
-        UInt32(0), Bool[], false, nothing,
-        (Int(width), Int(height)),       # fb_size, corrected by create_swapchain!
-        ctx,
-    )
-
-    create_swapchain!(win; vsync)
-    return win
+    sc = VulkanSwapchain(surface, nothing, VK.Image[], VK.ImageView[], color_format, color_format,
+                         vsync, VK.Extent2D(width, height), VK.Semaphore[], VK.Semaphore[], UInt64[],
+                         1, UInt32(0), Bool[], false, (width, height), ctx)
+    create_swapchain!(sc, width, height)
+    return sc
 end
 
 """
-    create_swapchain!(win::VulkanWindow; vsync=true)
+    create_swapchain!(win::VulkanSwapchain, width, height)
 
-Create or recreate the swapchain for the window.
+Create or recreate the swapchain, for a framebuffer of `width` x `height` pixels.
 """
-function create_swapchain!(win::VulkanWindow; vsync::Bool=true)
+function create_swapchain!(win::VulkanSwapchain, fbw::Int, fbh::Int)
+    vsync = win.vsync
     ctx = win.ctx
     dev = ctx.device
     phys = ctx.physical_device
@@ -130,8 +98,7 @@ function create_swapchain!(win::VulkanWindow; vsync::Bool=true)
         end
     end
 
-    fbw, fbh = GLFW.GetFramebufferSize(win.handle)
-    win.fb_size = (Int(fbw), Int(fbh))      # what this swapchain is built for
+    win.fb_size = (fbw, fbh)      # what this swapchain is built for
     if caps.current_extent.width != typemax(UInt32)
         win.extent = caps.current_extent
     else
@@ -203,72 +170,45 @@ function create_swapchain!(win::VulkanWindow; vsync::Bool=true)
     win.current_frame = 1
 end
 
-# What a render pass asks any attachment, so `WindowSurface` forwards and core
-# never sees a swapchain. `current_image_idx` changes per frame and is set by
+# What a render pass asks any attachment, so `Window` forwards and core never sees a
+# swapchain. `current_image_idx` changes per frame and is set by
 # `acquire_next_image!`.
-target_view(w::VulkanWindow)   = w.views[w.current_image_idx + 1]
-target_image(w::VulkanWindow)  = w.images[w.current_image_idx + 1]
-target_extent(w::VulkanWindow) = (Int(w.extent.width), Int(w.extent.height))
-target_format(w::VulkanWindow) = w.format
+target_view(w::VulkanSwapchain)   = w.views[w.current_image_idx + 1]
+target_image(w::VulkanSwapchain)  = w.images[w.current_image_idx + 1]
+target_extent(w::VulkanSwapchain) = (Int(w.extent.width), Int(w.extent.height))
+target_format(w::VulkanSwapchain) = w.format
 
-# The pixel type shaders write (`attachment_format` reads it), from the format the
-# swapchain actually has.
-Base.eltype(w::VulkanWindow) = eltypeof(w.format)
-
-"""
-    checkopen(win)
-
-Throw if `win` is closed: touching a destroyed GLFW handle segfaults in the
-driver. Checks the handle, not `isopen`, since a window whose close button was
-clicked can still be drawn to.
-"""
-checkopen(win::VulkanWindow) =
-    win.handle.handle == C_NULL &&
-        error("this window has been closed; nothing can be drawn to it or read from it")
+# The pixel type the swapchain's images hold, from the format it actually has.
+Base.eltype(w::VulkanSwapchain) = eltypeof(w.format)
 
 """
-    sync_swapchain!(win) -> Bool
-
-Rebuild the swapchain if the framebuffer size no longer matches it (resizes are
-not reliably reported, see `fb_size`) and return whether it did. Separate from
-`acquire_next_image!` so a graph can learn the size before recording. A zero size
-is a minimised window and rebuilds nothing.
+Rebuild the swapchain if the framebuffer no longer matches it. Waits for the device
+first: destroying images or views in flight is a use-after-free.
 """
-function sync_swapchain!(win::VulkanWindow)
-    checkopen(win)
-    fbw, fbh = GLFW.GetFramebufferSize(win.handle)
+function fitsurface!(win::VulkanSwapchain, fbw::Int, fbh::Int)
     (fbw, fbh) == win.fb_size && return false
-    (fbw > 0 && fbh > 0) || return false
-    resize!(win)
+    rebuild!(win, fbw, fbh)
     return true
 end
 
-"""
-    acquire_next_image!(win::VulkanWindow) -> UInt32
+"""Rebuild the swapchain at `width` x `height` once nothing in flight uses it."""
+function rebuild!(win::VulkanSwapchain, fbw::Int = win.fb_size[1], fbh::Int = win.fb_size[2])
+    VK.device_wait_idle(win.ctx.device)
+    # Everything in flight has passed; give the frames' one-shots back now
+    # rather than at the next sweep.
+    drain!(win.ctx.default_bq)
+    create_swapchain!(win, fbw, fbh)
+    return nothing
+end
 
-Acquire the next swapchain image and return its 0-based index. Call before
-recording the frame.
 """
-function acquire_next_image!(win::VulkanWindow)
-    checkopen(win)
-    # Claimed before anything below waits. Every wait here yields, so a second
-    # task can arrive meanwhile, and it has to find the window taken
-    # (`checkacquirable`, `checkframeowner`) rather than acquire beside this one
-    # or rebuild the swapchain a worker is acquiring from.
-    checkacquirable(win.acquirer)
-    win.acquirer = current_task()
-    try
-        sync_swapchain!(win)
-        # The slot's previous frame has passed once its token has; the next sweep
-        # returns its one-shot.
-        waitfor!(win.ctx.default_bq, win.slot_tokens[win.current_frame])
-        win.current_image_idx = acquireimage!(win)
-    catch
-        win.acquirer = nothing
-        rethrow()
-    end
+Acquire the next image after the previous frame in this slot has passed.
+"""
+function acquire_next_image!(win::VulkanSwapchain)
+    waitfor!(win.ctx.default_bq, win.slot_tokens[win.current_frame])
+    win.current_image_idx = acquireimage!(win)
     win.acquired = true
-    return win.current_image_idx
+    return nothing
 end
 
 """
@@ -283,7 +223,7 @@ struct ImageAcquire
     fptr::Ptr{Cvoid}                # vkAcquireNextImageKHR
 end
 
-ImageAcquire(win::VulkanWindow) =
+ImageAcquire(win::VulkanSwapchain) =
     ImageAcquire(win.ctx.device.vks, win.swapchain.vks,
                  win.image_available[win.current_frame].vks, Ref(UInt32(0)),
                  VK.function_pointer(VK.global_dispatcher[], win.ctx.device,
@@ -308,17 +248,17 @@ paced by the display) is waited for on a worker ([`hostwait`](@ref)). A stale
 swapchain is rebuilt and acquired from once more, into the rebuilt slot's
 semaphore.
 """
-function acquireimage!(win::VulkanWindow)
+function acquireimage!(win::VulkanSwapchain)
     res, a = tryacquire(win)
     if res == VK.vk.VK_ERROR_OUT_OF_DATE_KHR
-        resize!(win)
+        rebuild!(win)
         res, a = tryacquire(win)
     end
     throw_if_error(win.ctx, "vkAcquireNextImageKHR", checkedresult(res, "vkAcquireNextImageKHR"))
     return a.index[]
 end
 
-function tryacquire(win::VulkanWindow)
+function tryacquire(win::VulkanSwapchain)
     a = ImageAcquire(win)
     res = acquirecall(a, UInt64(0))
     if res == VK.vk.VK_NOT_READY || res == VK.vk.VK_TIMEOUT
@@ -340,7 +280,7 @@ struct PresentCall
     fptr::Ptr{Cvoid}                # vkQueuePresentKHR
 end
 
-function PresentCall(win::VulkanWindow)
+function PresentCall(win::VulkanSwapchain)
     sems = [win.render_finished[win.current_image_idx + 1].vks]
     swaps = [win.swapchain.vks]
     idxs = UInt32[win.current_image_idx]
@@ -358,13 +298,12 @@ function blockon(p::PresentCall)
 end
 
 """
-    present!(win::VulkanWindow)
+    present!(win::VulkanSwapchain)
 
 Present the acquired image, waiting on its `render_finished` semaphore. Call after
 the frame's submit.
 """
-function present!(win::VulkanWindow)
-    checkopen(win)
+function present!(win::VulkanSwapchain)
     win.acquired || error("Cannot present: no image acquired (call acquire_next_image! first)")
     ctx = win.ctx
     fi = win.current_frame
@@ -381,49 +320,24 @@ function present!(win::VulkanWindow)
         code = unwrap_error(result).code
         if code == VK.ERROR_OUT_OF_DATE_KHR || code == VK.SUBOPTIMAL_KHR
             win.acquired = false
-            win.acquirer = nothing
-            resize!(win)                 # rebuild the swapchain; caller draws the next frame
+            rebuild!(win)                 # the caller draws the next frame
             return nothing
         end
         throw_if_error(ctx, "vkQueuePresentKHR", result)
     end
 
     win.acquired = false
-    win.acquirer = nothing
     win.current_frame = mod1(fi + 1, length(win.slot_tokens))
 end
 
-"""
-    resize!(win::VulkanWindow)
-
-Handle window resize by recreating the swapchain.
-"""
-function Base.resize!(win::VulkanWindow)
-    checkopen(win)
-    checkframeowner(win.acquirer, "resize!")
+# Destroyed here, children first: finalizers do not run at exit, and a surface
+# outliving the instance is a leak (VUID-vkDestroyInstance-instance-00629).
+function closesurface!(win::VulkanSwapchain)
     ctx = win.ctx
     deviceidle(ctx)
     # Everything in flight has passed; give the frames' one-shots back now
     # rather than at the next sweep.
     drain!(ctx.default_bq)
-    create_swapchain!(win)
-end
-
-function Base.isopen(win::VulkanWindow)
-    win.handle.handle != C_NULL && !GLFW.WindowShouldClose(win.handle)
-end
-
-function Base.close(win::VulkanWindow)
-    # Idempotent.
-    win.handle.handle == C_NULL && return
-    checkframeowner(win.acquirer, "close")
-    ctx = win.ctx
-    deviceidle(ctx)
-    # Everything in flight has passed; give the frames' one-shots back now
-    # rather than at the next sweep.
-    drain!(ctx.default_bq)
-    # Destroyed here, children first: finalizers do not run at exit, and a surface
-    # outliving the instance is a leak (VUID-vkDestroyInstance-instance-00629).
     for v in win.views
         finalize(v)
     end
@@ -439,9 +353,5 @@ function Base.close(win::VulkanWindow)
     # Not `finalize`: the surface wraps GLFW's pointer by hand, so it has no VK.jl
     # destructor and no finalizer.
     VK.destroy_surface_khr(ctx.instance, win.surface)
-
-    GLFW.DestroyWindow(win.handle)
-    win.handle = GLFW.Window(C_NULL)
+    return nothing
 end
-
-Base.size(win::VulkanWindow) = (Int(win.extent.width), Int(win.extent.height))

@@ -100,12 +100,121 @@ refuseretired(dev) = retired(dev) && throw(ArgumentError(
     "exiting), so nothing is allocated on it. Allocate on the device `reset_device!` " *
     "returned."))
 
+# ── The devices of a process ───────────────────────────────────────────────
+
+"""
+The devices of one API in this process: the default `Device(api)` hands out, made
+on first use under `lock`, since two made at once would put two pools over one
+GPU, and every device made, weakly, so [`retireall!`](@ref) retires each at exit
+before the finalizers run into a torn-down driver.
+"""
+mutable struct DeviceSlot
+    default::Union{Nothing,Device}
+    live::Vector{WeakRef}
+    lock::ReentrantLock
+end
+
+"""
+Every API's [`DeviceSlot`](@ref), by API type: filled once by `__init__`
+([`initdevices!`](@ref)) and only read after, so the default device is found
+without a lock.
+"""
+const DEVICES = Dict{DataType,DeviceSlot}()
+
+initdevices!(apis) = foreach(api -> DEVICES[api] = DeviceSlot(nothing, WeakRef[], ReentrantLock()), apis)
+
+deviceslot(api::Backend) = DEVICES[typeof(api)]
+
+"""
+    makedevice(api, select, debug) -> Device
+
+The backend's new device on the hardware `select` names ([`selectdevice`](@ref);
+`nothing` for its own choice), with the validation settings `debug`. Core
+registers it and decides whether it becomes the default.
+"""
+function makedevice end
+
+"""
+    remakedevice(device, debug) -> Device
+
+A new device on the same hardware as `device`, which is retired next, with the
+validation settings `debug`.
+"""
+function remakedevice end
+
+"""
+    adopt!(device) -> device
+
+Make `device` the one launches outside Mantle go to: Metal.jl's queue, AMDGPU.jl's
+stream. Called when it becomes the default, so an upload before its first run is
+ordered against the runs.
+"""
+adopt!(d::Device) = d
+
+"""A new device, registered for retirement at exit."""
+function newdevice(api::Backend, select, debug::DebugConfig)
+    d = makedevice(api, select, debug)::Device
+    slot = deviceslot(api)
+    @lock slot.lock push!(slot.live, WeakRef(d))
+    return d
+end
+
+function Device(api::Backend; select = nothing, debug::Union{Nothing,DebugConfig} = nothing)
+    (select === nothing && debug === nothing) || return newdevice(api, select, something(debug, DebugConfig()))
+    slot = deviceslot(api)
+    d = slot.default
+    d === nothing || return d
+    return @lock slot.lock begin
+        slot.default === nothing && defaultdevice!(newdevice(api, nothing, DebugConfig()))
+        slot.default
+    end
+end
+
+"""The default device of `api` if one was made, else `nothing`; makes none."""
+existingdefault(api::Backend) = deviceslot(api).default
+
+function defaultdevice!(d::Device)
+    slot = deviceslot(syncbackend(d))
+    @lock slot.lock slot.default = d
+    return adopt!(d)
+end
+
+"""Every device of `api` this process made and still references."""
+livedevices(api::Backend) =
+    (slot = deviceslot(api); @lock slot.lock Device[r.value for r in slot.live if r.value isa Device])
+
+"""
+    retireall!(api)
+    retireall!()
+
+Retire every device of `api`, or of every API, and drop the defaults. The exit
+hook: Julia runs `atexit` before the final finalizer sweep, and a finalizer
+reaching a driver that is already torn down crashes.
+"""
+function retireall!(api::Backend)
+    slot = deviceslot(api)
+    @lock slot.lock begin
+        foreach(r -> r.value isa Device && retire!(r.value), slot.live)
+        slot.default = nothing
+    end
+    return nothing
+end
+retireall!() = foreach(api -> retireall!(api()), keys(DEVICES))
+
 """reset_device!(device; debug=<current config>) -> Device
 
 Retire the old device and construct a replacement on the same hardware.
 Replace its API default if needed. Old allocations become unusable; allocate
 again on the returned device. Debug settings carry over unless overridden."""
-function reset_device! end
+function reset_device!(d::Device; debug::DebugConfig = d.debug)
+    api = syncbackend(d)
+    new = remakedevice(d, debug)::Device
+    slot = deviceslot(api)
+    @lock slot.lock push!(slot.live, WeakRef(new))
+    retire!(d)
+    slot.default === d && defaultdevice!(new)
+    return new
+end
 
 """trydevicearray(x, T, dims...) -> array or nothing
 

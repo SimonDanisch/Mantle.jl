@@ -80,7 +80,7 @@ end
 overbudget(heap::NamedTuple, bytes::Integer) = heap.usage + bytes > heap.budget
 
 """
-    trim_gpu_pool!(ctx = vk_context(); invalidate_recordings = false) -> (blocks, bytes)
+    trim_gpu_pool!(ctx = Device(VulkanAPI()); invalidate_recordings = false) -> (blocks, bytes)
 
 Return every empty pool block to the driver now, after an unconditional
 `quiesce_before_reclaim!` (flush, full GC, drain): until then a buffer held by a
@@ -95,15 +95,15 @@ plans and their resources stay valid and record again on the next `run!`.
 Returns `(0, 0)` while a recording is open, the device is lost or a collection
 is already running.
 """
-function trim_gpu_pool!(ctx::LavaDevice = vk_context(); invalidate_recordings::Bool=false)
+function trim_gpu_pool!(ctx::LavaDevice = Device(VulkanAPI()); invalidate_recordings::Bool=false)
     bq = ctx.default_bq
     if invalidate_recordings
         # Never sweep an open recording's positional hold frame.
         isempty(bq.holds) || return (0, 0)
-        all(ch -> ch.thread==Threads.threadid() && isempty(ch.holds),ctx.extra_queues) || return (0, 0)
+        all(ch -> ch.thread==Threads.threadid() && isempty(ch.holds),ctx.channels) || return (0, 0)
         device_lost(ctx) && return (0, 0)
         flush!(bq)
-        foreach(flush!,ctx.extra_queues)
+        foreach(flush!,ctx.channels)
         waitidle(ctx)
         seen=IdDict{Any,Nothing}()
         for arena in values(pool(ctx).arenas), plan in tenants!(arena)
@@ -115,7 +115,7 @@ function trim_gpu_pool!(ctx::LavaDevice = vk_context(); invalidate_recordings::B
     end
     quiesce_before_reclaim!(bq) || return (0, 0)
     if invalidate_recordings
-        foreach(drain!,ctx.extra_queues)
+        foreach(drain!,ctx.channels)
         reclaim!(pool(ctx),ctx;wait=true)
     end
     return reclaim_empty_pool_blocks!(bq)
@@ -426,7 +426,7 @@ function destroy_buffer!(buf::VkManagedBuffer)
         @lock p.livelock delete!(p.live_buffers, buf)
     end
     # A lost device, which includes every device at exit
-    # (`mark_all_devices_lost!`), gets no Vulkan calls: only poison the handle.
+    # (core's exit hook, `retireall!`), gets no Vulkan calls: only poison the handle.
     if device_lost(ctx)
         buf.mapped_ptr = Ptr{UInt8}(0)
         buf.address = BDA_POISON
@@ -525,16 +525,16 @@ poolblocks(ctx::LavaDevice) =
     collect(Iterators.flatten(values(pool(ctx).blocks)))
 
 """
-    gpu_live_bytes(ctx = vk_context()) -> Int
-    live_buffer_count(ctx = vk_context()) -> Int
+    gpu_live_bytes(ctx = Device(VulkanAPI())) -> Int
+    live_buffer_count(ctx = Device(VulkanAPI())) -> Int
 
 Bytes this device holds from the driver (pool blocks plus dedicated buffers),
 and the number of dedicated buffers. Pooled regions are not counted separately:
 they cost nothing beyond their block.
 """
-gpu_live_bytes(ctx::LavaDevice = vk_context()) =
+gpu_live_bytes(ctx::LavaDevice = Device(VulkanAPI())) =
     reserved(pool(ctx)) + mempolicy(ctx).live_bytes[]
-live_buffer_count(ctx::LavaDevice = vk_context()) =
+live_buffer_count(ctx::LavaDevice = Device(VulkanAPI())) =
     (p = mempolicy(ctx); @lock p.livelock length(p.live_buffers))
 
 """
@@ -684,7 +684,7 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
         (managed.ctx::LavaDevice).default_bq
     else
         wbq = stampof(managed).channel
-        (wbq !== nothing && !queue_released(wbq::SubmitChannel{<:VulkanQueue})) ?
+        (wbq !== nothing && !released(wbq::SubmitChannel{<:VulkanQueue})) ?
             (wbq::SubmitChannel{<:VulkanQueue}) : (managed.ctx::LavaDevice).default_bq
     end
     # `Mantle.offset`, qualified: this function's `offset` keyword shadows it.
