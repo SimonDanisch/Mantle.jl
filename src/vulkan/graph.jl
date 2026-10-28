@@ -1163,8 +1163,8 @@ function present_frame!(dev::LavaDevice, win::VulkanWindow)
 end
 
 """Present the acquired image of a failed frame untouched, through the same
-submit-and-present as a drawn frame so the slot's fence and semaphores stay
-paired. A no-op if nothing is acquired or the device is lost."""
+submit-and-present as a drawn frame so the slot's semaphores stay paired and its
+token is set. A no-op if nothing is acquired or the device is lost."""
 function abandonframe!(dev::LavaDevice, pl::Plan)
     for s in pl.graph.surfaces
         win = s.win

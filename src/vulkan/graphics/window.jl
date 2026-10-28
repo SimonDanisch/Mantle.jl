@@ -20,10 +20,13 @@ mutable struct VulkanWindow <: Window
     # stores as-is (shaders write display-referred).
     preferred_format::VK.Format
     extent::VK.Extent2D
-    # `image_available` and `in_flight` per frame slot, `render_finished` per image.
+    # `image_available` and `slot_tokens` per frame slot, `render_finished` per image.
     image_available::Vector{VK.Semaphore}
     render_finished::Vector{VK.Semaphore}
-    in_flight::Vector{VK.Fence}
+    # The default channel's token for each slot's last frame, `0` for none. A
+    # slot is reused once its token has passed; the frame's submission signals the
+    # timeline, so it needs no fence of its own, and waiting for the token yields.
+    slot_tokens::Vector{UInt64}
     current_frame::Int  # index into sync arrays (1-based, wraps)
     current_image_idx::UInt32
     # Per image: whether a frame drew it since the swapchain was built. Set by
@@ -78,7 +81,7 @@ function VulkanWindow(width::Integer, height::Integer;
         VK.Image[], VK.ImageView[],
         color_format, color_format,
         VK.Extent2D(width, height),
-        VK.Semaphore[], VK.Semaphore[], VK.Fence[],
+        VK.Semaphore[], VK.Semaphore[], UInt64[],
         1,  # current_frame
         UInt32(0), Bool[], false, nothing,
         (Int(width), Int(height)),       # fb_size, corrected by create_swapchain!
@@ -178,7 +181,7 @@ function create_swapchain!(win::VulkanWindow; vsync::Bool=true)
     # in flight, and destroying images or views still in use is a use-after-free
     # (a GPUVM fault frames later).
     if old_swapchain !== nothing
-        VK.device_wait_idle(dev)
+        deviceidle(win.ctx)
     end
     for v in win.views
         finalize(v)
@@ -196,7 +199,7 @@ function create_swapchain!(win::VulkanWindow; vsync::Bool=true)
     # only once its image is re-acquired, and images come back in any order.
     # Keyed by slot, one is signalled while the presentation engine owns it.
     win.render_finished = [VK.Semaphore(dev) for _ in 1:length(win.images)]
-    win.in_flight = [VK.Fence(dev; flags=VK.FENCE_CREATE_SIGNALED_BIT) for _ in 1:n]
+    win.slot_tokens = zeros(UInt64, n)   # every frame in flight has passed (see above)
     win.current_frame = 1
 end
 
@@ -248,37 +251,110 @@ recording the frame.
 """
 function acquire_next_image!(win::VulkanWindow)
     checkopen(win)
-    ctx = win.ctx
-    dev = ctx.device
-
-    sync_swapchain!(win)
-
-    # Refused while an image is held: the fence below is signalled by that
-    # frame's `submit_and_present!`, and waiting on it blocks in a foreign call
-    # the holding task can never run past. Compiling a kernel mid-frame yields,
-    # so a second task can arrive between acquire and present.
+    # Claimed before anything below waits. Every wait here yields, so a second
+    # task can arrive meanwhile, and it has to find the window taken
+    # (`checkacquirable`, `checkframeowner`) rather than acquire beside this one
+    # or rebuild the swapchain a worker is acquiring from.
     checkacquirable(win.acquirer)
-
-    fi = win.current_frame
-    # The slot's previous frame has passed once its fence has; the next sweep
-    # returns its one-shot.
-    wait_for_fences!(ctx.default_bq, [win.in_flight[fi]])
-    unwrap(VK.reset_fences(dev, [win.in_flight[fi]]))
-
-    # A stale swapchain on acquire is rebuilt, not an error.
-    acq = VK.acquire_next_image_khr(dev, win.swapchain,
-        typemax(UInt64); semaphore=win.image_available[fi])
-    if iserror(acq) && unwrap_error(acq).code == VK.ERROR_OUT_OF_DATE_KHR
-        resize!(win)
-        acq = VK.acquire_next_image_khr(dev, win.swapchain,
-            typemax(UInt64); semaphore=win.image_available[fi])
-    end
-    idx, _ = throw_if_error(ctx, "vkAcquireNextImageKHR", acq)
-
-    win.current_image_idx = idx
-    win.acquired = true
     win.acquirer = current_task()
-    return idx
+    try
+        sync_swapchain!(win)
+        # The slot's previous frame has passed once its token has; the next sweep
+        # returns its one-shot.
+        waitfor!(win.ctx.default_bq, win.slot_tokens[win.current_frame])
+        win.current_image_idx = acquireimage!(win)
+    catch
+        win.acquirer = nothing
+        rethrow()
+    end
+    win.acquired = true
+    return win.current_image_idx
+end
+
+"""
+One image acquire from `win`'s swapchain into a frame slot's semaphore, as a
+worker thread performs it (see `TimelineWait`).
+"""
+struct ImageAcquire
+    device::VK.vk.VkDevice
+    swapchain::VK.vk.VkSwapchainKHR
+    semaphore::VK.vk.VkSemaphore
+    index::Base.RefValue{UInt32}
+    fptr::Ptr{Cvoid}                # vkAcquireNextImageKHR
+end
+
+ImageAcquire(win::VulkanWindow) =
+    ImageAcquire(win.ctx.device.vks, win.swapchain.vks,
+                 win.image_available[win.current_frame].vks, Ref(UInt32(0)),
+                 VK.function_pointer(VK.global_dispatcher[], win.ctx.device,
+                                     :vkAcquireNextImageKHR))
+
+# GC-safe: on a worker it blocks until the presentation engine gives an image back.
+function acquirecall(a::ImageAcquire, timeout::UInt64)
+    fptr = a.fptr
+    GPUToolbox.@gcsafe_ccall $fptr(a.device::VK.vk.VkDevice,
+        a.swapchain::VK.vk.VkSwapchainKHR, timeout::UInt64, a.semaphore::VK.vk.VkSemaphore,
+        VK.vk.VkFence(C_NULL)::VK.vk.VkFence, a.index::Ptr{UInt32})::VK.vk.VkResult
+end
+
+blockon(a::ImageAcquire) = acquirecall(a, typemax(UInt64))
+
+"""
+    acquireimage!(win) -> UInt32
+
+Acquire the next image and return its 0-based index. Tried without waiting first,
+since an image is usually free; one the presentation engine still holds (a frame
+paced by the display) is waited for on a worker ([`hostwait`](@ref)). A stale
+swapchain is rebuilt and acquired from once more, into the rebuilt slot's
+semaphore.
+"""
+function acquireimage!(win::VulkanWindow)
+    res, a = tryacquire(win)
+    if res == VK.vk.VK_ERROR_OUT_OF_DATE_KHR
+        resize!(win)
+        res, a = tryacquire(win)
+    end
+    throw_if_error(win.ctx, "vkAcquireNextImageKHR", checkedresult(res, "vkAcquireNextImageKHR"))
+    return a.index[]
+end
+
+function tryacquire(win::VulkanWindow)
+    a = ImageAcquire(win)
+    res = acquirecall(a, UInt64(0))
+    if res == VK.vk.VK_NOT_READY || res == VK.vk.VK_TIMEOUT
+        res = something(hostwait(blockon, nothing, a))
+    end
+    return res, a
+end
+
+"""
+One present of `win`'s acquired image, as a worker thread performs it (see
+`TimelineWait`). `info` points into the three vectors, which live as long as it.
+"""
+struct PresentCall
+    queue::VK.vk.VkQueue
+    info::Base.RefValue{VK.vk.VkPresentInfoKHR}
+    semaphores::Vector{VK.vk.VkSemaphore}
+    swapchains::Vector{VK.vk.VkSwapchainKHR}
+    indices::Vector{UInt32}
+    fptr::Ptr{Cvoid}                # vkQueuePresentKHR
+end
+
+function PresentCall(win::VulkanWindow)
+    sems = [win.render_finished[win.current_image_idx + 1].vks]
+    swaps = [win.swapchain.vks]
+    idxs = UInt32[win.current_image_idx]
+    info = Ref(VK.vk.VkPresentInfoKHR(VK.vk.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, C_NULL,
+        UInt32(1), pointer(sems), UInt32(1), pointer(swaps), pointer(idxs), C_NULL))
+    return PresentCall(vkqueue(win.ctx.default_bq).vks, info, sems, swaps, idxs,
+                       VK.function_pointer(VK.global_dispatcher[], win.ctx.device,
+                                           :vkQueuePresentKHR))
+end
+
+function blockon(p::PresentCall)
+    fptr = p.fptr
+    GPUToolbox.@gcsafe_ccall $fptr(p.queue::VK.vk.VkQueue,
+        p.info::Ptr{VK.vk.VkPresentInfoKHR})::VK.vk.VkResult
 end
 
 """
@@ -292,14 +368,15 @@ function present!(win::VulkanWindow)
     win.acquired || error("Cannot present: no image acquired (call acquire_next_image! first)")
     ctx = win.ctx
     fi = win.current_frame
-    present_info = VK.PresentInfoKHR(
-        [win.render_finished[win.current_image_idx + 1]],
-        [win.swapchain],
-        [win.current_image_idx],
-    )
+    p = PresentCall(win)
+    # On a worker, holding the queue: some drivers wait in the present for the
+    # frame's rendering and for the display (NVIDIA on X11 waits out the whole GPU
+    # frame there, whatever the present mode), and the queue is held because
+    # another task on this thread may submit to it meanwhile.
+    raw = GC.@preserve p @lock queuelock(ctx.default_bq) something(hostwait(blockon, nothing, p))
     # OUT_OF_DATE and SUBOPTIMAL are not failures (a resize, or a compositor
     # remap, often on the first present): rebuild the swapchain.
-    result = VK.queue_present_khr(vkqueue(ctx.default_bq), present_info)
+    result = checkedresult(raw, "vkQueuePresentKHR")
     if iserror(result)
         code = unwrap_error(result).code
         if code == VK.ERROR_OUT_OF_DATE_KHR || code == VK.SUBOPTIMAL_KHR
@@ -313,7 +390,7 @@ function present!(win::VulkanWindow)
 
     win.acquired = false
     win.acquirer = nothing
-    win.current_frame = mod1(fi + 1, length(win.in_flight))
+    win.current_frame = mod1(fi + 1, length(win.slot_tokens))
 end
 
 """
@@ -323,8 +400,9 @@ Handle window resize by recreating the swapchain.
 """
 function Base.resize!(win::VulkanWindow)
     checkopen(win)
+    checkframeowner(win.acquirer, "resize!")
     ctx = win.ctx
-    VK.device_wait_idle(ctx.device)
+    deviceidle(ctx)
     # Everything in flight has passed; give the frames' one-shots back now
     # rather than at the next sweep.
     drain!(ctx.default_bq)
@@ -338,8 +416,9 @@ end
 function Base.close(win::VulkanWindow)
     # Idempotent.
     win.handle.handle == C_NULL && return
+    checkframeowner(win.acquirer, "close")
     ctx = win.ctx
-    VK.device_wait_idle(ctx.device)
+    deviceidle(ctx)
     # Everything in flight has passed; give the frames' one-shots back now
     # rather than at the next sweep.
     drain!(ctx.default_bq)
@@ -352,8 +431,7 @@ function Base.close(win::VulkanWindow)
     empty!(win.images)                  # owned by the swapchain, not destroyed
     for s in win.image_available; finalize(s); end
     for s in win.render_finished; finalize(s); end
-    for f in win.in_flight; finalize(f); end
-    empty!(win.image_available); empty!(win.render_finished); empty!(win.in_flight)
+    empty!(win.image_available); empty!(win.render_finished); empty!(win.slot_tokens)
     if win.swapchain !== nothing
         finalize(win.swapchain)
         win.swapchain = nothing

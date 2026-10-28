@@ -426,7 +426,7 @@ function Base.close(dec::CodecDecoder)
     ctx = dec.ctx
     vkchk(ccall(dfp(ctx,"vkQueueWaitIdle"),Int32,(Ptr{Cvoid},),ctx.video_decode_queue.vks),"vkQueueWaitIdle")
     if !isempty(dec.copyq)
-        vkchk(ccall(dfp(ctx,"vkQueueWaitIdle"),Int32,(Ptr{Cvoid},),MANTLE.vkqueue(ctx.default_bq).vks),"vkQueueWaitIdle")
+        @lock MANTLE.queuelock(ctx.default_bq) vkchk(ccall(dfp(ctx,"vkQueueWaitIdle"),Int32,(Ptr{Cvoid},),MANTLE.vkqueue(ctx.default_bq).vks),"vkQueueWaitIdle")
     end
     dec.open = false
     dec.PARAMS === nothing || ccall(dfp(ctx,"vkDestroyVideoSessionParametersKHR"),Cvoid,

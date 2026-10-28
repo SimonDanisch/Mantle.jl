@@ -414,7 +414,8 @@ function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Clos
             VK.vk.VK_STRUCTURE_TYPE_SUBMIT_INFO_2, C_NULL, 0,
             UInt32(nw), pointer(raw_waits), UInt32(ncb), pointer(raw_cbs),
             UInt32(ns), pointer(raw_sigs))
-        VK.vk.vkQueueSubmit2(vkqueue(bq).vks, UInt32(1), pointer(raw_subs), vkfence, fptr)
+        @lock queuelock(bq) VK.vk.vkQueueSubmit2(vkqueue(bq).vks, UInt32(1),
+                                                  pointer(raw_subs), vkfence, fptr)
     end
     if submit_result != VK.vk.VK_SUCCESS
         # The raw call has no result wrapper, so mark device loss here. Nothing
@@ -626,8 +627,7 @@ so the throw only fires if the device died in between.
     # The shared counter cell belongs to the owning thread; another thread gets a
     # fresh `Ref`. Two threads writing one cell could return a wrong counter, and
     # a token reported passed too early is a use-after-free.
-    ref = Threads.threadid() == bq.thread ?
-          (driver(bq).slots).counter : Ref(UInt64(0))
+    ref = Threads.threadid() == bq.thread ? driver(bq).counter : Ref(UInt64(0))
     fptr = VK.function_pointer(VK.global_dispatcher[], vkdevice(bq),
                                :vkGetSemaphoreCounterValue)
     res = VK.vk.vkGetSemaphoreCounterValue(vkdevice(bq).vks, timelineof(bq).vks,
@@ -645,30 +645,72 @@ so the throw only fires if the device died in between.
 end
 
 """
+One wait for a queue's timeline to reach `value`, as a worker thread performs it.
+The handles and the entry point are resolved on the calling thread, so the worker
+reads nothing the queue's thread may be changing. A bits type, so handing it to a
+worker boxes nothing ([`hostwait`](@ref)); the queue, which keeps the semaphore
+alive, stays with the waiting task, which also polls it.
+"""
+struct TimelineWait
+    device::VK.vk.VkDevice
+    semaphore::VK.vk.VkSemaphore
+    value::UInt64
+    timeout::UInt64
+    fptr::Ptr{Cvoid}                # vkWaitSemaphores
+end
+
+TimelineWait(bq::SubmitChannel{<:VulkanQueue}, value::UInt64, timeout::UInt64) =
+    TimelineWait(vkdevice(bq).vks, timelineof(bq).vks, value, timeout,
+                 VK.function_pointer(VK.global_dispatcher[], vkdevice(bq), :vkWaitSemaphores))
+
+# On the worker: GC-safe, so a collection elsewhere does not wait for the device.
+function blockon(w::TimelineWait)
+    sem, val, fptr = Ref(w.semaphore), Ref(w.value), w.fptr
+    GC.@preserve sem val begin
+        info = Ref(VK.vk.VkSemaphoreWaitInfo(VK.vk.VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+            C_NULL, VK.vk.VkSemaphoreWaitFlags(0), UInt32(1),
+            Base.unsafe_convert(Ptr{VK.vk.VkSemaphore}, sem),
+            Base.unsafe_convert(Ptr{UInt64}, val)))
+        GPUToolbox.@gcsafe_ccall $fptr(w.device::VK.vk.VkDevice,
+            info::Ptr{VK.vk.VkSemaphoreWaitInfo}, w.timeout::UInt64)::VK.vk.VkResult
+    end
+end
+
+"""
+    timelinewait(bq, w::TimelineWait) -> VkResult
+
+Wait as `w` says for `bq`'s timeline without holding the thread
+([`hostwait`](@ref)): `VK_SUCCESS` when the poll saw the value, otherwise what
+`vkWaitSemaphores` returned.
+"""
+function timelinewait(bq::SubmitChannel{<:VulkanQueue}, w::TimelineWait)
+    r = hostwait(blockon, w -> query_timeline(bq) >= w.value, w)
+    return r === nothing ? VK.vk.VK_SUCCESS : something(r)
+end
+
+"""
+    checkedresult(res::VkResult, call) -> Result
+
+A raw `VkResult` as the `Result` Vulkan.jl's checked wrappers return, built the
+way they build it, so a call made off them (by a worker thread, which must not
+touch the context) is raised by the same `throw_if_error` and
+`throw_with_validation_context` as every other call.
+"""
+function checkedresult(res::VK.vk.VkResult, call::String)::VK.ResultTypes.Result{VK.Result,VK.VulkanError}
+    code = Int32(res)
+    code < 0 && return VK.VulkanError(string("failed to execute ", call), VK.Result(code))
+    return VK.Result(code)
+end
+
+"""
     wait_timeline!(bq, val)
 
-Block until this queue's timeline reaches `val`. Raw, through the queue's slots,
-so a wait allocates nothing; errors fall through to the checked wrapper, which
-throws with context.
+Wait until this queue's timeline reaches `val`, yielding the thread while it does
+([`hostwait`](@ref)). Throws a failed wait with the queue's context.
 """
 function wait_timeline!(bq::SubmitChannel{<:VulkanQueue}, val::UInt64)
-    # The slots belong to the owning thread; other threads take the checked wrapper.
-    if Threads.threadid() != bq.thread
-        wait_semaphores!(bq, VK.SemaphoreWaitInfo([timelineof(bq)], [val]))
-        return nothing
-    end
-    slots = driver(bq).slots
-    slots.wait_sems[1] = timelineof(bq).vks
-    slots.wait_values[1] = val
-    fptr = VK.function_pointer(VK.global_dispatcher[], vkdevice(bq), :vkWaitSemaphores)
-    res = GC.@preserve slots begin
-        slots.wait_info[] = VK.vk.VkSemaphoreWaitInfo(
-            VK.vk.VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, C_NULL, 0,
-            UInt32(1), pointer(slots.wait_sems), pointer(slots.wait_values))
-        VK.vk.vkWaitSemaphores(vkdevice(bq).vks, slots.wait_info, typemax(UInt64), fptr)
-    end
-    res == VK.vk.VK_SUCCESS && return nothing
-    wait_semaphores!(bq, VK.SemaphoreWaitInfo([timelineof(bq)], [val]))  # throws
+    res = timelinewait(bq, TimelineWait(bq, val, typemax(UInt64)))
+    throw_if_error(bq, "vkWaitSemaphores", checkedresult(res, "vkWaitSemaphores"))
     return nothing
 end
 
@@ -726,15 +768,6 @@ Return the unwrapped value on success. On error, mark device loss for
 end
 @inline throw_if_error(ctx::LavaDevice, result) = throw_if_error(ctx, "Vulkan call", result)
 @inline throw_if_error(bq::SubmitChannel{<:VulkanQueue}, args...) = throw_if_error(deviceof(bq), args...)
-
-"""
-    wait_for_fences!(bq, fences; wait_all=true, timeout=typemax(UInt64))
-
-`vkWaitForFences` through `throw_if_error`.
-"""
-@inline wait_for_fences!(bq::SubmitChannel{<:VulkanQueue}, fences;
-                         wait_all::Bool=true, timeout::UInt64=typemax(UInt64)) =
-    throw_if_error(bq, "vkWaitForFences", VK.wait_for_fences(vkdevice(bq), fences, wait_all, timeout))
 
 """
     wait_semaphores!(bq, info; timeout=typemax(UInt64))
@@ -799,9 +832,9 @@ function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
     budget = driver(bq).flush_timeout_ns
     quantum = budget == 0 ? typemax(UInt64) : min(budget, FLUSH_WAIT_QUANTUM_NS)
     waited = UInt64(0)
+    w = TimelineWait(bq, target, quantum)
     while true
-        wait_result = VK.wait_semaphores(vkdevice(bq),
-            VK.SemaphoreWaitInfo([timelineof(bq)], [target]), quantum)
+        wait_result = checkedresult(timelinewait(bq, w), "vkWaitSemaphores")
         if iserror(wait_result)
             # Adds validation messages and the dispatch log to the error.
             mark_if_lost!(bq, wait_result)
@@ -816,7 +849,7 @@ function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
         # status, empty submit and zero-timeout wait did not). It runs only after
         # a quantum without progress, where blocking until idle is what `flush!`
         # wants anyway.
-        let st = VK.queue_wait_idle(vkqueue(bq))
+        let st = @lock queuelock(bq) VK.queue_wait_idle(vkqueue(bq))
             iserror(st) && mark_if_lost!(bq, st)
         end
         if device_lost(deviceof(bq))
