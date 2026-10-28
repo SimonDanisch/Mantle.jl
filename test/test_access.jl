@@ -8,6 +8,18 @@
 using Test, Mantle
 const M = Mantle
 
+@testset "reflection failure is not an inferred no-access proof" begin
+    rows=Base.code_ircode_by_type(Tuple{typeof(identity),Int})
+    @test length(rows)==1 && first(only(rows)) isa Core.Compiler.IRCode
+    ir=first(only(rows))
+    @test M.inferred_access_ir(rows)===ir
+    @test M.inferred_access_ir([which(identity,(Int,))=>Any])===nothing
+    @test M.inferred_access_ir([nothing=>Any])===nothing
+    @test M.inferred_access_ir([ir=>Union{}])===nothing
+    @test M.inferred_access_ir([])===nothing
+    @test M.inferred_access_ir([ir=>Int,ir=>Int])===nothing
+end
+
 @testset "inferred access: the unknown is refused, not guessed at" begin
     # `accessof` on a signature nothing can be inferred for must not answer
     # read+write for every argument: safe for the barrier phase, and

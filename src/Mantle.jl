@@ -263,7 +263,7 @@ export Dispatch, DeviceRange, countresource, indirectcount!, passof, graphof, to
 export newpass, handle, dispatches
 export IdTable, resourceid, byid, checklive
 export Phase, Dag, Schedule, Liveness, Place, Aliasing, Barriers, Pipelines
-export Policy, Compact, Overlap
+export Policy, Compact, Overlap, InOrder
 export PHASES, compile!
 # `update!` is not exported: Makie/ComputePipeline export the same name.
 export run!, npipelines, capacity, use, peakbytes, naivebytes, storage, free!
@@ -290,6 +290,9 @@ storage(x) = x
 
 """Resolve each element of grouped graph arguments, for recording and eager launch alike."""
 storage(x::Tuple) = argmap(storage, x)
+# Named operands have the same leaves as positional ones. Keep their keys,
+# resolving handles before a backend adapts the aggregate into kernel arguments.
+storage(x::NamedTuple{Names}) where {Names} = NamedTuple{Names}(argmap(storage, values(x)))
 
 """    argmap(f, args::Tuple) -> Tuple
 

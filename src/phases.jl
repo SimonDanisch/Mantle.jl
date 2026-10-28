@@ -150,6 +150,14 @@ struct Dag <: Phase end
 function run!(::Dag, c)
     ps = passes(c)
     a = analysis(c)
+    if policy(c) isa InOrder
+        # Declaration order is already a topological order: all graph hazards
+        # point from an earlier declaration to a later one. A chain represents
+        # that total order without materializing its quadratic transitive closure.
+        # Barriers still use the complete per-resource usages, not these edges.
+        a.deps=[i==1 ? Int[] : [i-1] for i in eachindex(ps)]
+        return c
+    end
     a.deps = [Int[] for _ in ps]
     # Earlier passes per `overlapgroup`: all that touched it, and those that
     # wrote it. A read depends on earlier writers, a write on every earlier pass,
@@ -193,6 +201,11 @@ struct Compact <: Policy end
 dependencies forced by shared memory. The default."""
 struct Overlap <: Policy end
 
+"""Keep declaration order with linear-size scheduling metadata. Resource barriers
+and transient liveness/aliasing remain unchanged; no dependency-based reordering
+is attempted. Useful for large, already ordered iterative compute graphs."""
+struct InOrder <: Policy end
+
 # The same global memory dependency covers prior accesses to every buffer, not
 # just the resource whose hazard caused it. Preserve exact usage keys rather
 # than guessing that a read-only execution dependency also flushes writes.
@@ -214,6 +227,14 @@ function run!(::Schedule, c)
     ps = passes(c)
     n = length(ps)
     n == 0 && return c
+
+    if policy(c) isa InOrder
+        # repeat! bodies are declared contiguously; validate that rather than
+        # expanding loop dependencies for a schedule that will not reorder them.
+        loopspans(ps)
+        analysis(c).order=collect(1:n)
+        return c
+    end
 
     deps = loopdeps(ps, analysis(c).deps)
     remaining = [length(d) for d in deps]
@@ -246,7 +267,11 @@ function run!(::Schedule, c)
     # its passes are candidates until the last. `left` counts each loop's remainder.
     left = IdDict{Any,Int}()
     for p in ps
-        p.loop === nothing || (left[p.loop] = get(left, p.loop, 0) + 1)
+        loop = p.loop
+        while loop !== nothing
+            left[loop] = get(left, loop, 0) + 1
+            loop = loop.parent
+        end
     end
     inloop = nothing
 
@@ -254,11 +279,10 @@ function run!(::Schedule, c)
         best, bestscore = 0, -1
         for k in eachindex(ready)
             i = ready[k]
-            inloop === nothing || ps[i].loop === inloop || continue
+            inloop === nothing || withinloop(ps[i].loop, inloop) || continue
             ord = clamp(n - i, 0, 0xffff)
             # Under Overlap, declaration order occupies the high bits. A
-            # candidate already behind there cannot win on memory, so avoid
-            # walking its resources again each time another pass is scheduled.
+            # candidate already behind there cannot win on memory.
             oshift > mshift && ord < (bestscore >> oshift) && continue
             alloc = 0
             freed = 0
@@ -285,10 +309,14 @@ function run!(::Schedule, c)
         i = ready[best]
         deleteat!(ready, best)
         push!(order, i)
-        if ps[i].loop !== nothing
-            l = ps[i].loop
-            left[l] -= 1
-            inloop = left[l] == 0 ? nothing : l
+        loop = ps[i].loop
+        while loop !== nothing
+            left[loop] -= 1
+            loop = loop.parent
+        end
+        inloop = ps[i].loop
+        while inloop !== nothing && left[inloop] == 0
+            inloop = inloop.parent
         end
         for id in ids[i]
             seen[id] = get(seen, id, 0) + 1
@@ -317,7 +345,11 @@ function loopdeps(ps, deps)
     deps = [copy(d) for d in deps]
     members = IdDict{Any,Vector{Int}}()
     for (i, p) in enumerate(ps)
-        p.loop === nothing || push!(get!(members, p.loop, Int[]), i)
+        loop = p.loop
+        while loop !== nothing
+            push!(get!(members, loop, Int[]), i)
+            loop = loop.parent
+        end
     end
     for (_, ms) in members
         inside = Set(ms)
@@ -338,23 +370,22 @@ The loops among scheduled `passes`, as the contiguous range each body occupies.
 Throws if a body is not contiguous.
 """
 function loopspans(ps)
-    out = Tuple{UnitRange{Int},Loop}[]
-    i = 1
-    while i <= length(ps)
-        l = ps[i].loop
-        if l === nothing
-            i += 1
-            continue
+    members = IdDict{Loop,Vector{Int}}()
+    for (i, p) in enumerate(ps)
+        loop = p.loop
+        while loop !== nothing
+            push!(get!(members, loop, Int[]), i)
+            loop = loop.parent
         end
-        j = i
-        while j < length(ps) && ps[j + 1].loop === l
-            j += 1
-        end
-        any(x -> x[2] === l, out) && error(
-            "scheduling split the body of a loop; it has to be one run of passes")
-        push!(out, (i:j, l))
-        i = j + 1
     end
+    out = Tuple{UnitRange{Int},Loop}[]
+    for (loop, indices) in members
+        range = first(indices):last(indices)
+        length(indices) == length(range) || error(
+            "scheduling split the body of a loop; it has to be one run of passes")
+        push!(out, (range, loop))
+    end
+    sort!(out; by=x -> (first(x[1]), -length(x[1])))
     return out
 end
 

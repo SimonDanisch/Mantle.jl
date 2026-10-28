@@ -375,8 +375,18 @@ because it removes a barrier.
 function irfor(w::Walk, @nospecialize(sig))
     irs = w.interp === nothing ? Base.code_ircode_by_type(sig) :
                                  Base.code_ircode_by_type(sig; interp = w.interp)
+    return inferred_access_ir(irs)
+end
+
+"Accept actual inferred IR only; reflection can return Method => Any on failure."
+function inferred_access_ir(irs)
     length(irs) == 1 || return nothing
     ir, rt = irs[1]
+    # Julia 1.12's reflection fallback is a Method, not IRCode. Treating it
+    # as IR raises FieldError in argmap and cannot establish resource access.
+    # `nothing` preserves signaturetouches/accessof's existing refusal path;
+    # in particular it is NOT an empty/no-touch proof.
+    ir isa Core.Compiler.IRCode || return nothing
     rt === Union{} && return nothing
     return ir
 end

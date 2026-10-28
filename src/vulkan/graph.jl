@@ -110,6 +110,9 @@ screenshot(w::VulkanWindow) = readback_window(w)
 extrausage(::Type{DrawIndirectCommand}) = UInt32(VK.BUFFER_USAGE_INDIRECT_BUFFER_BIT)
 # `repeat!`'s per-iteration flags, read by `vkCmdBeginConditionalRenderingEXT`.
 extrausage(::Type{Predicate}) = UInt32(VK.BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT)
+# Boxes a kernel writes and an acceleration-structure build reads: see
+# `build_blas_aabb(ctx, ::LavaArray{AABB,1})`.
+extrausage(::Type{AABB}) = AS_INPUT_USAGE
 
 # Conditional rendering is optional; without it `repeat!` must refuse the graph
 # rather than run every iteration.

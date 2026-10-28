@@ -21,6 +21,8 @@ not count a tuple as a nesting level, or its pointers go unpatched on `resize!`)
 treat tuples the same way.
 """
 resolve(dev::Device, x::Tuple) = argmap(a -> resolve(dev, a), x)
+resolve(dev::Device, x::NamedTuple{Names}) where {Names} =
+    NamedTuple{Names}(argmap(a -> resolve(dev, a), values(x)))
 
 """
     Launch(kernel, args, ndrange, group, device)
@@ -287,9 +289,20 @@ function run!(::Pipelines, c::Compile)
         compiled = Any[]
         for d in p.dispatches
             ind = d.ndrange isa DeviceRange ? (indcursor += 1) : 0
-            # Kernels `@eval`ed while declaring the graph (e.g. the
-            # `gemv_ncontig_kernel` family) are newer than the caller's world.
-            cd = Base.invokelatest(compile_dispatch, c, d, argcursor, ind)
+            # `invokelatest` because the kernel can be newer than the caller's
+            # world. A generated family (`gemv_ncontig_kernel` and its kin)
+            # `@eval`s its function while the graph is being declared, and a
+            # plan built in the same top-level call compiles it here. Called
+            # directly, the backend looked the method up in the caller's world
+            # and threw "method too new" on Metal and on Vulkan alike. Vulkan got
+            # past it only while its frozen kernel cache, keyed on types, answered
+            # before anything looked the method up; that cache is gone.
+            cd = try
+                Base.invokelatest(compile_dispatch, c, d, argcursor, ind)
+            catch
+                @error "Failed to compile Mantle pass" pass=p.name kernel=(d isa Dispatch ? d.kernel : typeof(d))
+                rethrow()
+            end
             push!(compiled, cd)
             argcursor += argalign(argsize(cd))
         end
@@ -664,18 +677,29 @@ Walk the plan into `emitter`: the head, then every pass in compile order.
 """
 function emitplan!(e, pl::Plan)
     emithead!(e, pl)
-    # Loop bodies are walked once per iteration here; recordings instead cut a
-    # loop into pieces (`partitionranges`) and repeat them at submission.
-    i = 1
-    for (r, loop) in pl.loops
-        emitpasses!(e, pl, i:(first(r) - 1))
+    # A loop body is walked once per iteration, behind its loop head. Only a
+    # WALKED plan gets here with a loop (an interpreted run, a windowed frame):
+    # a recording cuts a loop into pieces of its own (`partitionranges`) and
+    # repeats them at submission.
+    emitloopregion!(e, pl, 1:length(pl.passes), nothing)
+    return nothing
+end
+
+# Walk only the immediate children here. Their bodies recursively walk their
+# own children, so an inner loop's index reset runs once per outer iteration.
+function emitloopregion!(e, pl::Plan, range, parent)
+    cursor = first(range)
+    for (body, loop) in pl.loops
+        loop.parent === parent || continue
+        first(body) in range || continue
+        emitpasses!(e, pl, cursor:(first(body) - 1))
         for _ in 1:loop.count
-            emitloophead!(e, pl, r)
-            emitpasses!(e, pl, r)
+            emitloophead!(e, pl, body)
+            emitloopregion!(e, pl, body, loop)
         end
-        i = last(r) + 1
+        cursor = last(body) + 1
     end
-    emitpasses!(e, pl, i:length(pl.passes))
+    emitpasses!(e, pl, cursor:last(range))
     return nothing
 end
 
@@ -838,49 +862,69 @@ end
 
 The pieces in submission order (a loop body's repeated per iteration), grouped
 into submissions while their measured cost fits the budget. An unmeasured piece
-is submitted alone. At a finite budget each iteration
-of a gated loop starts a new submission, because its timestamps describe only
-the last, possibly discarded, iteration.
+is submitted alone. At a finite budget each iteration of a gated loop starts a
+new submission, because its timestamps describe only the last, possibly
+discarded, iteration. Nested loops expand their pieces recursively.
 """
 function submissionbatches(pl::Plan, ranges, parts::Vector{R}) where {R}
     loopof(r) = isempty(r) ? nothing : pl.passes[first(r)].pass.loop
     order = Int[]
-    gatedheads = Set{Int}()
-    k = 1
-    while k <= length(ranges)
-        l = loopof(ranges[k])
-        if l === nothing
-            push!(order, k)
-            k += 1
-        else
-            j = k
-            while j < length(ranges) && loopof(ranges[j + 1]) === l
-                j += 1
-            end
-            if isfinite(pl.budget) && any(i -> pl.passes[i].pass.predicate !== nothing,
-                                         first(ranges[k]):last(ranges[j]))
-                push!(gatedheads, k)
-            end
-            for _ in 1:l.count
-                append!(order, k:j)
-            end
-            k = j + 1
-        end
-    end
+    looporder!(order, ranges, pl, 1:length(ranges), nothing)
     timed = measurable(pl)
     cost(k) = timed ? sum(i -> isnan(pl.passcost[i]) ? Inf : pl.passcost[i], ranges[k]; init = 0.0) : 0.0
     batches = Vector{R}[]
+    gatedloops = IdDict{Any, Bool}()
+    for pp in pl.passes
+        pp.pass.predicate === nothing && continue
+        loop = pp.pass.loop
+        while loop !== nothing
+            gatedloops[loop] = true
+            loop = loop.parent
+        end
+    end
+    previous = 0
     t = Inf
     for k in order
         c = cost(k)
-        if k in gatedheads || isempty(batches) || t + c > pl.budget
+        iteration_boundary = isfinite(pl.budget) && k <= previous &&
+            any(loop -> withinloop(loopof(ranges[k]), loop), keys(gatedloops))
+        if iteration_boundary || isempty(batches) || t + c > pl.budget
             push!(batches, R[])
             t = 0.0
         end
         push!(batches[end], parts[k])
         t += c
+        previous = k
     end
     return batches
+end
+
+# A recording is still a flat list of pieces. Expand the loop tree into piece
+# order once at recording time; runs submit those retained pieces unchanged.
+function looporder!(order, ranges, pl::Plan, span, parent)
+    k = first(span)
+    while k <= last(span)
+        range = ranges[k]
+        loop = isempty(range) ? nothing : pl.passes[first(range)].pass.loop
+        if loop === parent
+            push!(order, k)
+            k += 1
+            continue
+        end
+        child = childloop(loop, parent)
+        j = k
+        while j < last(span)
+            next = ranges[j + 1]
+            isempty(next) && break
+            withinloop(pl.passes[first(next)].pass.loop, child) || break
+            j += 1
+        end
+        for _ in 1:child.count
+            looporder!(order, ranges, pl, k:j, child)
+        end
+        k = j + 1
+    end
+    return order
 end
 
 """

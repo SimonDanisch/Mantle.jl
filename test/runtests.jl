@@ -251,6 +251,7 @@ if _VULKAN_OK
                 VulkanCompiledGraphicsPipeline, DebugConfig, copy_framebuffer!,
                 fastdiv
 end
+include(joinpath(@__DIR__, "test_inorder_host.jl"))
 
 # The barrier lowering per API marker: host tables, no device and no driver, so they
 # run on every machine. Every build compiles the Vulkan tree, the Mac's through the
@@ -812,6 +813,8 @@ foreachbackend(joinpath(@__DIR__, "test_int32_cartesian_miscompile.jl"))
 foreachbackend(joinpath(@__DIR__, "test_logical_pointer_bitcast.jl"))
 foreachbackend(joinpath(@__DIR__, "test_loop_unswitch_miscompile.jl"))
 foreachbackend(joinpath(@__DIR__, "test_psb_chain_fold.jl"))
+foreachbackend(joinpath(@__DIR__, "test_branch_between_views.jl"))
+foreachbackend(joinpath(@__DIR__, "test_smatrix_in_kernel.jl"))
 foreachbackend(joinpath(@__DIR__, "test_spirv_pattern_correctness.jl"))
 foreachbackend(joinpath(@__DIR__, "test_struct_broadcast.jl"))
 foreachbackend(joinpath(@__DIR__, "test_vector_pointer_access.jl"))
@@ -895,6 +898,7 @@ foreachbackend(joinpath(@__DIR__, "test_recorded_run_semantics.jl"))
 foreachbackend(joinpath(@__DIR__, "test_pending_stores.jl"))
 foreachbackend(joinpath(@__DIR__, "test_repeat.jl"))
 foreachbackend(joinpath(@__DIR__, "test_gated_loop_batches.jl"))
+foreachbackend(joinpath(@__DIR__, "test_nested_repeat.jl"))
 foreachbackend(joinpath(@__DIR__, "test_repeat_inner_3d.jl"))
 foreachbackend(joinpath(@__DIR__, "test_traced_usages.jl"))
 foreachbackend(joinpath(@__DIR__, "test_waitidle_submits.jl"))

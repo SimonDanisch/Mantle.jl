@@ -286,3 +286,37 @@ end
     @test Array(M.storage(outp)) == [0.3125f0 * i for i in 1:n]
     M.free!(plp)
 end
+
+
+function named_operands!(out, context, n)
+    i = Int32(KI.get_global_id().x)
+    i <= n || return nothing
+    @inbounds out[i] = context.inputs.left[i] + context.inputs.right[1][i] + context.bias[1]
+    return nothing
+end
+@testset "Named operand containers resolve resources and preserve replay patches" begin
+    dev = M.Device(BE)
+    n = 17
+    left = M.Buffer(dev,collect(Float32,1:n))
+    right = M.Buffer(dev,fill(2f0,n))
+    bias = M.GPURef(dev,3f0)
+    out = M.Buffer(dev,Float32,n)
+    context = (;inputs=(;left=M.viewof(left,n),right=(right,)),bias)
+    g = M.Graph(dev)
+    M.dispatch!(g,named_operands!,(out,context,Int32(n)),n)
+    pl = M.record!(M.Plan(g))
+    try
+        M.run!(pl); M.waitfor!(pl)
+        @test Array(out) == Float32.(1:n) .+ 5f0
+        # Moving both an ordinary tuple leaf and a view's parent must patch the
+        # named aggregate; the second run keeps its original declared extent.
+        resize!(left,4n); resize!(right,4n)
+        M.update!(left,Float32.(2:2:2n)); M.update!(right,fill(7f0,n)); bias[] = -1f0
+        M.run!(pl); M.waitfor!(pl)
+        @test Array(out) == Float32.(2:2:2n) .+ 6f0
+        @test M.storage(context).inputs.left isa AbstractArray
+        @test keys(M.storage(context)) == keys(context)
+    finally
+        M.free!(pl)
+    end
+end

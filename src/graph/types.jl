@@ -110,9 +110,28 @@ device discarding the rest behind its gate. `index` is a one-element `Int32` dev
 buffer holding the current iteration, from 1, set before the loop and advanced in
 the body.
 """
-struct Loop
+mutable struct Loop
     count::Int
     index::Any
+    parent::Union{Nothing,Loop}
+end
+Loop(count::Int, index) = Loop(count, index, nothing)
+
+"""Whether `loop` belongs to `outer`, including `outer` itself."""
+function withinloop(loop::Union{Nothing,Loop}, outer::Loop)
+    while loop !== nothing
+        loop === outer && return true
+        loop = loop.parent
+    end
+    return false
+end
+
+"""The immediate child of `parent` on `loop`'s ancestry."""
+function childloop(loop::Loop, parent::Union{Nothing,Loop})
+    while loop.parent !== parent
+        loop = loop.parent
+    end
+    return loop
 end
 
 mutable struct Pass
@@ -129,13 +148,10 @@ mutable struct Pass
     draws::Vector{DrawCall}
     usages::Vector{Pair{Int,Type}}
     dispatches::Vector{Any}
-    # `nothing`, or the `(buffer, index)` whose 32-bit value decides whether this
-    # pass's work runs (see [`repeat!`](@ref)). Its barriers run either way, so a
-    # skipped iteration keeps the ordering intact. A pass property because the
-    # graph is a flat list the scheduler reorders.
+    # The device predicate read by this pass. Barriers run even when its work
+    # is discarded. Nested gates combine their enclosing predicates on device.
     predicate::Any
-    # `nothing`, or the [`Loop`](@ref) whose body this pass is in. The scheduler
-    # keeps a loop's passes together.
+    # The innermost loop containing this pass; ancestry lives in Loop.parent.
     loop::Any
 end
 
@@ -457,7 +473,8 @@ mutable struct Plan{D,H<:Tuple}
     # partition is noticed.
     partition::Vector{UnitRange{Int}}
     # The loops, as the contiguous range of `passes` each body was scheduled into
-    # and the loop it runs. Ascending and disjoint; empty for a plan without one.
+    # and the loop it runs. Ordered by start, parents before children; empty
+    # for a plan without loops. Child spans lie inside their parent span.
     loops::Vector{Tuple{UnitRange{Int},Loop}}
     # Whether the current recording (or walk) writes the profiler's timestamps,
     # so a run only asks for them when there are some to read.

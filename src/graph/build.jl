@@ -201,10 +201,11 @@ Gated-off iterations are discarded at execution but still cost their barriers,
 gate dispatch and predicate test, so `maxiters` should be a tight bound. Each
 iteration starts behind a full barrier. A transient the body reads before
 writing, or shares with surrounding passes, lives across the whole loop; others
-are scoped to one iteration. The body may not touch an image or
-nest another loop; `maxiters = 1` is a plain gated region without these limits.
-Iteration boundaries are submission cut points (see `partitionranges`). The
-kernel form uses one `dispatch!` as the body.
+are scoped to one iteration. The body may not touch an image. Loops may nest:
+each child index resets for every parent iteration, and child gates include all
+enclosing device predicates. `maxiters = 1` is a plain gated region without
+these limits. Iteration boundaries are submission cut points (see
+`partitionranges`). The kernel form uses one `dispatch!` as the body.
 """
 function repeat!(g::Graph, kernel, args::Tuple, ndrange;
                  max::Integer, count = nothing, while_nonzero = nothing,
@@ -232,18 +233,15 @@ function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
     # flag the rest of the body is gated on.
     pred = gated ? Buffer(g.dev, [Predicate(0)]) : nothing
     if count !== nothing
-        gate!(g, gate_count!, (pred, count, index), "repeat!/gate")
+        gate!(g, gate_count!, (pred, count, index, ()), "repeat!/gate")
     elseif while_nonzero !== nothing
-        gate!(g, gate_nonzero!, (pred, while_nonzero), "repeat!/gate")
+        gate!(g, gate_nonzero!, (pred, while_nonzero, ()), "repeat!/gate")
     end
     firstbody = length(passes(g)) + 1
     f(index)
     for k in firstbody:length(passes(g))
         pp = passes(g)[k]
         if looped
-            pp.loop === nothing || throw(ArgumentError(
-                "repeat!: pass \"$(pp.name)\" is already in a loop. Nested `repeat!` " *
-                "is not supported: a pass belongs to one loop."))
             for (id, _) in pp.usages
                 resourcekind(g.ids.by_id[id]) isa ImageKind && throw(ArgumentError(
                     "repeat!: pass \"$(pp.name)\" touches an image. A loop body runs " *
@@ -253,8 +251,13 @@ function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
             end
         end
         gated || continue
-        pp.predicate === nothing || throw(ArgumentError(
-            "repeat!: pass \"$(pp.name)\" already has a predicate."))
+        # An inner gate must run even when its enclosing body is discarded:
+        # it writes the conjunction, clearing a flag left set by a previous run.
+        inheritgate!(g, pp, pred) && continue
+        if pp.predicate !== nothing
+            # Its own gate now includes this parent's predicate.
+            continue
+        end
         pp.predicate = (pred, 0)
         # Device-sized dispatches are discarded on every backend because the
         # prepare writes zero groups (`emitprepares!`); fixed-size work needs
@@ -276,12 +279,30 @@ function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
     body = passes(g)[firstloop:end]
     loop = Loop(Int(maxiters), index)
     for pp in body
-        pp.loop = loop
+        if pp.loop === nothing
+            pp.loop = loop
+        elseif !withinloop(pp.loop, loop)
+            childloop(pp.loop, nothing).parent = loop
+        end
     end
     return body
 end
 
-"""Reset the loop index to 1; runs once before the loop."""
+# Keep a pass's one hardware predicate. Nested gates combine their parents on
+# the device rather than nesting backend-specific conditional-rendering scopes.
+function inheritgate!(g::Graph, p::Pass, parent)
+    length(p.dispatches) == 1 || return false
+    d = only(p.dispatches)
+    d isa Dispatch || return false
+    (d.kernel === gate_count! || d.kernel === gate_nonzero!) || return false
+    args = (Base.front(d.args)..., (last(d.args)..., parent))
+    p.dispatches[1] = Dispatch(d.kernel, args, d.ndrange, d.group)
+    empty!(p.usages)
+    declare!(handle(g, p), args, argument_usage(g.dev, d.kernel, args, d.ndrange, d.group))
+    return true
+end
+
+"""Before a loop: the index every run starts from."""
 function loop_start!(index)
     @inbounds index[1] = Int32(1)
     return nothing
@@ -305,16 +326,20 @@ struct Predicate
     go::UInt32
 end
 
-"""Gate for `repeat!(…, count)`: run while `index[] <= count[]`."""
-function gate_count!(pred, count, index)
-    @inbounds pred[1] = Predicate(index[1] <= Int32(count[1]) ? UInt32(1) : UInt32(0))
+"""The gate for `repeat!(…, count)`: this iteration runs while `index[] <= count[]`."""
+@inline parentsrun(parents::Tuple) = all(p -> (@inbounds p[1].go != 0), parents)
+
+function gate_count!(pred, count, index, parents=())
+    @inbounds pred[1] = Predicate(parentsrun(parents) && index[1] <= Int32(count[1]) ? UInt32(1) : UInt32(0))
     return nothing
 end
 
-"""Gate for `repeat!(…; while_nonzero)`: run while `flag[]` is nonzero, re-read
-every iteration."""
-function gate_nonzero!(pred, flag)
-    @inbounds pred[1] = Predicate(flag[1] != 0 ? UInt32(1) : UInt32(0))
+"""The gate for `repeat!(…; while_nonzero)`: this iteration runs while it is set.
+
+Re-read every iteration, so a body that empties the thing it is draining stops
+the loop, and one that refills it carries on."""
+function gate_nonzero!(pred, flag, parents=())
+    @inbounds pred[1] = Predicate(parentsrun(parents) && flag[1] != 0 ? UInt32(1) : UInt32(0))
     return nothing
 end
 
@@ -329,6 +354,9 @@ gate!(g::Graph, f, args::Tuple, name) =
 argument_usage(::Type{typeof(gate_count!)}, ::Type{<:Tuple{Any,Any,Any}}) =
     (WRITE, READ, READ)
 argument_usage(::Type{typeof(gate_nonzero!)}, ::Type{<:Tuple{Any,Any}}) = (WRITE, READ)
+argument_usage(::Type{typeof(gate_count!)}, ::Type{<:Tuple{Any,Any,Any,Any}}) =
+    (WRITE, READ, READ, READ)
+argument_usage(::Type{typeof(gate_nonzero!)}, ::Type{<:Tuple{Any,Any,Any}}) = (WRITE, READ, READ)
 argument_usage(::Type{typeof(loop_start!)}, ::Type{<:Tuple{Any}}) = (WRITE,)
 argument_usage(::Type{typeof(loop_advance!)}, ::Type{<:Tuple{Any}}) = (READ | WRITE,)
 
@@ -419,6 +447,7 @@ Base.size(v::ResourceView, d::Integer) = d <= ndims(v) ? v.dims[d] : 1
 Base.ndims(::ResourceView{<:Any,N}) where {N} = N
 Base.eltype(::ResourceView{T}) where {T} = T
 Base.length(v::ResourceView) = prod(v.dims)
+Base.isempty(v::ResourceView) = iszero(length(v))
 Base.parent(v::ResourceView) = v.parent
 describe(v::ResourceView{T}) where {T} = "view($T, $(v.dims)) of $(describe(v.parent))"
 
