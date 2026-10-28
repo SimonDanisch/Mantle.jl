@@ -32,10 +32,10 @@ only to rebuild or tear down (a resize, a close, a reset, a stalled flush's prob
   calling thread and carried in `obj`, and errors come back as its value for the caller
   to raise with context.
 
-The waiter is GPUToolbox's `cooperative_wait`, the one CUDA and OpenCL use. A wait
-allocates nothing as long as `obj` is a bits type or a mutable object and `block` returns
-a bits type; anything else is boxed to be handed to the worker. `isdone` stays with the
-waiting task, so it may close over what `obj` must not hold.
+The waiter is GPUToolbox's `cooperative_wait`, the one CUDA and OpenCL use. Its polling
+fast path allocates nothing. An allocation-free worker path additionally requires pooled,
+typed wait requests in GPUToolbox; bits inputs and results alone do not guarantee it.
+`isdone` stays with the waiting task, so it may close over what `obj` must not hold.
 """
 @inline hostwait(block::B, isdone::D, obj) where {B,D} =
     GPUToolbox.cooperative_wait(block, obj; isdone)

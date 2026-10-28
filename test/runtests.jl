@@ -638,7 +638,8 @@ include(joinpath(@__DIR__, "test_no_ambient_allocation.jl"))
 
 include(joinpath(@__DIR__, "test_submit_channel.jl"))
 include(joinpath(@__DIR__, "test_catch_returns_no_sentinel.jl"))
-_VULKAN_OK && include(joinpath(@__DIR__, "test_inline_argument_extent.jl"))
+_VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_inline_argument_extent.jl"))
+_VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_buffer_barrier_policy.jl"))
 include(joinpath(@__DIR__, "foreachbackend.jl"))
 
 # NOT gated on `_VULKAN_OK` any more. Everything below runs once per backend

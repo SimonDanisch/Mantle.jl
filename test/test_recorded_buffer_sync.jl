@@ -48,10 +48,7 @@ end
 function test_recorded_buffer_sync(dev)
     M=Mantle
     @testset "Automatic recorded buffer synchronization" begin
-        @test M.global_buffer_barriers(M.VulkanAPI())
-        @test M.global_buffer_barriers(M.MetalAPI())
-        @test !M.global_buffer_barriers(M.WebGPUAPI())
-        @test !M.global_buffer_barriers(M.ROCmAPI())
+        @test M.buffer_head_ordered(dev) == M.global_buffer_barriers(M.syncbackend(dev))
         @test !M.buffer_head_ordered(nothing)
         @test M.buffer_head_ordered(dev)
         let n=1024,x=M.KA.allocate(M.backend(dev),Float32,1024),out=M.Buffer(dev,Float32,1024),p=nothing

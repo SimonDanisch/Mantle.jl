@@ -199,7 +199,7 @@ function orthogonal(N)
 end
 
 @testset "SMatrix math in a kernel — $(nameof(typeof(TESTBACKEND)))" begin
-    for T in testeltypes(Float32, Float64), N in (3, 4, 5, 6, 8, 9, 12)
+    @testset "$T N=$N" for T in testeltypes(Float32, Float64), N in (3, 4, 5, 6, 8, 9, 12)
         L = N * N
         Q = orthogonal(N)
         λ = [k % 3 == 0 ? 20 // 1 : k // 1 for k in 1:N]
