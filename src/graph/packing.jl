@@ -60,6 +60,18 @@ function passedslots(types)
     return slots
 end
 
+function packed_stores!(stores, T, value, offset)
+    sizeof(T) == 0 && return stores
+    if isprimitivetype(T) || !Base.datatype_haspadding(T)
+        push!(stores, :(unsafe_store!(Ptr{$T}(p + $offset), $value)))
+    else
+        for i in 1:fieldcount(T)
+            packed_stores!(stores, fieldtype(T, i), :(getfield($value, $i)), offset + Int(fieldoffset(T, i)))
+        end
+    end
+    return stores
+end
+
 """
     storebits!(p, x) -> nothing
 
@@ -69,11 +81,9 @@ practice whatever the stack held: packing the same values twice wrote different
 bytes, and a re-recorded plan's arguments changed though nothing in them had.
 """
 @generated function storebits!(p::Ptr{UInt8}, x::T) where {T}
-    sizeof(T) == 0 && return :(nothing)
-    (isprimitivetype(T) || !Base.datatype_haspadding(T)) &&
-        return :(unsafe_store!(Ptr{$T}(p), x); nothing)
-    stores = [:(storebits!(p + $(Int(fieldoffset(T, i))), getfield(x, $i)))
-              for i in 1:fieldcount(T)]
+    # Flatten at generation time. Recursive storebits! calls can hit inference's
+    # recursion limit on nested descriptors and box their pointer fields.
+    stores = packed_stores!(Expr[], T, :x, 0)
     return quote
         $(stores...)
         nothing
