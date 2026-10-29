@@ -382,4 +382,6 @@ function __init__()
     return nothing
 end
 
+include("precompile_statements.jl")
+
 end

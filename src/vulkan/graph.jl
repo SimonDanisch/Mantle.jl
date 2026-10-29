@@ -18,6 +18,9 @@ function makedevice(::VulkanAPI, select, debug::DebugConfig)
     return dev
 end
 
+_precompile_constructor_signatures(::Type{LavaDevice}) =
+    (Tuple{typeof(Core.kwcall), NamedTuple{(:select, :debug), Tuple{Nothing, DebugConfig}}, Type{LavaDevice}},)
+
 build_accel!(f, d::LavaDevice) = build_accel!(f, d.default_bq)
 
 
