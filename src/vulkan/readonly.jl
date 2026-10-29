@@ -26,6 +26,36 @@ function readonlyargs(g, touches::AbstractVector{Touch}, raw::Tuple, adapted::Tu
     return constargs(g, touches, raw, raw, adapted, 1)
 end
 
+# A graph computes these aliases once, while compiling its plan. The tuple
+# recursion below is for eager launches; specializing it on every dispatch's
+# argument tuple cost eight seconds of first-render compilation. Collect written
+# storage owners by identity, then adapt through one kernel-independent walk.
+@noinline Base.@nospecializeinfer function readonlyargs(g::Graph, touches::AbstractVector{Touch},
+        @nospecialize(raw::Tuple), @nospecialize(adapted::Tuple))
+    any(isreadonly, touches) || return adapted
+    written_buffers = Base.IdSet{Any}()
+    for i in eachindex(touches)
+        touches[i].write || continue
+        for resource in resourceleaves!(Any[], g, raw[i])
+            push!(written_buffers, bufferof(resource))
+        end
+    end
+    result = Vector{Any}(undef, length(adapted))
+    for i in eachindex(adapted)
+        wrap = isreadonly(touches[i])
+        if wrap
+            for resource in resourceleaves!(Any[], g, raw[i])
+                if bufferof(resource) in written_buffers
+                    wrap = false
+                    break
+                end
+            end
+        end
+        result[i] = wrap ? Adapt.adapt(KA.ConstAdaptor(), adapted[i]) : adapted[i]
+    end
+    return Tuple(result)
+end
+
 isreadonly(t::Touch) = t.read & !t.write
 
 # Walked as a tuple, so every argument keeps its type: an eager launch takes this path
