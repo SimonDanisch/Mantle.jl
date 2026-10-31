@@ -77,6 +77,7 @@ struct DrawCall
     # many differently clipped rectangles into one pass; declared rather than set
     # between draws, so the scheduler may reorder passes.
     viewport::Any
+    scissor::Union{Nothing,NTuple{4,Int}}
     # `nothing` if the draw samples nothing. Per draw because one backend compiles
     # a sampling pipeline around its bindings, and compiles are per draw.
     bindings::Any
@@ -305,6 +306,7 @@ struct CompiledDraw{P,S,A,C,V,B,I}
     count::C
     # Parameters for the same reason: each is `Nothing` or one concrete type per draw.
     viewport::V           # `NTuple{4,Float32}`, already resolved against the pass
+    scissor::Union{Nothing,NTuple{4,Int}}
     bindings::B
     indices::I            # `nothing`, or the device index buffer; `count` is then indices
     instances::Int

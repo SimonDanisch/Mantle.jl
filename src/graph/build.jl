@@ -166,6 +166,13 @@ resourceleaves!(acc, g, ::Attr, seen::Base.IdSet{Any}, depth::Int) = acc
 # the GPU is done with it: buffers no dispatch reads, some of them already freed.
 resourceleaves!(acc, g, ::Device, seen::Base.IdSet{Any}, depth::Int) = acc
 
+# Constructor functions such as Float32 travel in broadcast arguments. Their
+# Julia type/module metadata is not device storage; following it walks the
+# method tables instead of the broadcast's actual array operands. Closures
+# remain traversed normally, since their captured fields can contain buffers.
+resourceleaves!(acc, g, ::Type, seen::Base.IdSet{Any}, depth::Int) = acc
+resourceleaves!(acc, g, ::Module, seen::Base.IdSet{Any}, depth::Int) = acc
+
 # Device objects reach their pool and device, so the walk needs both a cycle
 # guard (`seen`) and a depth limit.
 const LEAFDEPTH = 16
@@ -473,12 +480,19 @@ target_format(s::WindowSurface) = target_format(s.win)
 Base.eltype(s::WindowSurface) = eltype(s.win)
 
 DrawCall(shader, args, count) =
-    DrawCall(shader, args, count, (), nothing, nothing, nothing, 1)
+    DrawCall(shader, args, count, (), nothing, nothing, nothing, nothing, 1)
 
 # Always `NTuple{4,Float32}`, so `CompiledDraw`'s `V` parameter does not depend on
 # the caller's number type. The height keeps its sign: negative puts +y at the top.
 asviewport(::Nothing) = nothing
 asviewport(v) = NTuple{4,Float32}(v)
+
+asscissor(::Nothing) = nothing
+function asscissor(rect)
+    r = NTuple{4,Int}(rect)
+    all(>=(0), r) || throw(ArgumentError("scissor coordinates and extents must be nonnegative"))
+    return r
+end
 
 Pass(name, kind) = Pass(String(name), kind, Any[], LoadOp[], nothing, nothing, nothing, nothing,
                         DrawCall[], Pair{Int,Type}[], Any[], nothing, nothing)
@@ -787,20 +801,24 @@ function indirectcount!(p::PassHandle, n)
 end
 
 """
-    draw!(pass, shader, binding; frag_args, viewport, bindings)
+    draw!(pass, shader, binding; frag_args, viewport, scissor, bindings)
 
 Declare a draw whose count, indices, instances and arguments come from a
 [`DrawBinding`](@ref) the host may rewrite between runs. The plan compiles
 against its contents at declaration (types fix the pipeline, the texture table
 fixes the descriptor layout); each run reads what the cell holds then.
+
+`scissor = (x, y, width, height)` clips pixels independently of the viewport
+transform, in integer target coordinates from the top-left. Empty rectangles
+draw nothing. Omitting it uses the viewport's clipping rectangle.
 """
-draw!(p::PassHandle, shader, b::DrawBinding; frag_args = (), viewport = nothing,
+draw!(p::PassHandle, shader, b::DrawBinding; frag_args = (), viewport = nothing, scissor = nothing,
       bindings = b.bindings) =
-    draw!(p, shader, b, b.count; frag_args, viewport, bindings,
+    draw!(p, shader, b, b.count; frag_args, viewport, scissor, bindings,
           indices = b.indices, instances = b.instances)
 
 function draw!(p::PassHandle, shader, args, n; frag_args = (),
-               viewport = nothing, bindings = nothing, indices = nothing,
+               viewport = nothing, scissor = nothing, bindings = nothing, indices = nothing,
                instances::Integer = 1)
     # A rebindable cell's contents are what the shader receives and what the
     # draw touches; rebinding keeps the same types and resources.
@@ -820,7 +838,7 @@ function draw!(p::PassHandle, shader, args, n; frag_args = (),
     isempty(va) || declare!(p, va, vertextouches(dev, shader, va))
     isempty(frag_args) || declare!(p, frag_args, fragmenttouches(dev, shader, frag_args))
     push!(p.pass.draws, DrawCall(shader, args, drawover(p, n), frag_args,
-                                 asviewport(viewport), bindings, indices, Int(instances)))
+                                 asviewport(viewport), asscissor(scissor), bindings, indices, Int(instances)))
 end
 
 storage(v::BufferRange) = storage(v.parent)

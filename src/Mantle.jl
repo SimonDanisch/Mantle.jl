@@ -208,8 +208,8 @@ export ShaderStage, VertexShader, FragmentShader, GeometryShader, MeshShader,
 export stagefunction, stageoutputs, stageinputs, stageconfig, flatoutputs,
     smoothoutputs, outputtype, ntextures
 export lastgeometrystage, fragmentinputs, fragmentinputtype
-export pass!, viewport!, bindings!, PassRecorder
-export setviewport!, colorimage, depthimage, currentimage, depthformat, todevice
+export pass!, viewport!, scissor!, bindings!, PassRecorder
+export setviewport!, setscissor!, colorimage, depthimage, currentimage, depthformat, todevice
 export lower_geometry_to_mesh, GeometryAsMesh, GeometryPipeline
 export GraphicsPipeline, Rasterizer
 export DrawIndirectCommand

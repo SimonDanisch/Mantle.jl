@@ -502,6 +502,10 @@ function drawviewport(p::Pass, d)
         "pass \"$(p.name)\": some draws set a viewport and this one does not, " *
         "so its rectangle would be whichever draw happened to run before it. " *
         "Give the pass a default with render!(...; viewport = (x, y, w, h))."))
+    if any(o -> o.scissor !== nothing, p.draws)
+        w, h = target_extent(first_target(p))
+        return (0f0, 0f0, Float32(w), Float32(h))
+    end
     return nothing
 end
 
@@ -538,7 +542,7 @@ function compiledraw(c::Compile, p::Pass, d, argoff::Int)
     # One list, not both: stages may share the same list.
     stageargs = packedargs(d.args, vargs, fargs)
     return CompiledDraw(compiled, d.shader, stageargs, bakedcount(c, d.count),
-                        drawviewport(p, d), d.bindings, indices, d.instances, argoff,
+                        drawviewport(p, d), d.scissor, d.bindings, indices, d.instances, argoff,
                         packedsize(compiled))
 end
 
@@ -1308,7 +1312,10 @@ textures, counts, instances and indices may all change per run without rebuildin
 the plan.
 """
 function emitdraw!(e, handle, d::CompiledDraw)
+    # Empty clips draw nothing, including on APIs which reject a zero scissor.
+    d.scissor !== nothing && (d.scissor[3] == 0 || d.scissor[4] == 0) && return nothing
     d.viewport === nothing || setviewport!(handle, d.viewport...)
+    d.scissor === nothing || setscissor!(handle, d.scissor...)
     bind = boundbindings(d.args, d.bindings)
     bind === nothing || use_bindings!(handle, d.compiled, bind)
     drawcompiled!(e, handle, d)

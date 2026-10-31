@@ -144,6 +144,30 @@ M.target_extent(s::ResizableSource) = s.extent
         @test M.target_view(color) === nothing
     end
 
+    @testset "independent scissors clip without changing the viewport" begin
+        for recorded in (false, true), restore in (false, true), empty in (false, true)
+            g = M.Graph(RG_DEV)
+            color = M.Transient.Image(g, RGBA{N0f8}, (64, 64))
+            args = recorded ? (RG_TRI,) : M.DrawBinding(RG_DEV, (RG_TRI,), 3)
+            M.render!(g, "clipped triangle", color => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+                M.draw!(p, RG_PIPE, args, 3; scissor = (0, 0, empty ? 0 : 32, 64))
+                restore && M.draw!(p, RG_PIPE, args, 3)
+            end
+            out = readout!(g, color)
+            plan = M.Plan(g)
+            recorded && M.record!(plan)
+            try
+                M.run!(plan)
+                img = pixels(out)
+                @test greens(img) == (restore ? RG_COVERED : empty ? 0 : RG_COVERED ÷ 2)
+                restore || @test all(p -> ColorTypes.green(p) == 0, img[33:64, :])
+            finally
+                M.free!(plan)
+                M.free!(out)
+            end
+        end
+    end
+
     @testset "the graph places a target and draws Julia shaders into it" begin
         g = M.Graph(RG_DEV)
         color = M.Transient.Image(g, RGBA{N0f8}, (64, 64))

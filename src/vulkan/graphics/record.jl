@@ -110,6 +110,9 @@ end
 setviewport!(h::VulkanPassHandle, x::Real, y::Real, w::Real, hgt::Real) =
     setviewport!(h.e, x, y, w, hgt)
 
+setscissor!(h::VulkanPassHandle, x::Integer, y::Integer, w::Integer, height::Integer) =
+    setscissor!(h.e, x, y, w, height)
+
 # The set binds against the pipeline's layout, not the `VulkanDraw`.
 use_bindings!(e::Emitter, d::VulkanDraw, bindings) = use_bindings!(e, d.pipeline, bindings)
 use_bindings!(h::VulkanPassHandle, d::VulkanDraw, bindings) = use_bindings!(h.e, d, bindings)

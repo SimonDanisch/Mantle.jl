@@ -846,7 +846,12 @@ function Mantle.setviewport!(h::MetalPassHandle, x::Real, y::Real, w::Real, hgt:
     MTL.set_viewport!(h.encoder,
         MTL.MTLViewport(Float64(x), Float64(y), Float64(w), Float64(hgt), 0.0, 1.0))
     sx, sy, sw, sh = Mantle.scissorrect(x, y, w, hgt)
-    MTL.set_scissor!(h.encoder, MTL.MTLScissorRect(UInt(sx), UInt(sy), UInt(max(1, sw)), UInt(max(1, sh))))
+    Mantle.setscissor!(h, sx, sy, max(1, sw), max(1, sh))
+    return nothing
+end
+
+function Mantle.setscissor!(h::MetalPassHandle, x::Integer, y::Integer, w::Integer, height::Integer)
+    MTL.set_scissor!(h.encoder, MTL.MTLScissorRect(UInt(x), UInt(y), UInt(w), UInt(height)))
     return nothing
 end
 

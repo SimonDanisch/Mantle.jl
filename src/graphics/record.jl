@@ -15,6 +15,17 @@ viewport!(p::PassRecorder, x::Real, y::Real, w::Real, h::Real) =
 """Set viewport and derived scissor on an open backend pass."""
 function setviewport! end
 
+"""scissor!(pass, x, y, width, height)
+
+Set a pixel clipping rectangle without changing the viewport transform.
+Coordinates use the target's top-left origin; extents must be nonnegative.
+"""
+scissor!(p::PassRecorder, x::Integer, y::Integer, w::Integer, h::Integer) =
+    setscissor!(p.handle, x, y, w, h)
+
+"""Set an independent pixel clipping rectangle on an open backend pass."""
+function setscissor! end
+
 """
     scissorrect(x, y, w, h) -> (x, y, w, h)
 

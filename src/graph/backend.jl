@@ -607,7 +607,7 @@ const BACKEND_VOCABULARY = (
     # What `record_draw!` bakes per argument; a device array answers with its
     # address, so a cached plan sees a reallocation.
     :argidentity,
-    :setviewport!, :colorimage, :depthimage, :currentimage, :depthformat, :packedsize,
+    :setviewport!, :setscissor!, :colorimage, :depthimage, :currentimage, :depthformat, :packedsize,
     :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel, :mipmapped,
     :supports, :supports_graphics, :supports_geometry_stage,
     :supports_tessellation, :supports_mesh_pipeline, :supports_batch_queue,

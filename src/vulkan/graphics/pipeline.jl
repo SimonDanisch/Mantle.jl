@@ -448,7 +448,12 @@ the viewport and the scissor it implies ([`scissorrect`](@ref)).
 function setviewport!(e::Emitter, x::Real, y::Real, w::Real, h::Real)
     VK.cmd_set_viewport(e.cmd, [VK.Viewport(Float32(x), Float32(y), Float32(w), Float32(h), 0f0, 1f0)])
     sx, sy, sw, sh = scissorrect(x, y, w, h)
-    VK.cmd_set_scissor(e.cmd, [VK.Rect2D(VK.Offset2D(sx, sy), VK.Extent2D(UInt32(sw), UInt32(sh)))])
+    setscissor!(e, sx, sy, sw, sh)
+    return nothing
+end
+
+function setscissor!(e::Emitter, x::Integer, y::Integer, w::Integer, h::Integer)
+    VK.cmd_set_scissor(e.cmd, [VK.Rect2D(VK.Offset2D(x, y), VK.Extent2D(UInt32(w), UInt32(h)))])
     return nothing
 end
 
