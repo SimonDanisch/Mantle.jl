@@ -5,7 +5,7 @@ The user accepted approximately 4% runtime overhead; eliminating it is no longer
 a prerequisite for integration. The current source selects shared Cycles storage
 by default and removes the old three-model storage implementation. Glass now returns the canonical Principled configuration. Full-suite Vulkan reference validation
 and current-source timing pass. The accepted roughly 4% overhead applies to
-the layered Principled fixture; simpler single-node materials have larger
+the layered Principled fixture; some other models have larger
 measured overhead, recorded below. The broader compiler work below
 is recorded separately from this integration.
 
@@ -142,11 +142,11 @@ Measured integration progress as of 2026-10-31:
 | Part | Evidence | Remaining acceptance work |
 | --- | --- | --- |
 | Canonical Glass | Separate implementations removed; constructor/material/shader and all 93 current nested RayMakie checks pass | Current-source Metal validation |
-| Shared record and program | 28,181 fresh-load checks across 73 configurations; 34 class and 30 direct API checks; all 17 Cycles reference batches pass 321 assertions | Current-source Metal validation |
-| Rendered parity | 19 checks cover hardware/software tracing, computed inputs, bump normals, eight-term graphs and updates; largest measured change 7.45e-9 in three RGB components | Broader distribution classes |
+| Shared record and program | 28,377 final model/class/direct/composition/canonical checks across 73 configurations; all 17 Cycles reference batches pass 321 assertions | Current-source Metal validation |
+| Rendered parity | 19 final checks cover hardware/software tracing, computed inputs, bump normals, eight-term graphs and updates | Current-source Metal validation |
 | Mixed native graphs and energy | 1,968 final-source checks pass, including native CPU/GPU composition on software/hardware tracing, furnace, subsurface selection and retained emission | Native schema specialization remains |
 | Native pipeline reuse | 28 current-source checks: four Principled/Glass/Sheen/Glossy graphs reuse the exact same native BSDF pipeline, with pixel-identical reference images | Other capability classes and Metal |
-| Runtime | Final paired 512², 8-sample software-tracing Principled measurement: 26.290 ms typed versus 27.417 ms shared (+4.29%); Glass +1.10% | Larger simple-model overhead; hardware tracing and Metal measurements |
+| Runtime | Final paired 512², 8-sample software-tracing Principled measurement: 26.367 ms typed versus 27.414 ms shared (+3.97%); Glass +0.95% | Metallic overhead; hardware tracing and Metal measurements |
 | First use after a warm class | Final-source subsequent unseen graphs take 0.274–0.279 s including host setup/rendering; initial loaded-session candidate draw took 33.56 s | Cold/restart startup measured separately |
 | Compiler correctness | 158 focused compiler checks plus six interleaved-access regressions pass | General outlined-evaluation device fault remains unresolved |
 
