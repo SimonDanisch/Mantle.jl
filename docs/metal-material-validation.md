@@ -183,6 +183,15 @@ native driver defect has been established, and these failing variants are not
 integrated. Forty pipeline/warm-cache checks still pass in the operation-level
 experiment; reuse alone does not establish rendering correctness.
 
+GPU replay also reproduces the checked spectral component bit-for-bit for
+typed, counted and single-record tuple carriers (six checks). An AIR roundtrip
+control and retaining every uncontrolled loop both leave the full-render error
+unchanged at 0.34359404. Capturing the evaluated BSDF immediately before and
+after shadow traversal in the same shader shows no change in its first three
+components. These reductions do not support blaming the loop-retention policy
+or a value overwritten across that traversal. The failure still requires the
+larger shading context; no experimental carrier change is enabled in production.
+
 ## Mac working-tree reconciliation
 
 Original edits are preserved in per-repository `recovery/mac-metal-20261101`
@@ -199,3 +208,11 @@ The incomplete prototype is preserved under Metal's `docs/archive/mac-20261101`
 and in the original recovery commit; it is not an active, passing regression test.
 The separate GPUCompiler Vulkan prototype remains unchanged and is not used by
 this Metal validation.
+
+Captured-hit replay also exposed an independent Metal upload bug: a CPU
+`reshape(reinterpret(...))` reached scalar iteration over a GPU destination.
+Mantle now materializes host array wrappers before transfer, preserving native
+Metal-array copy paths. Seventeen checks pass with both compiler versions,
+covering strided views, transpose/permutation, reinterpret/reshape, empty arrays,
+index views and independent device copies. This host-transfer fix does not
+change BSDF storage or shader selection.
