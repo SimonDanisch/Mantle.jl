@@ -2,8 +2,9 @@
 
 Validated on 2026-11-01, Apple M5 (Mac17,3), 32 GiB RAM, Julia 1.12.7.
 The isolated acceptance environment uses GPUCompiler 2.16; the normal Mac
-project uses GPUCompiler 2.17. The normal project also passes a canonical Glass
-render against the typed differential reference and all 18 loop-policy checks.
+project uses GPUCompiler 2.17. The normal project also passes the complete
+2,308-assertion material suite, a canonical Glass render against the typed
+differential reference and all 18 loop-policy checks.
 
 ## Correctness and reuse
 
@@ -62,6 +63,9 @@ The typed implementation exists only as the benchmark reference.
 
 These M5 results do not satisfy the accepted approximately four-percent target.
 Vulkan measurements cannot substitute for this measurement.
+Repeating Principled and Glass in the normal project with GPUCompiler 2.17 gives
+38.819 to 55.893 ms (+43.98%) and 51.764 to 83.252 ms (+60.83%), respectively.
+The pinned compiler version alone therefore does not account for the regression.
 
 Reducing the shading workgroup cap from 64 to 32 retains image equality but
 leaves approximately 44% Principled and 62% Glass overhead in 31 paired trials.
@@ -78,6 +82,16 @@ It preserves pixel equality but increases the ratio to the typed reference to
 restored in a `finally` block. This rules out that particular scalar-selection
 replacement as an improvement; it does not by itself identify spills or native
 register pressure as the cause.
+
+The final AIR for the shared eight-slot Principled class has 4,287 blocks and
+63,842 instructions, so the loop-retention policy also applies to that class.
+An isolated threshold-5,000 variant leaves this shader unmarked while retaining
+the fix for the 5,309-block subsurface shader. Both render correctly, including
+the formerly failing Thin Wall cases. With no other validation running, 51
+paired measurements still give 38.964 to 57.949 ms (+48.72%) for Principled and
+52.389 to 86.793 ms (+65.67%) for Glass. Removing the loop policy from this class
+therefore does not remove the observed regression. The production threshold
+remains 4,096; the experimental source was restored and its session cleared.
 
 ## Mac working-tree reconciliation
 
