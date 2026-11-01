@@ -356,3 +356,22 @@ limits. The user service does not delegate the cgroup memory controller;
 `MemoryMax` alone would not enforce a RAM limit here. The kernel's verified
 `RLIMIT_DATA` is used instead. These limits belong to validation, not production
 renderer behavior.
+
+## Native Metal binary-function probe
+
+Metal's `research/binary_function_reuse.jl` now demonstrates the native separate
+compilation boundary on the M5. It creates two visible MSL helpers with
+`MTLFunctionOptionCompileToBinary` once, passes those same function objects in
+`MTLLinkedFunctions.binaryFunctions` to two different compute pipelines, and
+dispatches both through visible function tables. One pipeline selects a helper
+per lane; the other composes the two helpers in either order. All four checks
+pass with zero numerical error across 256 lanes (run r641, 2026-11-01).
+
+This follows Apple's [separate compilation API](https://developer.apple.com/videos/play/wwdc2020/10013/).
+The probe uses MSL, not Julia-generated helper AIR. It establishes neither
+renderer speed nor persistent Julia helper caching. Connecting Julia helpers
+requires a compatible visible-function ABI and metadata, the device-side table
+call, and correct lifetime and invalidation handling. Those pieces still need
+small correctness and reuse checks before a renderer experiment. Binary calls
+also give up cross-function optimization, so they require a runtime comparison;
+the current Metal material regression remains unresolved.
