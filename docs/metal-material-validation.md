@@ -115,6 +115,30 @@ therefore does not remove the observed regression. The production threshold
 retains the 4,096-block threshold plus the dense-function instruction fallback
 described above; the experimental source was restored.
 
+## Hardware ray tracing follow-up
+
+A separate M5 measurement on 2026-11-01 enables `hw_accel=true` in the
+same full-frame differential benchmark: 512² pixels, eight samples, five warmups
+and 51 alternating pairs. The fixture's accelerator is checked to be an
+`HWTLAS` (Metal's `BatchedTLAS` with `MetalBLAS`). All 36 renderer assertions
+pass and all six image comparisons have maximum component error zero.
+The measured Hikari checkout is `8a5cb6b1000e2c6267e7860a05eca17cc2ea250e`;
+this measurement is recorded as run `r619`.
+
+| Material | Typed reference | Shared graph | Overhead |
+| --- | ---: | ---: | ---: |
+| Principled, coat/metal/sheen | 37.708 ms | 56.447 ms | +49.69% |
+| Glass preset, roughness 0.2 | 48.293 ms | 82.253 ms | +70.32% |
+| Diffuse | 24.146 ms | 28.035 ms | +16.11% |
+| Sheen | 24.152 ms | 27.776 ms | +15.00% |
+| Glossy | 26.919 ms | 29.854 ms | +10.90% |
+| Metallic | 28.207 ms | 33.483 ms | +18.70% |
+
+Hardware intersections therefore do not remove the shared-material runtime
+regression. The earlier small Diffuse/Sheen/Glossy prototype's hardware results
+cannot establish performance parity for the current wider production storage.
+These timings establish the cost in this fixture, not its native compiler cause.
+
 ## Reproducible performance reductions
 
 Hikari's `benchmarks/shared_surface/metal_stages.jl` and `metal_prebuilt.jl`
