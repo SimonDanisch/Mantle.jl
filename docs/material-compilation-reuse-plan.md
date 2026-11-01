@@ -375,3 +375,13 @@ call, and correct lifetime and invalidation handling. Those pieces still need
 small correctness and reuse checks before a renderer experiment. Binary calls
 also give up cross-function optimization, so they require a runtime comparison;
 the current Metal material regression remains unresolved.
+
+The companion `research/julia_binary_function_reuse.jl` extends the same probe
+to Julia-generated `Float32(Float32)` helpers. GPUCompiler emits their LLVM,
+the probe attaches scalar `air.visible` input/output metadata, supplies the
+module AIR/Metal version metadata omitted for non-kernel jobs, and packs each
+helper as `PROGRAM_VISIBLE`. Native binary compilation and both existing MSL
+consumers pass eight checks with zero error (run r653). This proves the scalar
+Julia producer boundary. It does not yet cover Julia consumers, aggregate BSDF
+arguments, kernel state, relocations or persistent helper invalidation. The
+earlier "MSL only" limitation applies to the first probe, not this extension.
