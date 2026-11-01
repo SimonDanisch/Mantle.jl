@@ -63,10 +63,50 @@ and disabled have byte-identical AIR and metallib. Keeping 48 natural loop
 latches, limiting native workgroups to 64, removing 3,618 alias annotations,
 stripping debug information, and compiling without indirect-command support
 each still exceed the 45-second limit. The strict input contains no undef or
-poison values. These bounded controls do not identify a faulty native pass or
-establish that compilation could never finish. No production checking policy,
-loop threshold or alias assumption is changed by this investigation. The
-normal-mode validation and forced-check compilation remain distinct results.
+poison values. These bounded controls did not resolve the problem.
+
+The follow-up identifies 476 identical BoundsError-reporting tails in the strict
+shader, compared with three in auto mode. Sharing 475 of those complete blocks
+reduces native compilation to 1.321 seconds. The production matcher also shares
+other identical exception tails: 509 candidates become three blocks, leaving
+1,772 entry blocks, and native compilation takes 1.315 seconds (r742). All
+1,171 conditional branches remain. The matcher compares the state extraction,
+called functions and calling conventions, atomic arguments and exit target;
+it rejects escaping values, successor PHIs, non-void calls, address-taken blocks,
+operand bundles, call-site attributes and metadata other than source locations.
+It does not remove checks or change the existing loop and alias policies.
+
+Once compilation succeeds, forced checking exposes a second issue. A tagged
+error-store diagnostic identifies `gc_pool_alloc` for `surface_setup_slots`'s
+local MVector, rather than an invalid material index (r771). Passing the mutable
+array to the noinline bounds-error wrapper keeps it alive as a device heap
+allocation. Inlining that small wrapper removes the escape; the reporting helper
+it calls remains out of line. The exact failing 16-sample, three-bounce Diffuse
+fixture then renders successfully (r778).
+
+With both fixes, the six current material/reference files pass **857/857** with
+forced checks and GPUCompiler 2.17 (r792), including all 17 Cycles batches. The
+normal-auto repeat also passes 857/857 (r762). The focused tests retain real
+out-of-bounds failures at debug levels 0–2, verify a local eight-record MVector
+with runtime indices, and check device recovery after a caught failure. A
+full-render debug-level-2 diagnostic before the wrapper fix was stopped in
+Apple's compiler; fast compilation with complete device stacks is not established.
+
+The final focused compiler tests pass 91/91 with both GPUCompiler 2.16 and 2.17
+(r794/r795). They include 62 structural checks, 25 real bounds-error/recovery
+checks and four checks for the escaping-record reproducer. GPUCompiler 2.16 also
+passes all 455 shader-material assertions with forced bounds checks (r794);
+2.17 repeats all ten persistent-cache regressions (r795). Renderer acceptance
+uses Hikari `2774e44`; these compiler fixes do not change its material API.
+
+The published compiler `2153de32` and Hikari `7fc8bfd` also pass a new two-child
+cache test on GPUCompiler 2.16 (r810/r812). Population records 41 hits/44 misses;
+the second process records **85 hits/zero misses**, an identical image SHA-256
+(`b53913b476f6a7a90ff3fc9984a9f295d8fc60a99a211e3a25afb682af8263eb`), and an
+18.55-second cached render call. This includes host compilation and does not
+establish fast startup or persistence for live Julia references. The newly
+included ConstTexture initialization commit also passes 121 description/constant
+texture checks on Metal and 52 constant-texture checks on RTX (r807).
 
 ## Native compilation failure and fix
 
@@ -277,6 +317,173 @@ attributes, with the same error and identical changed-component counts. The
 incorrect image; a separate six-assertion render confirms restoration of the
 correct production implementation. These controls do not support blaming those
 alias annotations for the experimental failure. No alias policy is changed.
+
+A fresh normal-auto repeat with the checked-storage compiler fix and
+GPUCompiler 2.17 retains exact images in the 512²/eight-sample hardware fixture
+(12 assertions, r799). Principled measures 37.533 ms typed versus 54.215 ms
+shared (+44.45%); Glass measures 48.974 versus 78.982 ms (+61.28%). This confirms
+that the compile/escape fixes do not remove the runtime regression. Different
+compiler versions and sessions must not be used to attribute the change from
+the earlier +49.69%/+70.32% result to this fix alone.
+
+## Capacity and Metallic follow-up
+
+The new `Hikari/benchmarks/shared_surface/metal_active_capacity.jl` diagnostic
+compares the typed BSDF, the production eight-slot span and the same CPU-prepared
+span trimmed to its active count. Setup is absent from the measured kernel.
+All 16 output checks pass over 65,536 lanes. Each result uses 51 alternating
+wall-time triples and 30 device timestamps per implementation (r774):
+
+| Material / operation | Eight slots | Active slots | Active / eight |
+| --- | ---: | ---: | ---: |
+| Principled evaluation, five active | 670.6 µs | 325.5 µs | 0.485 |
+| Principled evaluation + sampling | 663.8 µs | 346.3 µs | 0.522 |
+| Glass evaluation, one active | 655.2 µs | 132.9 µs | 0.203 |
+| Glass evaluation + sampling | 654.3 µs | 198.7 µs | 0.304 |
+
+This establishes a substantial capacity-dependent device cost. Trimming changes
+the argument type and generated code as well as the byte count (868 to 544 or
+112 logical bytes); it does not establish spilling or memory bandwidth as the
+native mechanism, nor does it measure a full-frame speedup. Value-dependent
+capacity is not integrated: changing a numeric weight must retain the warm
+kernel when another term becomes active.
+
+A same-input control keeps the eight-slot argument unchanged and creates only
+a shorter local span inside the kernel. All 24 output checks pass (r808).
+Principled device times change from 671.2 to 269.7 µs for evaluation and from
+656.6 to 312.2 µs with sampling; Glass changes from 650.2 to 132.0 µs and from
+645.1 to 198.2 µs. This rules out a smaller incoming argument block as the sole
+explanation. The generated local representation/traversal remains the measured
+variable; register spilling is still unproven.
+
+A separate access-pattern control replaces each dynamic whole-tuple lookup
+in evaluation/sampling with a balanced choice between two-record subtuples.
+The data, accumulation order, capacity and material signatures remain unchanged.
+Apple rejects the resulting full Glass shader before dispatch (r837). The saved
+914,176-byte AIR passes LLVM verification (r842); its 914,456-byte library
+reproduces `AGXMetalG17G Code=3:
+Internal compiler error` in the standalone Objective-C compiler probe, without
+Julia, in 3.54 seconds (r840). Disabling indirect-command support or limiting
+the pipeline to 64 threads also fails in about 3.1 seconds (r841). Restoring the
+ordinary traversal passes all six full-image assertions (r838). This identifies
+a native compilation limitation of this additional experiment; it does not
+explain the production runtime cost or establish the cause of the different
+count-one image failure below. The access-pattern change is not integrated.
+
+A full-render fast branch for one active term still fails the Diffuse image
+even when the BSDF carrier type is unchanged (r738; reproduced on the published
+source in r809). The same change passes the full Diffuse/Glass images on RTX
+(r811); no Metal backend or native-driver cause has been established. Renaming the original
+traversal into an identical helper alone preserves the image exactly (r779).
+These controls further localize the failing experimental change; they do not
+establish a native compiler defect or justify adopting the branch.
+
+Restricting that branch to capacities greater than one avoids changing the
+already one-slot Diffuse shader and passes both full images. Glass changes only
+from 79.513 to 77.970 ms shared/control, against 48.864 ms typed (r814, 51
+alternating triples). This small full-render gain does not recover the much
+larger standalone improvement. These controls do not establish local indexing
+as the sole source of the full-render regression; no traversal change is
+integrated.
+
+On RTX 4000 Ada, removing the thin-film evaluation branch only in a no-film
+Metallic diagnostic leaves 25.032 versus 25.062 ms shared/control, compared with
+23.249 ms typed (r752). A narrower one-slot capability mask gives 24.494 ms
+versus 24.779 ms shared and 22.437 ms typed (r783, 51 alternating triples,
+maximum image error 7.83e-8). All three pipelines still use 255 registers.
+Neither control removes the Metallic overhead, and neither is integrated.
+A singleton-decoder control produces distinct code (835,880 bytes
+versus 843,392 shared) but measures 24.380 versus 24.392 ms shared, against
+22.626 ms typed (r815). All still use 255 registers. A separate generated-callee edit MWE invalidates correctly (r793).
+A closed two-case Metallic/Film setup diagnostic also retains the images but
+reduces SPIR-V from 843,392 to 641,640 bytes without reducing frame time:
+24.443 ms shared versus 24.469 ms control, against 22.418 ms typed (r816).
+Removing that cold setup code does not by itself remove the regression.
+
+The driver inventory distinguishes SPIR-V size from machine-code size (r817).
+Typed/shared native binaries are 201,344/487,424 bytes. Both report 255 registers,
+16 bytes local memory and zero stack, while shared memory is 22,784/25,344 bytes.
+The shared module's extra function is the noinline thin-film reflectance helper;
+the driver exposes no textual internal representation. These statistics do not
+establish a spill or occupancy cause.
+
+## Thin-film function boundary
+
+Removing F82 thin-film code from both setup and evaluation in a no-film-only
+RTX control reduces the shared overhead from 7.99% to 3.00% (r818). Removing
+only the spectral evaluation branch had not helped. This control disables a
+feature and is not a production change.
+
+Keeping all film formulas but inlining the helper in Julia reduces a repeat
+from 24.313 to 23.681 ms against 22.413 ms typed: +8.48% becomes +5.66% (r820).
+SPIR-V grows from 843,820 to 950,764 bytes. The corresponding M5 hardware control
+retains exact images but gives no gain: Principled 53.897/54.123 ms and Glass
+78.577/78.662 ms shared/inline (r823). A global source-inline change is therefore
+not integrated.
+
+A later RTX control changes only the thin-film function's SPIR-V function-control
+word, after LLVM and SPIR-V optimization. The before/after executable instructions,
+arguments and CFG are otherwise unchanged; SPIR-V validation and full images pass.
+This preserves the separately emitted helper and its compilation-cache boundary.
+Typed/shared/native-None/native-Inline frame medians are 22.467/24.446/23.576/
+23.494 ms (r825, 51 alternating quadruples). Allowing native inlining reduces the
+shared overhead from 8.81% to 4.57% without removing thin-film support. Both hints
+produce 617,472-byte native binaries versus 487,424 bytes shared; register,
+local-memory and shared-memory counts remain unchanged. This establishes a cost
+of preserving that native call boundary, not a register-count or spill cause.
+A production annotation/policy separating reusable compiler objects from native
+inlining is not added by these diagnostic overrides.
+
+The simpler source change removes only the helper's forced `@noinline`, allowing
+normal compiler decisions without forcing source inlining. With every film formula
+retained, RTX medians are 22.503/24.532/23.553 ms typed/forced-call/ordinary-function:
+the overhead falls from 9.02% to 4.66% (r827, 51 alternating triples). This emits
+951,400 SPIR-V bytes and still uses 255 registers. The M5 counterpart retains
+exact images and measures 54.102/53.847 ms for Principled and 78.906/78.380 ms
+for Glass, forced-call/ordinary-function (r829). It does not resolve the large
+Metal regression. Native-hint controls also retain active Metallic and Glass
+films, with all 16 assertions passing (r830).
+
+Hikari `230eba1` now leaves `_thin_film_reflectance` unannotated. This changes neither
+the formulas nor the material classes and adds no renderer mode. Unlike the
+native-only hint experiment, it can change the emitted helper/object boundary;
+the larger SPIR-V is an explicit tradeoff. A fresh M5 test child passes all
+857 assertions with `--check-bounds=yes` (r832). The same six files pass
+857/857 on RTX with forced checking (r831, 30m23.5s test body); the M5 test body
+takes 10m20.6s. These are complete test durations, not shader compile timings.
+A separate two-session
+GPUCompiler 2.16 check retains the exact image hash and gets 85 hits with zero
+misses after restarting Julia (r834/r835). Its 20.67-second cached render still
+includes host compilation and was run alongside validation; it is not a startup
+speedup measurement. The full Lavapipe workflow at the
+preceding Hikari `7fc8bfd` head passes all jobs, including documentation and
+every pbrt partition ([run 41318194128](https://github.com/JuliaGraphics/Hikari.jl/actions/runs/41318194128)).
+
+Fresh normal-auto source measurements on M5 hardware ray tracing still show
+37.498/54.146 ms typed/shared for layered Principled (+44.40%) and
+48.634/78.765 ms for Glass (+61.95%), with exact images and 12 passing assertions
+(r836, 512², eight samples, five warmups, 51 alternating pairs). The Glass
+fixture's first draw after warming Principled's class takes 0.757 seconds;
+this is within-session class reuse, not cold-start latency.
+
+The first fresh RTX source repeat measures 22.487/24.094 ms typed/shared,
+or +7.15% (r846), so the earlier +4.66% MWE result is not a reliable final
+production number. A controlled repeat in that same fresh environment records
+the loaded source pipeline before temporarily restoring the forced call boundary.
+Over 101 alternating triples, typed/current/forced-call medians are
+22.538/24.110/24.582 ms (r848). The current source improves frame time by 1.92%
+against the forced-call control, reducing overhead from +9.07% to **+6.97%**.
+Both images pass; current/forced-call SPIR-V is 950,972/843,820 bytes with
+one/two functions, and all three report 255 registers. The remaining Metallic
+regression is therefore still open. This repeat confirms a smaller benefit
+than the initial AST-override MWE; it does not establish the cause of that
+code-generation/performance variation.
+
+The six-file validation above tests the published Hikari `230eba1` source
+without renderer overrides. Its new full hosted Lavapipe workflow is running
+([run 41327763962](https://github.com/JuliaGraphics/Hikari.jl/actions/runs/41327763962));
+the green preceding-head workflow is not evidence that this newer head has
+already completed hosted CI.
 
 ## Mac working-tree reconciliation
 
