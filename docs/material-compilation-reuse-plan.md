@@ -10,6 +10,16 @@ the layered Principled fixture; some other models have larger
 measured overhead, recorded below. The broader compiler work below
 is recorded separately from this integration.
 
+Hosted validation is green at Hikari `2774e44` and Makie `51fa4a73c`, including
+the newest `ff/breaking-0.25` commit `dcfa9a96`. The full
+[Hikari workflow](https://github.com/JuliaGraphics/Hikari.jl/actions/runs/41299572092)
+passes 1,272,898 unit assertions (one conditional skip), all 197 pbrt reference
+scenes at 256 samples (591 assertions), the documentation build, gallery and
+two-session cache/image check. The full
+[RayMakie workflow](https://github.com/MakieOrg/Makie.jl/actions/runs/41299459627)
+passes all 5,192 assertions with Lavapipe_jll. These CI results establish
+correctness and cache checks, not Metal runtime parity.
+
 ## Contracts
 
 - Public material construction and nested field updates retain one canonical
@@ -23,13 +33,19 @@ is recorded separately from this integration.
 
 ## Metal shaders with symbolic Julia references
 
-Metal's production object cache excludes modules with any relocation. Real Hikari
-shaders carry Julia symbol references such as `convert`, `sqrt` and `trunc` from
-error paths; these therefore miss after restarting Julia. Warm session reuse works.
+Metal's production object cache still excludes live relocations. The Hikari
+Principled shade kernel initially carries three symbol references, `convert`,
+`sqrt` and `trunc`, reachable only from dead helpers. Metal `49ae96bf` runs the
+existing dead-code cleanup before the cache decision and prunes those records.
+Ten regression checks preserve live-reference exclusion and byte-identical AIR.
+A real 16², one-sample Principled scene on GPUCompiler 2.16 now gets 89 cache hits
+and zero misses after restarting Julia, with an identical image (r670/r671).
+Its cached render call still takes 19.56 seconds, including host compilation;
+this does not establish fast startup or caching of genuinely live references.
 
 Separate the portable shader code from the current session's bindings:
 
-1. Normalize references into deterministic, indexed runtime loads. Complete
+1. For genuinely live references, normalize into deterministic, indexed runtime loads. Complete
    pruning and finalize the slot order before deriving the cache key. Establish
    exactly which part of Metal/GPUCompiler lowering owns this boundary.
 2. Key the cache by canonical shader IR, the ordered portable slot descriptions,

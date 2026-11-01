@@ -21,9 +21,14 @@ The latter commit adds diagnostic benchmarks; it does not change rendering.
   shared pipeline object. Five warm renders per graph incur zero compiler misses.
   Different input programs can still compile their own values kernel.
 
-This establishes within-session native pipeline reuse. It does not establish
-persistent cache reuse for Metal objects containing symbolic Julia relocations;
-that remains a separate item in the compilation reuse plan.
+This establishes within-session native pipeline reuse. A later cache fix,
+Metal `49ae96bf`, removes references reachable only from dead helpers before
+deciding whether the object can be cached. Ten checks cover byte-identical AIR
+and continued exclusion of live references. The real Principled fixture passes
+an additional two-session test on GPUCompiler 2.16: 89 hits, zero misses and an
+identical image, with a 19.56-second cached render call (r670/r671). This does
+not skip host compilation or establish persistence for live references. That
+broader case remains a research probe in the compilation reuse plan.
 
 ## Native compilation failure and fix
 
