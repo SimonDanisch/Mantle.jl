@@ -313,6 +313,18 @@ rendering shows materially larger runtime overhead than Vulkan. See
 [Metal validation](metal-material-validation.md) for measurements, the native
 compiler fix and the remaining performance and persistence limitations.
 
+The subsequent Metal acceptance uses optimizable LLVM minnum/maxnum intrinsics
+and retains uncontrolled loops in functions with at least 4,096 blocks or
+32,768 instructions before AIR downgrade. The dense-shader fallback matters:
+49,766 instructions at that point expand to 67,879 later. Both GPUCompiler 2.16
+and 2.17 pass all 2,308 material assertions plus 31 compiler checks. This resolves
+the observed native compile failures, not the runtime goal. The final M5 paired
+measurements still show +50.15% for layered Principled and +69.80% for its Glass
+preset. Standalone prebuilt-BSDF diagnostics retain evaluation overhead without
+material setup, so optimizing setup alone is insufficient. Weighted evaluation
+still loses requested noinline boundaries when exceptional exits require late
+inlining; the smaller bounded-square-root example now retains its boundary.
+
 Native compile diagnostics used an independent Vulkan executable with time and
 data-segment limits. Disabling native optimization did not finish within 60
 seconds; marking all previously uncontrolled loops `DontUnroll` did not finish

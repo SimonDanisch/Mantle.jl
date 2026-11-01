@@ -2,9 +2,9 @@
 
 Validated on 2026-11-01, Apple M5 (Mac17,3), 32 GiB RAM, Julia 1.12.7.
 The isolated acceptance environment uses GPUCompiler 2.16; the normal Mac
-project uses GPUCompiler 2.17. The normal project also passes the complete
-2,308-assertion material suite, a canonical Glass render against the typed
-differential reference and all 18 loop-policy checks.
+project uses GPUCompiler 2.17. Both pass the complete 2,308-assertion material
+suite and 31 compiler checks with Metal `d9969275` and Hikari `499e350e`.
+The latter commit adds diagnostic benchmarks; it does not change rendering.
 
 ## Correctness and reuse
 
@@ -39,27 +39,48 @@ variant marking only the six largest loops each reach their 90-second deadline.
 Those are bounded observations, not measurements of their eventual compile time.
 
 Metal now applies that metadata policy after AIR lowering to functions with at
-least 4,096 blocks. Small functions are untouched; explicit source unroll hints
-and unrelated metadata survive. The material storage and evaluator are unchanged.
-Eighteen tests cover hook dispatch, unchanged instructions, valid LLVM,
-idempotence and metadata preservation. The formerly failing render and the full
-reference suite pass with existing tolerances.
+least 4,096 blocks or 32,768 instructions, before the AIR LLVM-version downgrade.
+Small functions are untouched; explicit source unroll hints and unrelated
+metadata survive. The material storage and evaluator are unchanged. Twenty-six
+tests cover hook dispatch, both size thresholds and their boundaries, unchanged
+instructions, valid LLVM, idempotence and metadata preservation.
+
+The instruction threshold addresses a second, denser shader with 3,922 blocks.
+Its 49,766 instructions expand to 67,879 during AIR downgrade. A threshold of
+65,536 at the earlier pass therefore missed it. The unmarked shader reaches a
+90-second compile-only deadline; adding loop metadata without changing executable
+instructions compiles in 3.714 seconds. With the corrected threshold, both full
+material suites pass, including the previously failing furnace cases. Large
+artifacts were preflighted through an independent compile-only Metal executable
+with a 90-second alarm before allowing renderer compilation. That deadline
+limits the client, not the separate Apple compiler service's memory usage.
+
+Float16/Float32 min/max now remain LLVM minnum/maxnum intrinsics until final
+lowering. This preserves Metal's existing NaN behavior while allowing LLVM to
+prove bounds such as `max(x, 0)`: a noinline clamped-square-root helper remains
+separate rather than carrying a domain-error exit into its caller. Five focused
+checks cover optimized LLVM, final AIR and GPU output, and 21 existing numeric
+edge-case checks also pass. This does not remove all exceptional exits from
+Hikari's weighted evaluation; other square-root and bounds paths still cause
+late inlining. It is not a complete solution for composable GPU functions.
 
 ## Runtime remains open
 
 Paired wall-clock measurements use the shared-surface differential benchmark:
 512 by 512 pixels, eight samples, software intersections, five warmups, 51 pairs,
 alternating order and medians. Both implementations render pixel-identical images.
-The typed implementation exists only as the benchmark reference.
+The typed implementation exists only as the benchmark reference. These are the
+final measurements with the fixes above in the normal GPUCompiler 2.17 project;
+all six images have maximum component error zero.
 
 | Material | Typed reference | Shared graph | Overhead |
 | --- | ---: | ---: | ---: |
-| Principled, coat/metal/sheen | 39.180 ms | 57.816 ms | +47.57% |
-| Diffuse | 25.840 ms | 31.330 ms | +21.25% |
-| Sheen | 26.035 ms | 30.318 ms | +16.45% |
-| Glossy | 28.572 ms | 33.067 ms | +15.73% |
-| Glass preset | 52.325 ms | 86.950 ms | +66.17% |
-| Metallic | 29.729 ms | 36.851 ms | +23.96% |
+| Principled, coat/metal/sheen | 38.983 ms | 58.535 ms | +50.15% |
+| Diffuse | 25.798 ms | 30.249 ms | +17.25% |
+| Sheen | 25.992 ms | 30.092 ms | +15.77% |
+| Glossy | 28.481 ms | 32.283 ms | +13.35% |
+| Glass preset | 52.208 ms | 88.651 ms | +69.80% |
+| Metallic | 29.564 ms | 36.024 ms | +21.85% |
 
 These M5 results do not satisfy the accepted approximately four-percent target.
 Vulkan measurements cannot substitute for this measurement.
@@ -91,7 +112,49 @@ the formerly failing Thin Wall cases. With no other validation running, 51
 paired measurements still give 38.964 to 57.949 ms (+48.72%) for Principled and
 52.389 to 86.793 ms (+65.67%) for Glass. Removing the loop policy from this class
 therefore does not remove the observed regression. The production threshold
-remains 4,096; the experimental source was restored and its session cleared.
+retains the 4,096-block threshold plus the dense-function instruction fallback
+described above; the experimental source was restored.
+
+## Reproducible performance reductions
+
+Hikari's `benchmarks/shared_surface/metal_stages.jl` and `metal_prebuilt.jl`
+run standalone evaluation/sampling kernels, compare their output and collect
+actual GPU timestamps through `Metal.@profile`. They are explicit diagnostics,
+not additional renderer paths. The stage-zero output observes only some setup
+fields, so dead-code elimination can omit other setup work. Independently
+compiled stage timings cannot be subtracted to obtain a full-render breakdown.
+
+The prebuilt experiment removes GPU material setup and RGB lookup. At 65,536
+lanes and 31 alternating pairs, shared/typed wall-time ratios are 2.189 for
+Principled evaluation and 3.008 for Glass evaluation; adding sampling gives
+1.109 and 1.275 respectively. GPU timestamps also show a residual cost. Setup
+alone therefore cannot account for the regression. The packaged diagnostics
+pass all 20 output comparisons; their later validation ran alongside package
+precompilation and is not an idle-device performance measurement.
+
+Additional experiments retain image equality but provide no demonstrated gain:
+
+- Compiling the native pipeline with `maxthreads=64`, independently of launch
+  size, leaves approximately +48% Principled and +65% Glass overhead. Actual
+  recorded pipelines otherwise have no explicit native thread maximum; setting
+  the launch cap alone is a different experiment.
+- Requesting a noinline weighted evaluator does not retain that boundary in AIR:
+  exceptional exits cause GPUCompiler to inline it again. Its unchanged runtime
+  does not measure the benefit of a surviving function boundary.
+- Propagating inbounds through weighted evaluation leaves +48.03% Principled
+  and +68.49% Glass overhead. Deferring padding initialization gives +50.68%
+  and +77.93%; reserving fixed logical slots while skipping inactive setup gives
+  +49.34% and +71.72%. All use 51 alternating full-frame pairs. These layouts
+  have not been adopted.
+- Passing a runtime-uniform model tag separately in a one-lobe standalone kernel
+  gives 4–7% higher wall times for Diffuse/Sheen/Glossy. Those measurements have
+  no GPU timestamps, so they do not establish the isolated device-time effect.
+
+Temporary method overrides are restored in `finally` blocks. These results
+exclude specific proposed changes; they do not establish a register-spill,
+aliasing or local-memory explanation. The remaining task is to find a measured
+device-code improvement while retaining the one production interpreter and
+shared storage, not to enable the typed differential reference in production.
 
 ## Mac working-tree reconciliation
 
