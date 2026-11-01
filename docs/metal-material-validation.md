@@ -147,14 +147,41 @@ Additional experiments retain image equality but provide no demonstrated gain:
   +49.34% and +71.72%. All use 51 alternating full-frame pairs. These layouts
   have not been adopted.
 - Passing a runtime-uniform model tag separately in a one-lobe standalone kernel
-  gives 4–7% higher wall times for Diffuse/Sheen/Glossy. Those measurements have
-  no GPU timestamps, so they do not establish the isolated device-time effect.
+  initially gives 4–7% higher wall times for Diffuse/Sheen/Glossy. A follow-up with
+  30 GPU timestamps per implementation/model confirms device-time increases of
+  11.11%, 20.20% and 14.00%, respectively. Wall time alone had understated this
+  result, including a Glossy repeat with a small apparent wall-time improvement.
+- Transposing the same stored fields into a structure of arrays changes device
+  time by only 0.4–1.8% in the prebuilt tests. An explicit local mutable array
+  improves evaluation alone by 1.5–4.8%, but evaluation plus sampling becomes
+  5.1–8.5% slower. Both preserve output; neither explains or removes the large
+  rendering overhead.
 
 Temporary method overrides are restored in `finally` blocks. These results
 exclude specific proposed changes; they do not establish a register-spill,
 aliasing or local-memory explanation. The remaining task is to find a measured
 device-code improvement while retaining the one production interpreter and
 shared storage, not to enable the typed differential reference in production.
+
+Hikari's additional `metal_single_lobe.jl` diagnostic decodes a single active
+simple term once before evaluation and sampling. It passes eight output/reuse
+checks; Sheen and Glossy incur zero compiler misses after Diffuse. An isolated
+full-render experiment reduces Diffuse/Sheen/Glossy overhead to 6.04%, 5.75% and
+4.78%, with zero image error (36 assertions). This is a partial result, not a
+production change or validation of a larger-graph implementation.
+
+Two attempts to generalize the fast case expose a Diffuse image failure. Both
+GPUCompiler versions reproduce it; the ordinary shared representation remains
+correct. Complete BSDF-operation tests over 65,536 lanes, including tilted
+normals, pass eight checks. Full-render captures also preserve weights,
+coefficients, wavelengths, normals and outgoing directions, yet the direct
+lighting's evaluated BSDF differs. Replaying 6,138 captured input sets on the
+CPU matches the typed GPU evaluation within 2.98e-8; the experimental shader
+differs by up to 35.82 in that spectral component. Shader dispatch and generated
+code are still being isolated. No specific compiler pass, spill mechanism or
+native driver defect has been established, and these failing variants are not
+integrated. Forty pipeline/warm-cache checks still pass in the operation-level
+experiment; reuse alone does not establish rendering correctness.
 
 ## Mac working-tree reconciliation
 
