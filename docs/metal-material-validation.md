@@ -139,6 +139,15 @@ regression. The earlier small Diffuse/Sheen/Glossy prototype's hardware results
 cannot establish performance parity for the current wider production storage.
 These timings establish the cost in this fixture, not its native compiler cause.
 
+A hardware-RT control repeats Principled and Glass at the normal shader debug
+level 1 and at level 0, using separate compiler configurations and the same
+51-pair protocol. Principled changes from 37.690/56.678 ms typed/shared (+50.38%)
+to 37.517/51.954 ms (+38.48%). Glass changes from 48.463/81.935 ms (+69.07%) to
+46.546/77.222 ms (+65.90%). All 24 image checks pass with zero component error.
+Shader diagnostics thus contribute to this configuration's cost but do not
+explain most of the regression. The diagnostic configurations are restored;
+production retains its normal exception reporting.
+
 ## Reproducible performance reductions
 
 Hikari's `benchmarks/shared_surface/metal_stages.jl` and `metal_prebuilt.jl`
@@ -215,6 +224,16 @@ after shadow traversal in the same shader shows no change in its first three
 components. These reductions do not support blaming the loop-retention policy
 or a value overwritten across that traversal. The failure still requires the
 larger shading context; no experimental carrier change is enabled in production.
+
+A further native compiler control removes alias assumptions from the failing
+single-record experiment before Apple's compilation. Removing 4,278 scoped-alias
+and TBAA annotations leaves the image error exactly 0.34359404. A second control
+also removes 172 parameter/call `noalias`, `nocapture`, `readonly` and `writeonly`
+attributes, with the same error and identical changed-component counts. The
+166- and 167-assertion diagnostic runs validate the IR transformations, not the
+incorrect image; a separate six-assertion render confirms restoration of the
+correct production implementation. These controls do not support blaming those
+alias annotations for the experimental failure. No alias policy is changed.
 
 ## Mac working-tree reconciliation
 
