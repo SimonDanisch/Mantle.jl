@@ -566,7 +566,7 @@ function compiledraw(c::Compile{LavaDevice}, p::Pass, d, argoff::Int)
     # holding one is never recorded.
     packed = packedargs(d.args, d.args, d.frag_args)
     info = shader.push_info
-    nbytes = info.arg_buffer_size + compute_inline_extra_from_byval(info.byval_llvm_sizes)
+    nbytes = info.arg_buffer_size + compute_inline_extra_from_byval(info.byval_llvm_sizes, info.arg_buffer_size)
     indices = d.indices === nothing ? nothing : resolve(c.graph.dev, d.indices)
     return CompiledDraw(compiled, shader, packed, d.count, drawviewport(p, d),
                         d.bindings, indices, d.instances, argoff, nbytes)
@@ -676,7 +676,7 @@ function compile_dispatch(c::Compile{LavaDevice}, t::Trace, argoff::Int, indirec
     raw = rawargs(t.args)
     vk_pipeline, raygen, offsets, byval = rt_compiled_for(dev.default_bq, t.pipeline, raw)
     argbytes = raygen.push_info.arg_buffer_size
-    total = argbytes + compute_inline_extra_from_byval(byval)
+    total = argbytes + compute_inline_extra_from_byval(byval, argbytes)
     compiled = VulkanTracePipeline(vk_pipeline, t.pipeline, offsets, byval, argbytes)
     CompiledTrace(compiled, t.accel, t.args, t.ndrange, argoff, total, indirect)
 end
@@ -801,6 +801,8 @@ function emithead!(e::Emitter, pl::Plan)
     end
     return nothing
 end
+
+buffer_head_ordered(::LavaDevice)=true
 
 """
     emitloophead!(e::Emitter, plan, body)

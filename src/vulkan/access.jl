@@ -27,6 +27,7 @@ function kakernelaccesssignature(dev::LavaDevice, kernel, argT::Tuple, ndrange, 
 end
 
 isdevicearray(::LavaArray) = true
+resource_identity(a::LavaArray)=a.buf.rc
 
 """
 The union of what a trace's shaders do to `args`; every shader takes them

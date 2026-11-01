@@ -138,7 +138,7 @@ end
 "Pack manual draw arguments into the owner's scratch and return its device address."
 function pack_gfx_args_bda(batch::O, args, push_info::PushConstantInfo) where {O<:Closed}
     (push_info.push_size == 0 || isempty(args)) && return UInt64(0)
-    total_size = push_info.arg_buffer_size + compute_inline_extra_from_byval(push_info.byval_llvm_sizes)
+    total_size = push_info.arg_buffer_size + compute_inline_extra_from_byval(push_info.byval_llvm_sizes, push_info.arg_buffer_size)
     arg_buf = get_arg_buffer(batch, total_size)
     pack_gfx_args!(batch, args, arg_buf.mapped_ptr, arg_buf.address, push_info)
     return arg_buf.address

@@ -265,7 +265,7 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
     # A walked plan has no recording to rewrite: it dispatches the `DeviceRange`
     # ceiling, and without a ceiling core's interpreted launch reads the count on
     # the host.
-    walked = walkedpasses(c.graph.passes)
+    walked = !Mantle.recordablepasses(c.graph.dev, c.graph.passes)
     d.ndrange isa Mantle.DeviceRange && walked && d.ndrange.max === nothing &&
         return Mantle.bake(c, d)
     indirect = walked ? 0 : indirect
@@ -488,17 +488,6 @@ end
 # The recording's Objective-C objects die with it; the argument memory is the plan's.
 Mantle.release!(::MetalRecording) = nothing
 
-"""
-Whether this plan is walked per run instead of recorded: a render or copy pass
-needs an encoder an indirect command buffer cannot hold. Any other obstacle to
-recording throws instead.
-"""
-walkedplan(pl::Mantle.Plan) = walkedpasses(pp.pass for pp in pl.passes)
-
-"""Whether a plan of these passes is walked rather than recorded: it holds a pass
-that is neither compute nor update."""
-walkedpasses(passes) = any(p -> !(p.kind === :compute || p.kind === :update), passes)
-
 """Why a plan this backend would otherwise record cannot be, or `nothing`."""
 function norecordreason(pl::Mantle.Plan)
     for pp in pl.passes
@@ -562,7 +551,7 @@ walked plan. Throws for a plan that cannot be recorded.
 """
 function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan,
                               passes::AbstractUnitRange = eachindex(pl.passes))
-    walkedplan(pl) && return nothing
+    Mantle.recordable(d, pl) || return nothing
     # Adopt before touching the GPU: recording launches fills and blits the gate
     # template, which on another task's queue would be unordered against the
     # frames. `templ` is written only once, so a lost blit opens every gate onto
@@ -1010,7 +999,16 @@ Mantle.beginrender!(::MetalRecorder, ::Mantle.Plan, pp::Mantle.PassPlan) =
 # `run!` refuses a recordable plan that was never `record!`ed; a plan with a render
 # or copy pass is not recordable and is walked.
 Mantle.recordsplans(::MetalDevice) = true
-Mantle.recordable(::MetalDevice, pl::Mantle.Plan) = Mantle.recordable(pl) && !walkedplan(pl)
+# Legacy declares every replay resource ReadWrite on its tracked encoder;
+# MTL4 submissions wait on the previous event and the front's legacy stores.
+# Both routes order loop entries via emitloophead!. Core can therefore omit
+# redundant buffer-entry transitions without changing scheduling policy.
+Mantle.buffer_head_ordered(::MetalDevice) = true
+# An ICB records compute commands, not render/copy encoders. Core chooses the
+# walked route from these native command capabilities before compiling passes.
+Mantle.recordablekind(::MetalDevice, ::Val) = false
+Mantle.recordablekind(::MetalDevice, ::Val{:compute}) = true
+Mantle.recordablekind(::MetalDevice, ::Val{:update}) = true
 
 """
     Mantle.openrun(dev, plan) -> Immediate

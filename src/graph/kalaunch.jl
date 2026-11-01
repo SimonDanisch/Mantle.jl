@@ -1016,7 +1016,13 @@ recordable(pl::Plan) = isempty(pl.graph.surfaces) && !hasrebindable(pl)
 Whether `device` records this plan: core's conditions plus the backend's own. A
 declined plan is walked by `run!` instead of refused.
 """
-recordable(::Device, pl::Plan) = recordable(pl)
+recordable(dev::Device, pl::Plan) = recordable(pl) && recordablepasses(dev, pl.graph.passes)
+
+# Core inspects declared passes, not compiled output (which is still empty when
+# choosing entry synchronization). Devices report which native command kinds
+# their recording can contain; they do not select the plan's execution route.
+recordablekind(::Device, ::Val) = true
+recordablepasses(dev::Device, ps) = all(p -> recordablekind(dev, Val(p.kind)), ps)
 
 """Whether any draw takes its arguments from a `DrawBinding`."""
 hasrebindable(pl::Plan) = any(d -> d.args isa DrawBinding, (d for p in pl.graph.passes for d in p.draws))

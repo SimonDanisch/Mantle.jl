@@ -76,7 +76,8 @@ compileresult(g, plan) = (
     dev = M.Device(TESTBACKEND)
     n = 1 << 16
     g = buildprobe(dev, n)
-    r = compileresult(g, M.Plan(g))
+    plan = M.Plan(g)
+    r = compileresult(g, plan)
 
     # 5 transients x 65536 Float32 = 1_310_720 B if nothing aliased. The placer
     # gets it to exactly two buffers, which is what `bench/chain.jl` predicts in
@@ -89,9 +90,9 @@ compileresult(g, plan) = (
     # scheduled ahead of everything that could read them.
     @test r.scheduled == ["updates", "chain1", "chain2", "chain3", "branch1", "branch2"]
 
-    # Every pass, including the two that share no data with anything — those are
-    # ALIASING barriers. If a refactor drops them the peak stays right and the
-    # picture goes wrong intermittently, which is the worst failure available.
+    # The two independent branches still need ALIASING barriers. A recorded
+    # entry dependency covers updates and chain1; those no longer need duplicate
+    # first-use barriers. The actual chain and alias hazards remain pinned.
     # Backend-aware, because a backend whose passes each commit their own command
     # buffer on one queue is ordered by commit order and may derive nothing —
     # `sync/backend.jl` asks exactly that of it, and reading the answer here rather
@@ -103,11 +104,14 @@ compileresult(g, plan) = (
     W = M.Storage{M.BufferKind, M.Access{false, true}}
     R = M.Storage{M.BufferKind, M.Access{true, false}}
     derives = M.needs_transition(M.syncbackend(dev), M.BufferKind(), W, R)
-    @test derives ? all(r.barriered) : !any(r.barriered)
+    expected = !derives ? falses(6) : M.ordered_entry(M.Compile(plan)) ?
+               Bool[false, false, true, true, true, true] : trues(6)
+    @test r.barriered == expected
 
     # Pass indices are 1-based over the schedule above, so the update pass at
     # position 1 shifts every transient's interval by one.
     @test r.intervals == [(2, 3), (3, 4), (4, 4), (5, 5), (6, 6)]
+    M.free!(plan)
 end
 
 # ── KNOWN GAP: nothing above guards `Dag` ─────────────────────────────────────

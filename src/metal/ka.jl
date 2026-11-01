@@ -54,6 +54,7 @@ Mantle.devicebuffertype(::MetalDevice, ::Type{T}, N::Int) where {T} =
     Metal.MtlDeviceArray{T,N,Metal.AS.Device}
 
 Mantle.isdevicearray(::Metal.MtlArray) = true
+Mantle.resource_identity(a::Metal.MtlArray)=a.data.rc
 
 # Include derived-array offsets when choosing aligned wide loads.
 Mantle.basealignment(a::Metal.MtlArray) =

@@ -120,7 +120,7 @@ function preparekernel(owner::O, @nospecialize(f), args::Tuple,
     # The LLVM entry takes `f` as its first parameter; it gets a slot unless
     # it is a ghost type.
     all_args = (converted_f, converted_args...)
-    inline_extra = compute_inline_extra_from_byval(byval_sizes)
+    inline_extra = compute_inline_extra_from_byval(byval_sizes, compiled.push_info.arg_buffer_size)
     total_size = compiled.push_info.arg_buffer_size + inline_extra
     arg_buf = get_arg_buffer(owner, total_size)
 
@@ -137,19 +137,21 @@ end
 # copy; an allocation's slot holds its BDA.
 
 """
-    compute_inline_extra_from_byval(byval_sizes::Vector{Int})
+    compute_inline_extra_from_byval(byval_sizes::Vector{Int}, base_size=0)
 
 Bytes after the slot layout for the inlined aggregates, each 8-byte aligned.
 Uses LLVM byval sizes, which can exceed Julia's `sizeof` (zero-sized fields).
+Alignment starts at the actual fixed argument block, as in `pack_args_direct!`,
+not at zero. A trailing four-byte scalar can leave that block unaligned.
 """
-function compute_inline_extra_from_byval(byval_sizes::Vector{Int})
-    extra = 0
+function compute_inline_extra_from_byval(byval_sizes::Vector{Int}, base_size::Int=0)
+    cursor = base_size
     for sz in byval_sizes
         sz > 0 || continue
-        extra = (extra + 7) & ~7
-        extra += sz
+        cursor = (cursor + 7) & ~7
+        cursor += sz
     end
-    return extra
+    return cursor-base_size
 end
 
 # Per-type argument packers, each returning the next inline offset:

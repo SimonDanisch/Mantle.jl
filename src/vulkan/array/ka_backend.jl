@@ -439,7 +439,7 @@ The kernel-independent half of `build_launch_plan!`, inferred once. The
         deviceof(bq), f, tt, wg; enable_ray_query=ray_query)
     base = compiled.push_info.arg_buffer_size
     p = LaunchPlan(compiled, pipeline, offsets, byval_sizes, base,
-                   base + compute_inline_extra_from_byval(byval_sizes),
+                   base + compute_inline_extra_from_byval(byval_sizes, base),
                    world, wg, ray_query)
     v = get!(() -> Any[], launch_plan_cache(deviceof(bq)), key)
     filter!(q -> (q::LaunchPlan).world === world, v)  # superseded worlds are dead
@@ -546,7 +546,7 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
     compiled, pipeline, offsets, byval_sizes = get_compiled_kernel_and_pipeline(
         deviceof(bq), converted_f, tt, ws_3d; enable_ray_query)
 
-    inline_extra = compute_inline_extra_from_byval(byval_sizes)
+    inline_extra = compute_inline_extra_from_byval(byval_sizes, compiled.push_info.arg_buffer_size)
     total_size = compiled.push_info.arg_buffer_size + inline_extra
 
     # Keep the pre-adapt arrays reachable while their addresses are packed.
