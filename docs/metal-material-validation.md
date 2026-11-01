@@ -1,8 +1,8 @@
 # Unified materials on Metal
 
 Validated on 2026-11-01, Apple M5 (Mac17,3), 32 GiB RAM, Julia 1.12.7.
-The isolated acceptance environment uses GPUCompiler 2.16; the normal Mac
-project uses GPUCompiler 2.17. Both pass the complete 2,308-assertion material
+The initial isolated acceptance environment uses GPUCompiler 2.16; the normal Mac
+project uses GPUCompiler 2.17. Both passed the complete 2,308-assertion material
 suite and 31 compiler checks with Metal `d9969275` and Hikari `499e350e`.
 The latter commit adds diagnostic benchmarks; it does not change rendering.
 
@@ -26,9 +26,45 @@ Metal `49ae96bf`, removes references reachable only from dead helpers before
 deciding whether the object can be cached. Ten checks cover byte-identical AIR
 and continued exclusion of live references. The real Principled fixture passes
 an additional two-session test on GPUCompiler 2.16: 89 hits, zero misses and an
-identical image, with a 19.56-second cached render call (r670/r671). This does
+identical image, with a 19.56-second cached render call (r670/r671). Fresh
+`Pkg.test` children with current Hikari `2774e44`, the published Metal source
+and explicit `--check-bounds=auto` subsequently give 85 hits, zero misses and
+the same image; the cached render call takes 17.67 seconds (r710/r711). The
+fixtures differ in tessellation and path depth, so their times are not an A/B
+startup improvement. This does
 not skip host compilation or establish persistence for live references. That
 broader case remains a research probe in the compilation reuse plan.
+
+The current-source six-file GPU repeat passes all 857 assertions, including all
+17 Cycles reference batches (321 assertions), shading, native compositions,
+runtime storage, material-type changes and white-furnace checks. This is r711
+with Hikari `2774e44`, Metal `49ae96bf`, GPUCompiler 2.16 and explicit normal
+`--check-bounds=auto`. Its separate seven-assertion cache probe also passes.
+The tool's final response contained an MCP channel error; the saved Julia log
+confirms the complete 857/857 summary and `Hikari tests passed`.
+
+## Forced bounds-check compilation
+
+A fresh `Pkg.test` adds `--check-bounds=yes` by default. Earlier direct
+acceptance runs used Julia's normal `auto` setting. This difference exposes
+a separate native compile problem for the first software-traced Diffuse shader,
+`SurfaceProgramNodes{1,true,14,false}`. The forced-check AIR entry has 2,278
+blocks and 27,864 instructions (644,848 bytes); the auto entry has 1,294 blocks
+and 22,426 instructions (470,880 bytes). In the standalone Objective-C
+`Metal/research/native_pipeline_compile.m` probe, auto compiles in 0.964 seconds,
+while forced checking does not finish within 45 seconds. The initial test was
+stopped after 9m41s while waiting for Apple's compiler; this is not a passing
+default-configuration Metal test run.
+
+The cache-cleanup fix is excluded as the trigger: fresh captures with it enabled
+and disabled have byte-identical AIR and metallib. Keeping 48 natural loop
+latches, limiting native workgroups to 64, removing 3,618 alias annotations,
+stripping debug information, and compiling without indirect-command support
+each still exceed the 45-second limit. The strict input contains no undef or
+poison values. These bounded controls do not identify a faulty native pass or
+establish that compilation could never finish. No production checking policy,
+loop threshold or alias assumption is changed by this investigation. The
+normal-mode validation and forced-check compilation remain distinct results.
 
 ## Native compilation failure and fix
 

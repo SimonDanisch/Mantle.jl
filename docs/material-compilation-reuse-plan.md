@@ -42,6 +42,12 @@ A real 16², one-sample Principled scene on GPUCompiler 2.16 now gets 89 cache h
 and zero misses after restarting Julia, with an identical image (r670/r671).
 Its cached render call still takes 19.56 seconds, including host compilation;
 this does not establish fast startup or caching of genuinely live references.
+The current-source fresh-child repeat (Hikari `2774e44`, explicit normal
+`--check-bounds=auto`) gets 85 hits and zero misses, with an identical image and
+a 17.67-second cached render call (r710/r711). The fixtures differ, so this is
+not a measured startup speedup over the earlier fixture. Forced bounds checking
+exposes a separately reproduced native compiler timeout, documented in
+`metal-material-validation.md`; no global checking policy is weakened.
 
 Separate the portable shader code from the current session's bindings:
 
