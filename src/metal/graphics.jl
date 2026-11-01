@@ -869,8 +869,12 @@ private default of `KernelAbstractions.allocate` (see `indexbuffer`).
 """
 Mantle.devicearray(d::MetalDevice, data::AbstractArray) = buffercopy(d, data)
 
-# The storage mode is a type parameter of `MtlArray`, not a keyword.
-function buffercopy(d::MetalDevice, data::AbstractArray{T,N}) where {T,N}
+# Metal's host transfer accepts dense arrays; materialize host wrappers once.
+# Device arrays and their wrappers retain their existing device copy path.
+buffercopy(d::MetalDevice, data::AbstractArray{T,N}) where {T,N} =
+    buffercopy(d, convert(Array{T,N}, data))
+
+function buffercopy(d::MetalDevice, data::Union{Array{T,N},Metal.WrappedMtlArray{T,N}}) where {T,N}
     S = constraintof(d, Buffers(), T)
     a = Metal.MtlArray{T,N,S}(undef, size(data))
     copyto!(a, data)
