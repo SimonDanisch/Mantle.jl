@@ -40,8 +40,10 @@ The current-source six-file GPU repeat passes all 857 assertions, including all
 runtime storage, material-type changes and white-furnace checks. This is r711
 with Hikari `2774e44`, Metal `49ae96bf`, GPUCompiler 2.16 and explicit normal
 `--check-bounds=auto`. Its separate seven-assertion cache probe also passes.
-The tool's final response contained an MCP channel error; the saved Julia log
-confirms the complete 857/857 summary and `Hikari tests passed`.
+The separate GPUCompiler 2.17 environment repeats the same six files with
+857/857 passing assertions and also passes all ten cache regressions (r718,
+explicit normal `--check-bounds=auto`). Both runs use fresh `Pkg.test` children
+and the published source, without session-only renderer overrides.
 
 ## Forced bounds-check compilation
 
