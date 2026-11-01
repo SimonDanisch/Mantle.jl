@@ -304,8 +304,12 @@ The remaining optimizations are follow-up work, with distinct evidence gaps:
 Native pbrt component and layered random-walk estimators remain in the same graph
 infrastructure but retain schema/type specialization. Their common storage and
 structural compilation costs are not declared solved by the Cycles integration.
-Metal validation of the current private source remains pending explicit transfer
-authorization; desktop success is not evidence of current Metal correctness.
+The Mac working changes have now been reconciled with the current sources and
+installed in its main checkouts. Metal's complete material reference suite and
+nested RayMakie updates pass. Native pipeline reuse is verified, but paired M5
+rendering shows materially larger runtime overhead than Vulkan. See
+[Metal validation](metal-material-validation.md) for measurements, the native
+compiler fix and the remaining performance and persistence limitations.
 
 Native compile diagnostics used an independent Vulkan executable with time and
 data-segment limits. Disabling native optimization did not finish within 60
