@@ -1,6 +1,7 @@
 # Material compilation reuse
 
-Status: production integration validated on Vulkan, 2026-10-31.
+Status: production integration validated on Vulkan (2026-10-31) and Metal
+(2026-11-01); Metal runtime overhead remains above the accepted target.
 The user accepted approximately 4% runtime overhead; eliminating it is no longer
 a prerequisite for integration. The current source selects shared Cycles storage
 by default and removes the old three-model storage implementation. Glass now returns the canonical Principled configuration. Full-suite Vulkan reference validation
@@ -97,9 +98,10 @@ The canonical Glass constructor returns Principled. There is no
 production switch between the former small storage and the integrated storage.
 
 Native pbrt component/layered estimators retain schema/type specialization.
-Current Metal validation still needs transfer authorization. Neither broader
-renderer-pass specialization nor Metal symbolic-reference caching is solved by
-the Cycles storage integration below.
+Current Metal material and update checks pass; the larger M5 runtime regression
+remains open, as detailed in [Metal validation](metal-material-validation.md).
+Neither broader renderer-pass specialization nor Metal symbolic-reference
+caching is solved by the Cycles storage integration below.
 
 ## Shared BSDF storage: immediate implementation
 
@@ -141,12 +143,12 @@ Measured integration progress as of 2026-10-31:
 
 | Part | Evidence | Remaining acceptance work |
 | --- | --- | --- |
-| Canonical Glass | Separate implementations removed; constructor/material/shader and all 93 current nested RayMakie checks pass | Current-source Metal validation |
-| Shared record and program | 28,377 final model/class/direct/composition/canonical checks across 73 configurations; all 17 Cycles reference batches pass 321 assertions | Current-source Metal validation |
-| Rendered parity | 19 final checks cover hardware/software tracing, computed inputs, bump normals, eight-term graphs and updates | Current-source Metal validation |
+| Canonical Glass | Separate implementations removed; constructor/material/shader and all 93 current nested RayMakie checks pass on Vulkan and Metal | Broader compiler work below |
+| Shared record and program | 28,377 final model/class/direct/composition/canonical checks across 73 configurations; all 17 Cycles reference batches pass 321 assertions on both backends | Metal runtime cost |
+| Rendered parity | 19 final checks cover hardware/software tracing, computed inputs, bump normals, eight-term graphs and updates on both backends | Wider scene coverage |
 | Mixed native graphs and energy | 1,968 final-source checks pass, including native CPU/GPU composition on software/hardware tracing, furnace, subsurface selection and retained emission | Native schema specialization remains |
-| Native pipeline reuse | 28 current-source checks: four Principled/Glass/Sheen/Glossy graphs reuse the exact same native BSDF pipeline, with pixel-identical reference images | Other capability classes and Metal |
-| Runtime | Final paired 512², 8-sample software-tracing Principled measurement: 26.367 ms typed versus 27.414 ms shared (+3.97%); Glass +0.95% | Metallic overhead; hardware tracing and Metal measurements |
+| Native pipeline reuse | Vulkan's 28 checks and Metal's 40 checks confirm shared native pipeline identity within tested capability classes, with pixel-identical reference images | Other capability classes and persistence |
+| Runtime | Vulkan Principled: 26.367 ms typed versus 27.414 ms shared (+3.97%); Glass +0.95%. M5 Principled +47.57%, Glass +66.17% | Metallic overhead, Metal runtime regression and hardware-tracing timings |
 | First use after a warm class | Final-source subsequent unseen graphs take 0.274–0.279 s including host setup/rendering; initial loaded-session candidate draw took 33.56 s | Cold/restart startup measured separately |
 | Compiler correctness | 158 focused compiler checks plus six interleaved-access regressions pass | General outlined-evaluation device fault remains unresolved |
 
