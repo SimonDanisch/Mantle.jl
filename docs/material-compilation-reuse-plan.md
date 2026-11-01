@@ -23,7 +23,7 @@ is recorded separately from this integration.
 
 ## Metal shaders with symbolic Julia references
 
-Metal's current persistent cache excludes modules with any relocation. Real Hikari
+Metal's production object cache excludes modules with any relocation. Real Hikari
 shaders carry Julia symbol references such as `convert`, `sqrt` and `trunc` from
 error paths; these therefore miss after restarting Julia. Warm session reuse works.
 
@@ -57,6 +57,24 @@ Acceptance checks:
   remain a deliberate miss, with a diagnostic reason.
 - Record cache lookup and binding time independently from Julia inference/LLVM
   generation. This change alone does not skip LLVM generation before lookup.
+
+`Metal/research/prepared_relocation_cache.jl` now demonstrates a narrower cache
+boundary after `GPUCompiler.prepare_execution!`. Its key combines the prepared
+module, compiler configuration and ordered portable target descriptions. A hit
+loads only AIR/metallib/entry bytes; the current compilation supplies the frozen
+manifest and resolves the current session's words. A GPU kernel observes a
+symbol address and twice a type address, so exchanging table slots changes its
+answer. After a Julia restart, both code variants hit their previous entries and
+return the current addresses correctly (21 assertions, run r663). Changed code
+has a different key; reversed target order changes the key; an unsupported
+mutable target is rejected. The preceding 24-assertion population run also
+checks writing fresh entries.
+
+This is a research probe, not production integration. Unsupported targets must
+be cache misses in production, rather than the probe's explicit error. Full
+Hikari shader coverage, broader target/invalidation cases and startup profiling
+remain required. Lookup at this boundary skips AIR lowering and library packing,
+but still pays inference, LLVM generation and relocation preparation.
 
 ## Structural specialization outside the BSDF kernel
 
@@ -385,3 +403,9 @@ consumers pass eight checks with zero error (run r653). This proves the scalar
 Julia producer boundary. It does not yet cover Julia consumers, aggregate BSDF
 arguments, kernel state, relocations or persistent helper invalidation. The
 earlier "MSL only" limitation applies to the first probe, not this extension.
+
+A direct-call control declaring the Julia helpers as external visible MSL
+functions fails native pipeline creation with "unresolved visible function
+reference" even when their binary function objects are supplied (run r655).
+The successful proof uses function tables. Replacing a Julia helper body with a
+plain external declaration is therefore not an established integration method.
