@@ -1,0 +1,815 @@
+{
+  "date": "2026-10-29",
+  "scope": "Read-only selected-consumer source review against current shared Mantle operation-layer plan; no consumer port, native execution or full-package review",
+  "verdict": "The explicit recorded-call/shared capability layer fits the principal resource/execution patterns. Clean coverage of every named use case is not yet established; the contract and qualification obligations below remain open.",
+  "authority": "The current target docs and explicit-routing-ruling.json remain authoritative; this review proposes no new adaptation, recording-device wrapper or public API spelling.",
+  "repositories": {
+    "Mantle": {
+      "path": "/sim/Programmieren/VideoEdit/dev/Mantle",
+      "head": "a30a423da24cfc841e09943b409ea091383f93cc",
+      "dirty": true
+    },
+    "JuliaVision": {
+      "path": "/sim/Programmieren/VideoEdit/dev/JuliaVision",
+      "head": "d99a87ca7905fbc4b4b85732a5588ba88471ca6f",
+      "dirty": true
+    },
+    "PrintSim": {
+      "path": "/sim/Programmieren/VideoEdit/dev/PrintSim",
+      "head": "c3b7854503704e8b91cd4c700fbd2cf1616d82f3",
+      "dirty": true
+    },
+    "Hikari": {
+      "path": "/sim/Programmieren/VideoEdit/dev/Hikari",
+      "head": "041fb4168f2200e8ceda3d5153305de2e6d3d2fa",
+      "dirty": false
+    },
+    "Makie": {
+      "path": "/sim/Programmieren/VideoEdit/dev/Makie",
+      "head": "5fe04217229c995905d3e5955a5c05b0236a5b20",
+      "dirty": false
+    }
+  },
+  "ascanner_evidence": "Read-only 2026-10-29 snapshot and saved baseline evidence; not a new inspection of the live Bosgame checkout",
+  "source_sha256": {
+    "/sim/Programmieren/VideoEdit/dev/Mantle/docs/api.md": "c84908f7e809e17b7c7959a827f5d08a18965e0a6ead33a00d4f64c93bc4ddde",
+    "/sim/Programmieren/VideoEdit/dev/Mantle/docs/recording-plan.md": "314d03b8872b06f51a8b935ed4db0900801ce3b736bb79ab658d0b816d8a0791",
+    "/sim/Programmieren/VideoEdit/dev/Mantle/docs/execution-contracts.md": "a52df28f722a12652a0dc1eaa129e48aa74f77b5c8144287895834878949d421",
+    "/sim/Programmieren/VideoEdit/dev/JuliaVision/DNNKernels/src/emit.jl": "2b9805540e93834a0de7a380ddbacc9d50ff76d7485a8e8048e8e097356875e9",
+    "/sim/Programmieren/VideoEdit/dev/JuliaVision/DNNKernels/src/memory.jl": "29d2e1e58356a5db4b34a91d95e7cc00c8bdcc8bd88699347ff4a18cad77c021",
+    "/sim/Programmieren/VideoEdit/dev/JuliaVision/BonsaiRunner/src/BonsaiRunner.jl": "5b57989e9bf023855eecd0bf6a9dbf3254303359b6b15ba4784c754caa2774a8",
+    "/sim/Programmieren/VideoEdit/dev/JuliaVision/MatAnyoneRunner/src/MatAnyoneRunner.jl": "24e0aa065dc37de148e1ebe692417938af190dac0f090ccb0c586a25c27d60f1",
+    "/sim/Programmieren/VideoEdit/dev/PrintSim/src/launch.jl": "828b46ca05176c12bdd13722457284fc7633e98fc93fd1df21436657eb5b520d",
+    "/sim/Programmieren/VideoEdit/dev/PrintSim/src/dynamics/coupled.jl": "b0ced1ee2186aef68895d56b0e6c40fe87f1deefa763d9140518fb90045f3042",
+    "/sim/Programmieren/VideoEdit/dev/PrintSim/src/dynamics/world_energy.jl": "862babc73bda06787e2c8a6fc9c479de0709ffb975d4903bd39f1a0017c0f27f",
+    "/sim/Programmieren/VideoEdit/dev/PrintSim/src/dynamics/control.jl": "910727bc9a5ef70ce87f39fe8b47400b059e79f72d6b46f322c2ceae3f47cb9c",
+    "/sim/Programmieren/VideoEdit/dev/PrintSim/src/dynamics/fem_coarse.jl": "cd70a3571c5715427957ec59f2547e659a0581d5bb0195d1f4c0c92254b2f9dd",
+    "/sim/Programmieren/VideoEdit/dev/Hikari/src/integrators/volpath/graph.jl": "56c07910713e01d6b2ffc594ad355746b424e1e1834488aa7cdfd863caddb11f",
+    "/sim/Programmieren/VideoEdit/dev/Makie/RayMakie/src/overlay_rendering.jl": "72684d43f1da5b941acc90aac6440667c0e9dfd2659229c8e3385c7c7fb3434c",
+    "/sim/Programmieren/VideoEdit/dev/Makie/RayMakie/src/screen.jl": "537615735308c37376b842263224ca26ccacdeb70d75f10438e8c88d6a519482",
+    "/sim/Programmieren/VideoEdit/experiments/ascanner-length-review-2026-10-29/MantleUIPC/src/backend/mantle_tool/linear_system.jl": "6ead36eba742689473e4b0f5724a86db04148f0750c15df9c29d88c6762d4db9",
+    "/sim/Programmieren/VideoEdit/experiments/ascanner-length-review-2026-10-29/MantleUIPC/src/backend/algorithm/matrix_converter.jl": "0db3786af26bcca1be7e432a57cf65b695b0602e9c2bd8fc65f12dcf8259e774"
+  },
+  "coverage": [
+    {
+      "use_case": "DNNs",
+      "architecture": "fits with an explicit target-aware exporter/known operation recipes",
+      "remaining": [
+        "UC-01",
+        "UC-02",
+        "UC-03",
+        "UC-08"
+      ],
+      "existing_mwes": [
+        "MWE-01",
+        "MWE-04",
+        "MWE-08"
+      ]
+    },
+    {
+      "use_case": "Raytracing",
+      "architecture": "fits: raw dispatch/trace, typed hit groups, GPU queue lengths, shared AS versions and explicit Groups",
+      "remaining": [
+        "UC-05",
+        "UC-06"
+      ],
+      "existing_mwes": [
+        "MWE-02",
+        "MWE-05",
+        "MWE-06",
+        "MWE-08"
+      ]
+    },
+    {
+      "use_case": "Simulations",
+      "architecture": "fits: persistent state, explicit scratch, nested GPU controls and shared display resources",
+      "remaining": [
+        "UC-01",
+        "UC-02",
+        "UC-04",
+        "UC-06"
+      ],
+      "existing_mwes": [
+        "MWE-01",
+        "MWE-02",
+        "MWE-04",
+        "MWE-05"
+      ]
+    },
+    {
+      "use_case": "FEM",
+      "architecture": "expressible via existing explicit-kernel paths; clean common sparse/matrix-free/scalar interfaces need specification",
+      "remaining": [
+        "UC-01",
+        "UC-04",
+        "UC-06"
+      ],
+      "existing_mwes": [
+        "MWE-02",
+        "MWE-04",
+        "MWE-08"
+      ]
+    },
+    {
+      "use_case": "Particles",
+      "architecture": "fits the canonical GPU size/compaction model; real coupled sparse chains still qualify",
+      "remaining": [
+        "UC-04",
+        "UC-06"
+      ],
+      "existing_mwes": [
+        "MWE-01",
+        "MWE-02",
+        "MWE-04"
+      ]
+    },
+    {
+      "use_case": "Raster/Makie",
+      "architecture": "fits rendering/pieces/images, but per-frame capture/picking lifecycle is incomplete",
+      "remaining": [
+        "UC-03",
+        "UC-05"
+      ],
+      "existing_mwes": [
+        "MWE-06",
+        "MWE-08"
+      ]
+    },
+    {
+      "use_case": "LLMs",
+      "architecture": "fits contiguous packed decode/prefill and per-token slots; paged/continuous-batched access not established",
+      "remaining": [
+        "UC-01",
+        "UC-03",
+        "UC-06",
+        "UC-07"
+      ],
+      "existing_mwes": [
+        "MWE-01",
+        "MWE-04",
+        "MWE-07",
+        "MWE-08"
+      ]
+    },
+    {
+      "use_case": "Training/AD",
+      "architecture": "can emit forward/backward/update graphs; external differentiation boundary unqualified",
+      "remaining": [
+        "UC-01",
+        "UC-02",
+        "UC-08"
+      ],
+      "existing_mwes": [
+        "MWE-01",
+        "MWE-04"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "id": "UC-01",
+      "priority": "P1",
+      "ledger": "F115",
+      "use_cases": [
+        "DNNs",
+        "FEM",
+        "Simulations",
+        "LLMs",
+        "Training/AD"
+      ],
+      "title": "Portable operation extension and GPU-result contracts need a concrete minimum catalog",
+      "problem": "The new call! entry correctly rejects unknown functions, but mul!/Array examples do not specify the public way a library defines a retained/reselectable operation, nor complete result/shape contracts for reductions and allocations. A CPU future from a scalar-returning operation cannot simply be a GPU loop predicate. Raw kernels can implement these workloads; clean reusable operation-layer coverage is not yet established.",
+      "evidence": [
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Mantle/docs/api.md",
+          "line": 149,
+          "symbol": "`call!(target,f,args...;kwargs...)`"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/PrintSim/src/dynamics/world_energy.jl",
+          "line": 72,
+          "symbol": "function world_cg_check!"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/JuliaVision/DNNKernels/src/emit.jl",
+          "line": 147,
+          "symbol": "function emitgraph!"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/JuliaVision/DNNKernels/src/memory.jl",
+          "line": 331,
+          "symbol": "function recordmemread"
+        }
+      ],
+      "required_resolution": "Document the portable extension hook/recipe contract and a minimum supported-family matrix covering effects, result identity/type, deferred shapes, workspace, control eligibility and invalidation. Include GPU-output reductions/convergence storage, plus allocating/view results with device-written shapes. Reuse the existing operation definitions; do not add device/group adaptation or infer returns from !.",
+      "acceptance": [
+        "Known GPU-output reduction drives two nested loop invocations without host readback; scalar CPU-result form is explicitly distinguished.",
+        "A package-defined portable operation uses one numerical body, retains a reselectable recipe and discovers captured resources; unsupported functions reject before submission.",
+        "Unqualified allocating/view variants reject; any additional qualified definition states initial dimensions, metadata-readiness/lifetime, bounded capacity and stable output identity before/after run."
+      ],
+      "fixed_mwes": [
+        "MWE-02",
+        "MWE-04"
+      ],
+      "needed_before": "B2 operation-layer/library ports",
+      "status": "open_implementation_qualification",
+      "text_clarification_applied": [
+        "Minimum recorded signature/return/effect catalog added in api.md.",
+        "GPU-resident mapped sum uses existing Base.sum!(f,r,A) with a one-element ordinary device array destination; no new public scalar result type or dot! API.",
+        "Current GPUArrays in-place reductions already have this interface but eager isempty/Array(r) empty paths cannot run during graph construction for GPU-written lengths.",
+        "Portable definition boundary is specified by ordinary call! Julia dispatch/shared recipes. Generic allocating/metadata-only families are not in the required catalog and must reject until their result/shape/lifetime contracts are supplied; native implementation qualification remains open.",
+        "Library composition/extension boundary now uses ordinary call! frontend Julia dispatch plus one private shared definition/retained recipe; operand types participate in recipe lookup. No generic capture/registry or whole-builder adapter."
+      ]
+    },
+    {
+      "id": "UC-02",
+      "priority": "P1",
+      "ledger": "F116",
+      "use_cases": [
+        "DNNs",
+        "Simulations",
+        "Training/AD"
+      ],
+      "title": "DNN emitter temporary/output lifetimes must be mapped explicitly",
+      "problem": "DNNKernels currently returns unbound module outputs, including views, as owner-graph temporaries for subsequent caller nodes. A mechanical switch to persistent-default constructors makes all intermediates persistent and defeats arena reuse; prohibiting any returned scratch handle would instead break same-graph composition. GPU-written scratch size metadata is arena-local too and cannot be host-read after the run.",
+      "evidence": [
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/JuliaVision/DNNKernels/src/emit.jl",
+          "line": 144,
+          "symbol": "Nothing escapes a composed"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/JuliaVision/DNNKernels/src/emit.jl",
+          "line": 147,
+          "symbol": "function emitgraph!"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Mantle/docs/api.md",
+          "line": 73,
+          "symbol": "scratch=true)` | Explicit temporary"
+        }
+      ],
+      "required_resolution": "Produce an emitter allocation/escape map: internal scratch, same-owner graph-only outputs/views, and persistent outputs saved/shared beyond a run. Clarify that returning a scratch handle for further owner-graph declarations is legal; using its data or arena metadata outside its run is not. This clarification requires no new array type or adaptation.",
+      "acceptance": [
+        "Two modules share a scratch view within one graph and match the independent numerical reference; arena liveness includes its root.",
+        "A retained result used by graph two is explicitly persistent or copied; internal workspace remains scratch and is reclaimed/aliased.",
+        "Host queries never read GPU-written scratch metadata from reused arena bytes."
+      ],
+      "fixed_mwes": [
+        "MWE-01",
+        "MWE-04"
+      ],
+      "needed_before": "B2/B5 DNN emitter migration",
+      "status": "open_migration_contract",
+      "text_clarification_applied": [
+        "docs/api.md now permits returning scratch handles for further owner-run declarations; this does not permit data escape.",
+        "Host reads of GPU-written scratch metadata outside the owner run explicitly reject.",
+        "Concrete make/scratch/activation/weights/bound/view/recurrent/noise allocation map added in execution-contracts \u00a716.12, including removal of the zero-size persistent-resource workaround; actual port/native composition gates remain open."
+      ]
+    },
+    {
+      "id": "UC-03",
+      "priority": "P1",
+      "ledger": "F117",
+      "use_cases": [
+        "DNNs",
+        "LLMs",
+        "Raster/Makie"
+      ],
+      "title": "One-shot readback requests are easy to consume during warmup or reuse stale across runs",
+      "problem": "call!(g,Array,a) returns a future for the next execution. Warmup/seed runs can consume that request, and repeated fetch must intentionally keep returning its original snapshot. Reusing the same future in a token/frame loop therefore does not mean latest result. The API can express fresh requests through Readback(previous), but the concrete consumer protocol and retention bounds need qualification.",
+      "evidence": [
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Mantle/docs/api.md",
+          "line": 101,
+          "symbol": "`call!(target,Array,a)`"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/JuliaVision/MatAnyoneRunner/src/MatAnyoneRunner.jl",
+          "line": 286,
+          "symbol": "for _ in 1:warmup"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/JuliaVision/BonsaiRunner/src/BonsaiRunner.jl",
+          "line": 957,
+          "symbol": "function step!"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/JuliaVision/BonsaiRunner/src/BonsaiRunner.jl",
+          "line": 1020,
+          "symbol": "function generate("
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Makie/RayMakie/src/screen.jl",
+          "line": 1129,
+          "symbol": "function overlayreadback!"
+        }
+      ],
+      "required_resolution": "Specify a canonical warmup/production replay request protocol: bind after warmup, request before each desired execution, preserve old snapshots, and have a new request retain only the stable output descriptor rather than a chain of previous future payloads. Do not silently redefine fetch as latest-value access or introduce another eager future mode.",
+      "acceptance": [
+        "Warmup then multiple production runs returns the intended token/frame for each request; an old future still returns its original value.",
+        "Pending requests survive compatible growth/recompile; output deletion/free rejects unsubmitted requests.",
+        "Dropping prior futures gives bounded staging/CPU storage; retained snapshots remain immutable under replay."
+      ],
+      "fixed_mwes": [
+        "MWE-01",
+        "MWE-04",
+        "MWE-06"
+      ],
+      "needed_before": "B2/B3 output lifecycle and B5 consumers",
+      "status": "open_lifecycle_qualification",
+      "text_clarification_applied": [
+        "Canonical sequence consumes initial request during first warmup and rearms before each wanted production execution; no implicit persistent-state reset.",
+        "Readback(previous) retains stable output descriptor only; completed requests leave Graph pending set and are not retained as a history.",
+        "Live results plus bounded staging cache define memory bound; native lifecycle/memory qualification remains open."
+      ]
+    },
+    {
+      "id": "UC-04",
+      "priority": "P1",
+      "ledger": "F118",
+      "use_cases": [
+        "FEM",
+        "Particles",
+        "Simulations"
+      ],
+      "title": "Sparse/block-sparse and matrix-free operator support is named but not specified",
+      "problem": "The plan promises sparse conversion and SpMV/FEM solves without defining their supported composite layouts and operation contracts. The AScanner snapshot has block-COO values/row/column buffers with a common live triplet count and one-based block indices; ge2sym! publishes a GPU selection count. PrintSim also uses matrix-free products/preconditioners. Dense mul! and independent per-array resizing are insufficient evidence for these composite semantics.",
+      "evidence": [
+        {
+          "file": "/sim/Programmieren/VideoEdit/experiments/ascanner-length-review-2026-10-29/MantleUIPC/src/backend/mantle_tool/linear_system.jl",
+          "line": 14,
+          "symbol": "mutable struct DeviceTripletMatrix"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/experiments/ascanner-length-review-2026-10-29/MantleUIPC/src/backend/algorithm/matrix_converter.jl",
+          "line": 130,
+          "symbol": "function ge2sym!"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/PrintSim/src/dynamics/coupled.jl",
+          "line": 473,
+          "symbol": "function world_cg_iteration!"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/PrintSim/src/dynamics/fem_coarse.jl",
+          "line": 6,
+          "symbol": "struct FEMCoarse"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Mantle/docs/recording-plan.md",
+          "line": 665,
+          "symbol": "| FEM |"
+        }
+      ],
+      "required_resolution": "Specify compatible sparse/block layouts, logical index base/width, duplicate accumulation/symmetry semantics, coherent multi-array GPU counts, resource discovery, and the matrix-free/preconditioner extension boundary. Choose portable/shared operation definitions with capability-selected candidates, not one numerical API per backend. Existing upstream composites may wrap MantleArrays; no new public array family is implied.",
+      "acceptance": [
+        "COO/block-COO select/sort/combine -> sparse product -> convergence agrees with an independent tiny CPU system at zero/nonzero nnz.",
+        "Rows/columns/values use the same logical count and poisoned tails never participate.",
+        "Matrix-free and assembled products plus preconditioned convergence agree at required precision; unsupported FP64/atomic semantics reject rather than silently weaken."
+      ],
+      "fixed_mwes": [
+        "MWE-02",
+        "MWE-04"
+      ],
+      "needed_before": "B2 sparse/operator catalog and B5 FEM/particle gates",
+      "status": "open_contract",
+      "text_clarification_applied": [
+        "\u00a716.12 specifies sparse schema requirements, coherent values/rows/cols count publication, duplicate/symmetry/index checks, pattern/value invalidation and matrix-free mul!/ldiv! qualified-definition boundaries. No new array family or per-backend sparse policy."
+      ]
+    },
+    {
+      "id": "UC-05",
+      "priority": "P2",
+      "ledger": "F119",
+      "use_cases": [
+        "Raster/Makie",
+        "Raytracing"
+      ],
+      "title": "Window capture and picking need one explicit frame-consistency contract",
+      "problem": "Array(window) still means the next presented frame, unlike eager Array(image), and the supported recorded Array(window) path is not explicitly defined. RayMakie retains picking metadata plus its plot map/extent; returning correct pixel bytes with a newer plot map can select the wrong object. Headless image smoke does not qualify acquire/copy/present/generation behavior or a small picking read.",
+      "evidence": [
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Mantle/docs/api.md",
+          "line": 229,
+          "symbol": "`Array(win)`"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Makie/RayMakie/src/overlay_rendering.jl",
+          "line": 440,
+          "symbol": "plots = [get(robj.uniforms"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Makie/RayMakie/src/screen.jl",
+          "line": 1129,
+          "symbol": "function overlayreadback!"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Mantle/docs/execution-contracts.md",
+          "line": 261,
+          "symbol": "## 4. Presentation retirement"
+        }
+      ],
+      "required_resolution": "Specify the supported window/offscreen snapshot route and timing, capture before presentation, generation/extent ownership, and how the consumer associates immutable frame plot maps with the matching snapshot. Qualify small ROI/pixel readback without requiring full-frame downloads. Do not guess a presenting graph from an array or add a backend-specific screenshot path. Include CPU pixel layout/orientation and color/metadata decoding so the native storage representation never leaks into per-backend consumer code.",
+      "acceptance": [
+        "Onscreen/offscreen readback and picking identify the correct frame/plot after resize or plot removal while an earlier request is pending.",
+        "No missing next-frame deadlock in a synchronous colorbuffer path; failures/skips/close wake requests.",
+        "Window/present lifetime is independently qualified; small picking reads avoid full-image transfers."
+      ],
+      "fixed_mwes": [
+        "MWE-06"
+      ],
+      "needed_before": "B3/B5 real Makie integration",
+      "status": "open_contract_and_native_qualification",
+      "text_clarification_applied": [
+        "Explicit call!(presenting_graph,Array,win) snapshots the acquired frame before present; Array(win) rejects to avoid waiting for unsubmitted future work. Supersedes old next-present blocking proposal.",
+        "Color/ID/depth captures retain the same frame map/extent/format/pixel scale; ROI uses region copy/device extraction and the common output protocol. Actual WSI/native profiles stay open."
+      ]
+    },
+    {
+      "id": "UC-06",
+      "priority": "P1",
+      "ledger": "F120",
+      "use_cases": [
+        "FEM",
+        "Simulations",
+        "Raytracing",
+        "LLMs"
+      ],
+      "title": "Nested solver/control migration needs realistic cost and predicate-boundary checks",
+      "problem": "PrintSim launch!/is_recording currently recognize Graph, not Group; is_recording(target)=target isa Mantle.Graph. Updating only the launch dispatch can leave Group emission taking the immediate solver branch and host-reading a convergence flag before graph execution. PrintSim uses device-side CG flags, sequential line-search loops, per-dispatch ConditionalTarget predicates and optional CPU diagnostics; a whole Group predicate is sampled once, so predicates cannot be collapsed blindly. The fixed scaling MWE covers a long single loop, not realistic nested expansion. Hikari already documents per-sample allocations from abstract/Any plan-holder boundaries.",
+      "evidence": [
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/PrintSim/src/launch.jl",
+          "line": 30,
+          "symbol": "struct ConditionalTarget"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/PrintSim/src/dynamics/coupled.jl",
+          "line": 606,
+          "symbol": "if is_recording(target) && compact_cg"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/PrintSim/src/dynamics/world_energy.jl",
+          "line": 402,
+          "symbol": "function world_line_search!"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/PrintSim/src/dynamics/control.jl",
+          "line": 71,
+          "symbol": "function Stepper("
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Hikari/src/integrators/volpath/graph.jl",
+          "line": 482,
+          "symbol": "1015 bytes a sample"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Mantle/docs/recording-plan.md",
+          "line": 595,
+          "symbol": "| MWE-08 |"
+        }
+      ],
+      "required_resolution": "Generalize Graph-only emitter signatures/classification to explicit Graph/Group emission without routing through a device/array adapter. Map original predicate sampling/reset points to explicit regions/individual conditionals; retain pure GPU and explicit diagnostic host modes separately. Add actual nested native/portable plan-size, stopped-work and compile/runtime measurements using the existing MWE profiles. Keep consumer session/graph holders concretely typed or behind measured function barriers; no new backend runtime. PrintSim timestep/configuration dependencies also require explicit handling: a changed dt can invalidate FEM/coarse setup even if array shapes do not change; updating a GPURef alone is insufficient.",
+      "acceptance": [
+        "The same solver emission into Graph and Group takes the recorded path, never host-reads convergence during construction and discovers identical resource effects.",
+        "Nested Newton -> CG and line search preserve state/reset and active-versus-stopped effects, including a flag changed within a larger phase.",
+        "GPU-only path has no scalar host readback; explicit CPU diagnostics occur at documented host boundaries.",
+        "Report nested fallback expansion/slot bytes and post-stop work before claiming efficient FEM/decode on hardware lacking native loops; unchanged replay/session dispatch has no unexplained boxing.",
+        "Changing a timestep-dependent configuration rebuilds/recomputes the required operator/coarse data or rejects clearly; persistent simulation state is not silently reset."
+      ],
+      "fixed_mwes": [
+        "MWE-02",
+        "MWE-08"
+      ],
+      "needed_before": "B2/B4/B5 control and performance qualification",
+      "status": "open_migration_and_performance_qualification",
+      "text_clarification_applied": [
+        "\u00a716.12 specifies Group-aware recording classification, sibling/lexical solver control, realistic nested-control costs, explicit host diagnostic mode and dt-dependent setup recompute/reject."
+      ]
+    },
+    {
+      "id": "UC-07",
+      "priority": "P2",
+      "ledger": "F121",
+      "use_cases": [
+        "LLMs"
+      ],
+      "title": "Contiguous KV growth is not paged-attention/continuous-batching coverage",
+      "problem": "Bonsai kv_page rounds growth of contiguous Int8 K/V and Float32 scale arrays; it does not demonstrate a GPU page table, page reuse or per-request ownership. The plan names paged access but provides no corresponding layout/membership/lifetime qualification. Core span refinement on ordinary strided views alone is not proof of non-affine page-table access or useful overlap.",
+      "evidence": [
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/JuliaVision/BonsaiRunner/src/BonsaiRunner.jl",
+          "line": 274,
+          "symbol": "function _q8cache"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/JuliaVision/BonsaiRunner/src/BonsaiRunner.jl",
+          "line": 362,
+          "symbol": "function _ensure_kv!"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Mantle/docs/recording-plan.md",
+          "line": 668,
+          "symbol": "| LLMs |"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Mantle/docs/execution-contracts.md",
+          "line": 1369,
+          "symbol": "### 16.6 Imported allocations and explicit device communication"
+        }
+      ],
+      "required_resolution": "Either explicitly bound the initial LLM gate to contiguous packed caches, or specify the shared paged-layout/resource-set and page reuse/lease contract plus a real paged attention case. Preserve tracked reachable resources, quantized scale relationships and safe multi-session page retirement. Hardware-specific optimized candidates remain behind shared capability dispatch. Logical attention paging is a data/layout contract and need not require hardware sparse residency.",
+      "acceptance": [
+        "A shuffled page mapping matches contiguous/reference attention for two sessions sharing weights.",
+        "Reassign a page only after all old readers finish; stale descriptors/scale mappings cannot address reused storage.",
+        "Measure useful append/read/upload overlap and conservative-hazard costs; contiguous capacity doubling does not close this gate."
+      ],
+      "fixed_mwes": [
+        "MWE-04",
+        "MWE-07",
+        "MWE-08"
+      ],
+      "needed_before": "B4/B5 modern LLM qualification",
+      "status": "open_scope_and_layout_contract",
+      "text_clarification_applied": [
+        "Contiguous cache is the initial gate; logical paged cache is library-owned ordinary arrays/page-table/scales with qualified attention definitions, common root/span ordering and page leases. Shuffled-page/continuous-batching runtime/performance profile remains open."
+      ]
+    },
+    {
+      "id": "UC-08",
+      "priority": "P2",
+      "ledger": "F122",
+      "use_cases": [
+        "DNNs",
+        "Training/AD"
+      ],
+      "title": "Training needs an explicit AD boundary and activation lifetime test",
+      "problem": "The plan correctly puts AD algorithms outside Mantle but does not say where differentiation happens relative to call!/materialization/run!. Differentiating eager model code, differentiating a graph builder and emitting an already differentiated program are different integrations. Inference and a standalone optimizer kernel do not validate backward saved values, mutation/alias versions or scratch lifetime.",
+      "evidence": [
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Mantle/docs/recording-plan.md",
+          "line": 670,
+          "symbol": "| Training/AD |"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Mantle/docs/recording-plan.md",
+          "line": 710,
+          "symbol": "Codec conformance/parsers and AD/solver/model algorithms"
+        },
+        {
+          "file": "/sim/Programmieren/VideoEdit/dev/Mantle/docs/api.md",
+          "line": 149,
+          "symbol": "`call!(target,f,args...;kwargs...)`"
+        }
+      ],
+      "required_resolution": "State the supported external AD/emitter boundary and what operation identity/effect/result metadata it consumes. Saved activations must remain in one owner run or use explicit persistent storage between forward/backward runs; external AD owns mathematical versioning/checkpoint/recompute choices. No generic AD-through-call! promise follows from the common array interface.",
+      "acceptance": [
+        "A tiny independently checked forward/backward/optimizer step replays with correct gradients and persistent optimizer/RNG state.",
+        "Saved view/alias data survives through backward; cross-run saved values do not retain arena scratch accidentally.",
+        "Finite-difference/reference comparison and memory/timing distinguish real training from inference."
+      ],
+      "fixed_mwes": [
+        "MWE-01",
+        "MWE-04"
+      ],
+      "needed_before": "B5 training/AD qualification",
+      "status": "open_integration_contract",
+      "text_clarification_applied": [
+        "\u00a716.12 places AD before forward/backward emission or in numerical-function rules; differentiating runtime graph bookkeeping is not promised. Same-run saved activations may be scratch; cross-run state is persistent with version/reader ordering. Actual external-AD/reference qualification remains open."
+      ]
+    }
+  ],
+  "limits": [
+    "Findings distinguish missing contracts/migration proofs from actual unexpressible GPU operations. Raw explicit kernels can express many cases without new API.",
+    "No claim that baseline consumers newly fail; their existing numerical/native evidence is preserved.",
+    "Native/consumer results remain open. No Julia/GPU suite was started.",
+    "Keep the same eight MWEs/five work batches. Cases are mapped to them and existing consumer gates; no recursive test/redesign loop is added."
+  ],
+  "reviewed_plan_fingerprints_note": "Plan fingerprints capture the reviewed inputs before the two recorded scratch-lifetime text clarifications; final post-review fingerprints are in use-case-review-validation.json.",
+  "printsim_focus": "printsim-api-focus.json",
+  "execution_boundary_review": {
+    "date": "2026-10-30",
+    "scope": "Selected operation/composition entry paths only; not a complete semantic review or runtime qualification",
+    "withdrawn_proposal": "call!(physics,PrintSim.step!,world,state,dt) unnecessarily wrapped an existing target-aware graph builder; direct construction-time step!(physics,...) is the intended boundary.",
+    "traces": [
+      {
+        "file": "/sim/Programmieren/VideoEdit/dev/PrintSim/src/dynamics/coupled.jl",
+        "symbol": "step!(target,world,state,dt)",
+        "role": "graph builder",
+        "observed_boundary_and_required_change": "world_cg_iteration! and launch! emit kernels; recorded branch emits repeat!; immediate branch reads convergence on host. Generalize Graph-only launch/classification to Group, without wrapping step! in call!.",
+        "ledger": "F120",
+        "sha256": "b0ced1ee2186aef68895d56b0e6c40fe87f1deefa763d9140518fb90045f3042"
+      },
+      {
+        "file": "/sim/Programmieren/VideoEdit/dev/JuliaVision/DNNKernels/src/emit.jl",
+        "symbol": "emitgraph!(g,aten,weights,dims;...)",
+        "role": "graph builder",
+        "observed_boundary_and_required_change": "Explicitly emits into caller graph, runs nothing and returns resource handles. Generalize target support and classify scratch/output lifetimes; no whole-module call! adapter is required.",
+        "ledger": "F116",
+        "sha256": "2b9805540e93834a0de7a380ddbacc9d50ff76d7485a8e8048e8e097356875e9"
+      },
+      {
+        "file": "/sim/Programmieren/VideoEdit/dev/Hikari/src/integrators/volpath/graph.jl",
+        "symbol": "sample_graph(dev,state,refs,max_depth;...)",
+        "role": "graph factory plus target-aware builders",
+        "observed_boundary_and_required_change": "Constructs Graph, calls setup/round/accumulate builders and returns it. For composition, reuse the emission bodies with an explicit target; do not claim existing factory already accepts Group or wrap it in call!.",
+        "ledger": "F120",
+        "sha256": "56c07910713e01d6b2ffc594ad355746b424e1e1834488aa7cdfd863caddb11f"
+      },
+      {
+        "file": "/sim/Programmieren/VideoEdit/dev/JuliaVision/BonsaiRunner/src/BonsaiRunner.jl",
+        "symbol": "_recordstep / _declarestep! / step!(session,token)",
+        "role": "builder versus host controller",
+        "observed_boundary_and_required_change": "_recordstep constructs graph/scratch and calls _declarestep!. Public step! grows cache as needed, updates GPURefs, run!s plan and advances host position. Public step! is not the recorded builder despite its name.",
+        "ledger": "F121",
+        "sha256": "5b57989e9bf023855eecd0bf6a9dbf3254303359b6b15ba4784c754caa2774a8"
+      },
+      {
+        "file": "/sim/Programmieren/VideoEdit/dev/Makie/RayMakie/src/overlay_rendering.jl",
+        "symbol": "frame_plan! / frame_draws!",
+        "role": "host plan cache plus draw builder",
+        "observed_boundary_and_required_change": "frame_plan! selects/rebinds cached plans or constructs graph/metadata; frame_draws! emits draws. Do not record the cache controller through call!; preserve same-frame metadata/output obligations.",
+        "ledger": "F119",
+        "sha256": "72684d43f1da5b941acc90aac6440667c0e9dfd2659229c8e3385c7c7fb3434c"
+      }
+    ],
+    "remaining_scope": "Other API/lifetime/size/control/resource contracts still need semantic review; existing UC-01..UC-08 obligations remain open with their existing gates."
+  },
+  "resource_lifecycle_review": {
+    "date": "2026-10-30",
+    "scope": "Readback request lifecycle and scratch handle/data distinction; docs/source review only",
+    "source_paths": [
+      "JuliaVision/MatAnyoneRunner/src/MatAnyoneRunner.jl: runmatanyone / propagatematte warmup",
+      "JuliaVision/DNNKernels/src/emit.jl: emitgraph! returned handles/views"
+    ],
+    "corrections": [
+      "Removed stale eager Readback(img) migration recommendation.",
+      "Fixed MWE-01 wording so returning an owner-local scratch handle is legal; cross-graph/eager data escape remains forbidden.",
+      "Specified warmup/rearm and bounded captured-result retention with existing entries.",
+      "Streamed immutable-source weights explicitly reject writes/resize under shared readonly effect validation; no silently discarded GPU mutations.",
+      "Minimum sum! device-output contract replaces the supposed need for a novel GPU scalar result interface.",
+      "Capacity wording now distinguishes usable allocation bound from residency: unplaced/evicted bound must be backed before any GPU descriptor publication, excluding unbacked virtual spare.",
+      "Requests bind to a fixed run-attempt set before prepare/claim. Skipped/pre-copy failed attempts reject; copies already accepted retain their token/storage despite later unrelated failures. Window capture does not prove presentation completion.",
+      "Persistent data initialization captures its one-time ordered source version, including deferred GPU copies; scratch data initialization intentionally reads its source each region invocation. copy=false remains explicit alias/import."
+    ],
+    "remaining": "F116 allocation/escape migration, F117 runtime/consumer memory qualification and native backing/descriptor-version gates remain open; the pass does not establish all resource protocols.",
+    "alias_header_ruling": {
+      "ledger": "F123",
+      "problem": "One physical allocation can have independent differently shaped/typed foreign headers. Canonical payload identity cannot imply one logical dimensions/capacity cell or element unit.",
+      "decision": "One shared allocation/byte hazard and ownership identity; distinct logical-header metadata unless aliases deliberately share a logical parent. Checked typed byte spans at descriptor publication. No vendor shape mutation or readonly/lease bypass.",
+      "qualification": "Existing MWE-07, no additional family; imported buffers remain nonrelocatable and source facts must qualify their bounds/identity.",
+      "interop_checkpoint": "A new foreign import captures supplied header geometry; existing Mantle wrapper reuse shares its GPU size. Export to a concrete vendor header may require a coherent metadata checkpoint outside locks and matching storage lease. Arbitrary vendor callbacks are conservatively read/write; readonly requires qualified effects."
+    }
+  },
+  "reduction_source_review": {
+    "date": "2026-10-30",
+    "file": "/sim/Programmieren/VideoEdit/dev/GPUArrays/src/host/mapreduce.jl",
+    "sha256": "a538f04a101e4f05284cd06e12aeaed637cbec02c39c56c1a3aa6a9bbe51418c",
+    "facts": [
+      "GPUArrays already implements Base in-place mapped reductions into destination arrays and returns the same destination.",
+      "The current eager implementation performs isempty and can download a destination on its empty path; recorded GPU-written lengths require descriptor-driven empty handling.",
+      "PrintSim world_dot! already publishes via device arrays and explicit target-aware kernels."
+    ],
+    "cpu_validation": "Base.sum!(abs2,r,Float32[1,2,3]) returns r with 14; empty input yields zero; init=false with r=5 yields 19. Julia 1.12.7 via bt_julia_eval. No Mantle import or GPU execution. A 2x2 Float32 matrix reduces into a length-one vector with mapped abs2 result 30."
+  },
+  "consumer_contract_pass": {
+    "date": "2026-10-30",
+    "scope": "Target interface boundaries for existing UC-01..08, not implementation or native qualification",
+    "contracts": [
+      "docs/api.md: Minimum recorded array-operation contracts / Library builders and custom operators / Windows",
+      "docs/execution-contracts.md: 16.12 Consumer composition contracts"
+    ],
+    "window_change_reason": "Blocking for a next unsubmitted presented frame can deadlock the frame-producing task. Explicit target/position/run-token capture uses the existing readback protocol.",
+    "source_limit": "Previously inspected selected paths plus current GPUArrays reduction source; no whole-package audit, new backend specification lookup or external AD integration executed.",
+    "remaining": "Existing implementation/native/consumer/performance qualification gates remain open. Generic allocating/metadata-only recorded variants are outside the minimum catalog unless explicitly qualified with full result/shape contracts."
+  },
+  "dnn_allocation_review": {
+    "date": "2026-10-30",
+    "scope": "Selected allocation/emission source seams; target mapping only, no consumer modifications",
+    "seams": [
+      {
+        "file": "/sim/Programmieren/VideoEdit/dev/JuliaVision/DNNKernels/src/emit.jl",
+        "sha256": "2b9805540e93834a0de7a380ddbacc9d50ff76d7485a8e8048e8e097356875e9"
+      },
+      {
+        "file": "/sim/Programmieren/VideoEdit/dev/JuliaVision/DNNKernels/src/activationprep.jl",
+        "sha256": "ebfec4a5f0af05fbd7d0aa4daf3f08894418b94db05d172ff380257e174867a6"
+      },
+      {
+        "file": "/sim/Programmieren/VideoEdit/dev/JuliaVision/DNNKernels/src/memory.jl",
+        "sha256": "29d2e1e58356a5db4b34a91d95e7cc00c8bdcc8bd88699347ff4a18cad77c021"
+      }
+    ],
+    "facts": [
+      "make chooses transient except escaping IDs or a legacy empty-buffer exception.",
+      "scratch and activationbuffer create owner-graph temporaries.",
+      "emitgraph! returns owner-graph outputs/views and can bind caller resources.",
+      "MemoryBank owns persistent recurrent arrays while recordmemread allocates transient similarity/reduction workspace."
+    ],
+    "remaining": "Implementation must port classification and cleanup then run existing F116 checks; no blanket persistent promotion or arena escape."
+  },
+  "public_device_query_followup": {
+    "date": "2026-10-30",
+    "trigger": "User asked why Device(group::Group) was still in the API contracts.",
+    "reason_it_was_there": "An ownership-query convenience retained when the obsolete recording-device wrapper was removed; it returned the physical device, not another recording target.",
+    "decision": "Remove the public Device(Graph/Group) query/constructor row: existing recording/array examples need no such conversion. Core still resolves physical target ownership internally. No replacement public getter is introduced by this cleanup.",
+    "scope": "Three target documentation files only; no runtime or Julia-sketch changes."
+  },
+  "public_surface_followup": {
+    "date": "2026-10-30",
+    "scope": "Public/internal classification and explicit source/lifetime semantics; no runtime changes",
+    "changes": [
+      "location and test-only queuepolicy moved out of User API into core-only helper entries; no replacement public getter/routing API.",
+      "Lavapipe loading moved to software test/provider setup, preserving CPU-only qualification.",
+      "Scoped scratch releases the creator hold; graph-held scratch survives construction scope until owning runs/tokens retire.",
+      "Recorded host-source copies snapshot at declaration; device-source copies read at their graph position. Per-run host updates remain explicit stores.",
+      "Image copy/resolve entry now explicitly distinguishes eager copyto! from recorded call!(target,copyto!,...), shares the same definition and returns the original destination; no recording target inferred from images."
+    ],
+    "reason": "Internal implementation details must not grow the consumer API or accidentally imply recording context, lifetime expiry at declaration scope, or live host-array watching."
+  },
+  "ray_coverage_followup": {
+    "date": "2026-10-30",
+    "trigger": "User asked for inline query, hit function tables, alpha checks and procedural hits beyond the simple TLAS example.",
+    "scope": "Review of current target \u00a77, not native/source runtime validation",
+    "present_in_contracts": [
+      "rayquery accept/intersect",
+      "TriangleHitGroup and ProceduralHitGroup",
+      "logical pipeline hit groups/ray types and native SBT/function-table mapping",
+      "pure any-hit alpha filtering and stage IO"
+    ],
+    "no_new_api_adopted": true,
+    "runtime_changes": false,
+    "design_resolution": "rt-gap-resolution.json",
+    "current_design_status": "F124-F126 specified in target API/\u00a77; implementation and native/runtime/performance gates remain open.",
+    "resolved_design_gaps": {
+      "F124": "Exact general table constructor and callback ABI plus per-geometry specialized groups are incomplete; fixed geometry stride zero is restrictive.",
+      "F125": "One procedural result cannot enumerate a second valid intersection after the first is rejected by alpha/any-hit.",
+      "F126": "Two Float32 attributes cannot be assumed to cover all procedural attribute needs; typed capability-bounded ABI needed."
+    }
+  },
+  "pushed_source_refresh": {
+    "date": "2026-10-30",
+    "repositories": {
+      "Mantle": {
+        "local_head": "a30a423da24cfc841e09943b409ea091383f93cc",
+        "fetched_head": "3e9943f935adf56ef171be867c3a544defd2e411",
+        "worktree_updated": false
+      },
+      "Hikari": {
+        "local_head": "041fb4168f2200e8ceda3d5153305de2e6d3d2fa",
+        "fetched_head": "407f9b2423ad158eed6ecaa3e2d95229845152e6",
+        "worktree_updated": false
+      },
+      "Makie": {
+        "local_head": "5fe04217229c995905d3e5955a5c05b0236a5b20",
+        "fetched_head": "42e6355fbbb3a0773594c6837747d902bcc927b8",
+        "worktree_updated": false
+      },
+      "Metal": {
+        "local_head": "f8b6fbea95e478edcbba9753e36de44d25ea917f",
+        "fetched_head": "f8b6fbea95e478edcbba9753e36de44d25ea917f",
+        "worktree_updated": false
+      }
+    },
+    "inspection": "git show/grep of fetched commits only; no checkout, merge or runtime work",
+    "superseded_current_claims": [
+      "Hikari currently uses both wavefront queues and typed RT closest-hit pipeline",
+      "Old Hikari opaque-only pipeline shortcut is the current alpha reference",
+      "Migration still needs to remove _VP_RT_PIPELINES"
+    ],
+    "current_facts": [
+      "Hikari/RayMakie query/wavefront tracing and typed lobe/cut-set specialization",
+      "Shared Mantle query_record/query_transparent loop with native Vulkan/Metal query operations",
+      "Metal-specific query_begin specialization selects complete-result Metal.intersect for no-procedural opaque traversal; target eligibility/cost belongs shared core selector"
+    ],
+    "new_source_limit": "New APIs/source do not automatically settle F124-F126 or prove native runtime qualification."
+  },
+  "acceleration_memory_review": {
+    "date": "2026-10-30",
+    "ledger": "F127",
+    "scope": "Target memory policy, not implemented/runtime-qualified",
+    "contract": "docs/execution-contracts.md: 16.5 Acceleration storage, growth and maintenance",
+    "corrections": [
+      "Per-binding permanent scratch replaced with per-operation shared workspace requirements.",
+      "Source capacity separated from native full-signature AS storage requirements.",
+      "Core accounting covers buffer/heap or opaque allocations, without backend allocator policy.",
+      "Child relocation/compaction repairs parents and pins old native generations.",
+      "compact!(as) is explicit maintenance with peak admission and checkpoint/refit caveats; pressure never triggers it.",
+      "Derived AS bindings reconstruct after safe eviction; no opaque byte HostCopy restore.",
+      "Native provider vocabulary explicitly covers frozen AS copy/compact and token-tracked compact-size query/result slots; encoding never allocates, selects policy or waits."
+    ],
+    "native_sources": [
+      "https://docs.vulkan.org/spec/latest/chapters/accelstructures.html",
+      "https://developer.apple.com/documentation/metal/mtlaccelerationstructuresizes"
+    ],
+    "runtime_status": "open"
+  },
+  "hostcall_and_mul_hook_followup": {
+    "date": "2026-10-30",
+    "user_ruling": "Public CPU callback entry is hostcall!(target,f,args;writes). No HostCall wrapper passed to dispatch!.",
+    "mul_hook": "Dense matrix example explicitly connects recipe(::typeof(mul!),typed_args) -> MatMulRecipe -> code-owned Candidate values -> shared materialize/select -> emitter -> private DAG kernel emission. Eager and recorded branches share this exact path.",
+    "scope": "Documentation/pseudocode, including the formerly contradictory per-device candidates entry. The generic arithmetic kernel is an illustration; production must reuse existing shared kernels and qualify optimized candidates.",
+    "runtime_changes": false
+  }
+}

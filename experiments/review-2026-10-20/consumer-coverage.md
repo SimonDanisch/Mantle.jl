@@ -13,16 +13,17 @@ Pattern tests alone do not close phase 11.
 
 | Real path | Current behavior / cost or hazard | Target and acceptance gate |
 |---|---|---|
+| AScanner/Bosgame MantleUIPC buffer/cub helpers, `HWSimplexTrajectoryFilter.select_valid!`, `MatrixConverter.ge2sym!`, and native CUDA `bounded_dispatch!` (reviewed 2026-10-29; fingerprints in ../review-2026-10-29/ascanner-gpu-extents.json) | Retained full frames have working native evidence. Compacted contact outputs keep host-sized views plus separate GPU counts/sentinels; numerical helpers generally take integer lengths. ge2sym! passes a GPURef result to an Integer-only resize helper and later Int32 conversion: an unconverted source path, not a newly executed failure. CUDA launches capacity and gates blocks; this alone does not update each array descriptor's logical dimensions. Reported 128/512-particle frames remain slower than libuipc despite one graph launch. | Migrate these consumers to the existing GPU logical-size/Cell/prepare model (execution-contracts.md §15). P4.G4/P6.A24/P6.G4/P11.G94 add actual chain/value tests, empty/partial-group replay and interleaved full-frame cost qualification. This is consumer implementation work, not a new dynamic-view, array-shape or overflow-design decision. |
 | [RayMakie frame_plan!](../../../Makie/RayMakie/src/overlay_rendering.jl:331) | Computes a signature over source, plots, shadow state and extent; frees/rebuilds a frame on mismatch. Rebinds DrawBindings and deliberately leaves window plans unrecorded. Uses depth, FXAA flags, shadow passes and picking metadata, not just flat coloured rectangles. | One graph per screen, per-plot Group pieces and GPURef/array stores. Window generations select recorded per-image work. Preserve colour/depth/metadata attachments and premultiplied alpha. Run existing overlay/picking/FXAA/shadow tests at two sizes, dynamic plot insertion and two screens. RM-01–17 are core gates, not the whole Makie gate. |
 | [RayMakie scene render](../../../Makie/RayMakie/src/screen.jl:645) | Explicit Hikari.sync! is required: syncing TLAS alone previously freed an AS still baked into integrator plans. Empty geometry still needs environment illumination. | Core AS cells/retirement and reader updates replace native-handle invalidation. Add/remove/move geometry while a trace is in flight; compare raster/traced composite, empty-scene environment and allocations. HK-09/RM RT cases must be followed by real scene tests. |
 | [RayMakie glyph path](../../../Makie/RayMakie/src/overlay/scatter.jl:158) and [atlas dirty state](../../../Makie/RayMakie/src/screen.jl:291) | Text/scatter require actual SDF/atlas contents; a fixed-size atlas can change without changing dimensions. Dirty callback is explicitly separate from atlas size. | Typed sampled-image ABI and sample intrinsic in api.md §2.6; content stores are independent of growth. RM-15 now actually samples and changes texels after growth. Run real text/scatter tests with new glyph insertion, camera zoom, atlas growth and callback cleanup after closing one of two screens. |
 | [Raycore mutation boundary](../../../Raycore/src/instanced-bvh.jl:2635) and [Hikari scene sync](../../../Hikari/src/scene.jl:351) | Raycore mutators update backing buffers and dirty/refit flags; sync! is the commit boundary. Hikari additionally updates scene bounds and notifies integrators on topology changes. Closest/any-hit default masks are both 0xff. | Mantle owns shared BLAS/TLAS build/update/retirement; Raycore keeps geometry/traversal adapters and hit conventions. Preserve scene bounds and notification semantics. Test topology versus transform-only changes, default/explicit masks, empty traversal and software/hardware hit equivalence; no backend-specific second member/lifetime store. |
-| [Hikari sample_graph](../../../Hikari/src/integrators/volpath/graph.jl:417), [paired rounds](../../../Hikari/src/integrators/volpath/graph.jl:328) | Bounded device-count loop, two rounds per body to restore ping-pong direction; odd final round; sample counter increments on device. Comments at the file's start still describe an obsolete host loop: executable code is the evidence. | Group containing two rounds, repeat!(group,max_depth÷2;while_nonzero=count), optional odd round, final accumulation. No per-round readback. HK-08 tests termination, but real scenes must compare odd/even depths, zero/one live ray, media/shadows and empty queues on hardware and software traversal. |
+| [Hikari sample_graph](../../../Hikari/src/integrators/volpath/graph.jl:417), [paired rounds](../../../Hikari/src/integrators/volpath/graph.jl:328) | Bounded device-count loop, two rounds per body to restore ping-pong direction; odd final round; sample counter increments on device. Comments at the file's start still describe an obsolete host loop: executable code is the evidence. | Explicit Group-targeted operations containing two rounds, repeat!(group,max_depth÷2;while_nonzero=count), optional odd round, final accumulation. No per-round readback. HK-08 tests termination, but real scenes must compare odd/even depths, zero/one live ray, media/shadows and empty queues on hardware and software traversal. |
 | [Hikari per-material queues](../../../Hikari/src/integrators/volpath/per_material_queues.jl:1) | TypedHitRef stores one Int32 index per material queue, not a copied 304-byte hit per material. Generated dispatch specializes shading for each material type. | Keep compact typed indices and ordinary Julia specialization. Adding data of an existing type grows/stores arrays; introducing a new type specializes the shade kernel and recompiles affected plans. Preserve both typed queue shading and the actual per-material closest-hit/SBT path in rt-pipeline.jl:530–575; do not return to an all-material hit copy. Measure peak memory and compile counts when adding a type. |
-| [DNNKernels emitgraph!](../../../JuliaVision/DNNKernels/src/emit.jl:134), [launch!](../../../JuliaVision/DNNKernels/src/launch.jl:257), [view planning](../../../JuliaVision/DNNKernels/src/plan.jl:62) | Modules already compose into a caller graph and bind resources without copies. Helper signatures currently require Graph. Escaping outputs include view roots; exported liveness is explicitly unsafe as placement input. Some permute/reshape chains require a materializing copy. | Generalize emission to target=Graph/Group plus graph owner for allocations. Preserve explicit workgroup sizes and required view copies. Derive liveness from actual uses, retain escaping roots, and propagate target to every internal launch. DNN-12 checks composed modules in a repeated Group with persistent state. Real exporter models still need view/quantization/precision comparisons. |
-| [DNN memory read](../../../JuliaVision/DNNKernels/src/memory.jl:331), [memory ownership](../../../JuliaVision/DNNKernels/src/memory.jl:47) | Affinity → in-place top-k normalization → readout; capacity-sized intermediate and GPURef live-bank extent. Bank arrays persist across several module calls. | Graph temporaries for similarity/sums, persistent MantleArrays for bank/output, one live-count GPURef. No host bank-size read between passes; no forced materialization of resident outputs. DNN-10/12 plus real SAM2 frame variants and reference masks. |
+| [DNNKernels emitgraph!](../../../JuliaVision/DNNKernels/src/emit.jl:134), [launch!](../../../JuliaVision/DNNKernels/src/launch.jl:257), [view planning](../../../JuliaVision/DNNKernels/src/plan.jl:62) | Modules already compose into a caller graph and bind resources without copies. Helper signatures currently require Graph. Escaping outputs include view roots; exported liveness is explicitly unsafe as placement input. Some permute/reshape chains require a materializing copy. | Generalize emission to target=Graph/Group; constructors receive that target and core derives the scratch owner. Map internal, same-owner returned views and persistent escaping results explicitly. Preserve explicit workgroup sizes and required view copies. Derive liveness from actual uses, retain escaping roots, and propagate target to every internal launch. DNN-12 checks composed modules in a repeated Group with persistent state. Real exporter models still need view/quantization/precision comparisons. |
+| [DNN memory read](../../../JuliaVision/DNNKernels/src/memory.jl:331), [memory ownership](../../../JuliaVision/DNNKernels/src/memory.jl:47) | Affinity → in-place top-k normalization → readout; capacity-sized intermediate and GPURef live-bank extent. Bank arrays persist across several module calls. | Explicit scratch for similarity/sums, persistent MantleArrays for bank/output and canonical GPU size metadata; no independent live-count protocol for ordinary array operators. No host bank-size read between passes; no forced materialization of resident outputs. DNN-10/12 plus real SAM2 frame variants and reference masks. |
 | [MatAnyone propagation](../../../JuliaVision/MatAnyoneRunner/src/MatAnyoneRunner.jl:350) | Mask ingest and inference are separate calls; the initial seed resets recurrent memory, later corrections must not. Warmup repeatedly advances state. Device alpha is copied into persistent per-frame planes. | Preserve state transition order; combine only repeated calls with the same semantics. Test first seed, warmup=0/1/2, later correction, before-first-seed transparency and downstream device consumers. Compare alpha against the frozen driver, not merely a toy affine model. |
-| [Bonsai session](../../../JuliaVision/BonsaiRunner/src/BonsaiRunner.jl:283), [KV growth](../../../JuliaVision/BonsaiRunner/src/BonsaiRunner.jl:351), [step/prefill](../../../JuliaVision/BonsaiRunner/src/BonsaiRunner.jl:937) | Quantized K/V plus scales and recurrent arrays are session-owned. Growth waits idle, copies all layers into replacement buffers, rebuilds step and clears prefill plans. Per-token host input is two GPURefs; greedy path currently synchronizes the whole backend before a 4-byte read. | Resize the same session arrays, keep quantization/block layout valid and let dependencies retire old storage. Recompile only capacity-dependent kernels. Array(best) waits for its writer, not unrelated device work. Test both sides of each page boundary, mixed prefill/decode, two sessions sharing weights, deterministic tokens and GC/close memory recovery. DNN-10 is necessary but does not validate quantized-cache layout. |
+| [Bonsai session](../../../JuliaVision/BonsaiRunner/src/BonsaiRunner.jl:283), [KV growth](../../../JuliaVision/BonsaiRunner/src/BonsaiRunner.jl:351), [step/prefill](../../../JuliaVision/BonsaiRunner/src/BonsaiRunner.jl:937) | Quantized K/V plus scales and recurrent arrays are session-owned. Growth waits idle, copies all layers into replacement buffers, rebuilds step and clears prefill plans. Per-token host input is two GPURefs; greedy path currently synchronizes the whole backend before a 4-byte read. | Resize the same session arrays, keep quantization/block layout valid and let dependencies retire old storage. Recompile only capacity-dependent kernels. Readback of the graph result waits for its captured writer, not unrelated device work; explicitly eager results retain Array(best). Test both sides of each page boundary, mixed prefill/decode, two sessions sharing weights, deterministic tokens and GC/close memory recovery. DNN-10 is necessary but does not validate quantized-cache layout. |
 | [Editor composition](../../../VideoEditor/src/gpugraph.jl:1664), [layer plan](../../../VideoEditor/src/gpugraph.jl:1524) | Caches structural graphs, updates per-frame parameters, runs one composition then unconditionally synchronizes the backend before a callback. Source shape must be known before building the chain. | Keep structural caching; use device-owned sources/outputs, graph temporaries and stores. A consuming Mantle graph gets resource edges; a host callback/read waits only for its output. Test CPU/GPU sources, recurrent model output, four layers, premultiplied crop/alpha and resolution changes. Retain waits at genuinely foreign consumers until an explicit fence/lease contract exists. |
 | [Editor decode ring](../../../VideoEditor/src/gpustream.jl:433), [eviction/close](../../../VideoEditor/src/gpustream.jl:493) | Direct vk_context and VideoDecode session; GOP feed/reordering state; unsafe_free! and synchronize prevent in-flight plane reuse. A bounded ring keeps current/prefetched GOPs; abandoned feed has parser/session state. | Device-explicit decoder boundary; decoded planes, session and DPB slots are resources with access tokens. free! retires plane creator holds; don't reuse a DPB slot while downstream work reads it. Test seek/reseek, B-frame display order, abandoned feeds, concurrent conversion, bounded resident bytes and close with work in flight. Codec conformance remains in the video package. |
 | [Editor GL preview](../../../VideoEditor/src/glbridge.jl:234) | Imports Vulkan memory fds into GL, double-buffers, switches the actual GL context through GLMakie. Cross-driver/context synchronization is real integration work. | Preferred all-Mantle preview uses a Window and normal edges. Retaining GL preview requires an explicit external-image acquire/release fence protocol and OS-specific handles. Ordinary vendor-array withview does not implement GL interop. Do not delete the bridge or synchronization on the assumption that one process implies one memory/queue domain. |
@@ -51,17 +52,17 @@ DNN module emit retains its exporter lowering, but threads an explicit target
 through every operation and allocates scratch on the graph owner:
 
 ```julia
-function emit_module!(target, graph, model, input, output)
-    tmp = MantleArray(graph, Float32, model.hidden_shape...)
-    dispatch!(target, model.first, (tmp, input, model.weights), length(tmp))
-    dispatch!(target, model.second, (output, tmp), length(output))
+function emit_module!(target, model, input, output)
+    tmp = MantleArray(target, Float32, model.hidden_shape...; scratch=true)
+    dispatch!(target, model.first, (tmp, input, model.weights), launchrange(tmp))
+    dispatch!(target, model.second, (output, tmp), launchrange(output))
     output
 end
 # Recurrent/KV state and outputs shared across graphs live on dev.
 g = Graph(dev)
 body = Group(g, "model step")
-emit_module!(body, g, module_a, input, intermediate)
-emit_module!(body, g, module_b, intermediate, output)
+emit_module!(body, module_a, input, intermediate)
+emit_module!(body, module_b, intermediate, output)
 repeat!(body, iterations)
 ```
 
@@ -103,14 +104,40 @@ precision and quantization, decoder conformance/DPB reuse and GL handoff. These
 must not be relabelled as passed by host-only tests or suite parsing.
 
 
-## Additional RT source finding
+## RT source refresh (2026-10-30)
 
-Hikari's rt-pipeline.jl:530–575 constructs VPClosesthitTyped{Material} tuples,
-assigns zero-based logical slots and caches programs in a global IdDict.
-The earlier statement that material types are never hit groups was wrong.
-execution-contracts.md §7 preserves that native path alongside typed shading
-queues and moves program caching to Mantle core. The same file's alpha-test
-comment at lines 155–161 explicitly says its initial HW RT shortcut treats alpha
-textures as opaque. Do not carry that wrong rendering behavior into the target
-or use it as the numerical reference: qualify alpha/media/light semantics and
-select the query/filter path when the native candidate does not implement them.
+The older Hikari rt-pipeline.jl / VPClosesthitTyped / _VP_RT_PIPELINES observations
+are historical. Fetched Hikari 407f9b2 and Makie 42e6355fb now use query/wavefront
+tracing; Mantle 3e9943f removes the old RT pipeline and provides shared query_record/
+query_transparent over Vulkan/Metal verbs. Do not restore that deleted consumer
+pipeline or claim its old alpha shortcut is current behavior. Preserve typed lobe/
+cut-set specialization and use current alpha/transparent-shadow tests as gates.
+Future programmable hit tables remain a distinct capability profile.
+
+Metal's native opaque complete-result call is an optimization to preserve. Shared
+core must choose its eligibility/cost from full query requirements; the adapter
+reports native/compiler facts and encodes the selected operation. It must not
+become a second renderer/traversal policy or skip alpha/procedural work. No new
+runtime/native qualification was run during this source refresh.
+
+## Reconciled target API (2026-10-29)
+
+The source observations/baseline evidence above retain their original scope.
+Target entry points now follow api.md: arrays own one Mantle Device and may be
+referenced by many graph nodes. Ordinary eager methods keep their Julia signatures. A recorded library helper
+accepts Graph/Group and emits call!(target,known_function,...) or raw node primitives;
+ordinary array/KA operations remain eager.
+No array adaptation or recording-device wrapper supplies group membership.
+Persistent default and explicit scratch=true lifetime remain separate. Base.length/
+size are the only logical queries; graph recipes use prepared GPU size metadata,
+and device resize! is inferred. Retained recipes rebuild candidate commands and
+workspace after shape-domain growth. Native/consumer gates remain open.
+
+## Shared-layer use-case follow-up
+
+The selected-source review in ../review-2026-10-29/use-case-review.json records
+UC-01–08 / F115–F122: portable operation/result contracts, exporter lifetime maps,
+request/replay lifecycle, sparse/matrix-free composites, frame-consistent capture,
+realistic control costs, paged KV and external AD boundaries. Existing baseline
+passes remain evidence in their original scope; these obligations do not restart
+consumer ports or claim a runtime failure. No new suite/MWE family is introduced.

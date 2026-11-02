@@ -1,1521 +1,284 @@
-# Normative execution/failure/retirement rules: execution-contracts.md.
-# A successful prefix survives later failure; native enqueue errors poison the
-# failure domain. GPU tokens alone never retire presentation resources.
-# Arrays that change, pending changes, acceleration structures, particles:
-# pseudocode.
-#
-# Not runnable. Four parts:
-#   A. the user-facing API (application code, Makie recipes, Hikari scenes);
-#   B. core internals;
-#   C. the verbs a device type implements for it;
-#   D. the consumers built on A: Raycore's software TLAS, Hikari, RayMakie.
-# This file owns array storage, resize!, stores, pending changes and their
-# application, dependents, and acceleration structures. internals.jl owns the
-# rest (graphs, compile, record, run, ordering, memory, holds) and points here.
-#
-# Rules:
-# - Arrays are fixed until their first resize!, or resizable from creation
-#   with `capacity = n`, a reserve like sizehint!. Pointer and size reach
-#   recorded work through the array's cell. Only what a plan recorded by value
-#   recompiles it.
-# - Changes (resize!, setindex!, copyto!, copy!, TLAS changes) update the host
-#   view at the call and stay pending on the resource until the next
-#   submission that touches it, which applies them in front of its own work.
-# - "Kernel launch" means any launch of GPU work: traces count.
-# - TLAS: host-known counts build exactly; device-written totals build over
-#   capacity with mask-0 records past the total. Storage has a doubling capacity that
-#   never halves, capped at the device's maxInstanceCount; a plan's build or
-#   refit is a BuildRecording; Metal reads the count from a cell; Vulkan's
-#   indirect build is not used.
-# - A TLAS total past maxInstanceCount throws at the call.
-# - A GPURef holds a value, never an array. attribute(a, i) reads one value or
-#   one per element (D.3). The scene rectangle is applied in the vertex stage (D.3).
-# - A when! flag is a Bool; one launch or draw per when!.
-# - Groups are values and places in the order: Group(g or group, name).
-# - One array type: a view carries its own offset, dims and strides.
-# - Arrays can be read-only (`readonly = true`).
-# - A GPURef is one slot in device memory.
-# - length(a) and `capacity` follow Julia's array API.
-# - Arrays are evicted under pressure (internals.jl section 9).
-# - A run that writes an array pends the updates of the structures built from
-#   it (its readers, B.2).
-#
-# Facts this rests on:
-# Driver versions and timings below are historical experiment evidence, not
-# substitutes for querying enabled caps on the device being used. Existing
-# results and their scope are indexed in experiments/review-2026-10-20/evidence-index.md.
-# - Inactive instance = BLAS reference 0; invisible, still counted in instance
-#   ids; active <-> inactive needs a full build, not an update; an update may
-#   not change the instance count (vkdocs chapters/accelstructures.adoc:255-300,
-#   169-175). An inactive triangle has a NaN first vertex coordinate (same
-#   place). An update must keep the geometry count, flags, type, vertex format,
-#   maxVertex, index type and transform presence of the last build; which
-#   BLAS an instance references is not among them
-#   (chapters/commonvalidity/build_acceleration_structure_common.adoc:121-200).
-# - Acceleration structure storage must not be a sparse-residency buffer
-#   (resources.adoc:8748-8750, VUID-VkAccelerationStructureCreateInfoKHR-buffer-03615).
-# - A build records the source and destination AS handles
-#   (accelstructures.adoc:764-769).
-# - accelerationStructureIndirectBuild: false on RADV 26.2.3 and NVIDIA 595.99,
-#   true on AMD's Windows driver 26.7.1 (vulkaninfo). Metal reads the
-#   instance count from a buffer:
-#   MTL4IndirectInstanceAccelerationStructureDescriptor.instanceCountBuffer /
-#   maxInstanceCount (MTL4AccelerationStructure.h:591-627, macOS SDK; Metal.jl
-#   lib/mtl/libmtl.jl:3591-3597). MTL4 queues take residency sets
-#   (MTL4CommandQueue.h:317-349).
-# - sparseResidencyBuffer: true on RADV, NVIDIA, AMD Windows, lavapipe; sparse
-#   address space (a device-wide total, resources.adoc:103-112) 128 TiB RADV,
-#   1 TiB NVIDIA, about 128 TiB AMD Windows, 2 GiB lavapipe. Sparse pages are
-#   bound at VkMemoryRequirements::alignment granularity (sparsemem.adoc:203-206).
-#   Metal placement-sparse buffers validated on the M5.
-# - Shaders can take a TLAS as a 64-bit address (OpConvertUToAccelerationStructureKHR,
-#   SPV_KHR_ray_query; mentioned in vkdocs proposals/VK_EXT_mutable_descriptor_type.adoc:121).
-#   Lava binds a descriptor (Lava compiler/spirv/rayquery.jl:47,66-67).
-#   Core selects address access when caps(dev).accelbyaddress is enabled;
-#   otherwise descriptors are handle dependents and must be replaced/retired
-#   safely (execution-contracts.md sections 7 and 11).
-# - Descriptors may be written while a command buffer using the set is
-#   pending only if that buffer does not use them (descriptorsets.adoc:768-807).
-# - A kernel that reads a cell directly instead of its argument slot pays about
-#   195-220 ns per small dependent dispatch on RADV and NVIDIA.
-# Measured on an AMD Radeon 8060S (Windows driver 26.7.1) and an RTX 3070
-# Laptop (NVIDIA 595.91.07), GPU timestamps.
-# N active instances, capacity C, inactive past N, prefer-fast-trace:
-# - Build time grows with C. N=100000: exact 1.08 ms AMD / 0.74 ms NVIDIA;
-#   C=2N 1.41 / 0.84, C=4N 1.94 / 1.20, C=16N 5.41 / 3.42 ms. N=1, C=131072:
-#   341 vs 12 µs AMD, 256 vs 33 µs NVIDIA.
-# - Refit: AMD independent of C (N=100000: 256-264 µs at every C); NVIDIA
-#   grows with C (166 µs exact, 243 at 2N, 393 at 4N, 1295 at 16N).
-# - Compacted size padded/exact: AMD 1.02 (2N), 1.06 (4N), 1.29 (16N);
-#   NVIDIA 1.8, 3.5, 14: NVIDIA keeps the inactive instances in the structure.
-# - Count read from memory (AMD Windows, indirect build, maximum C): cheaper
-#   than padding, slower than exact; N=100000: 1.08 ms exact, 1.17 ms at 2N,
-#   1.25 at 4N, 1.94 at 16N.
-# - Sparse binding: page 64 KiB on both. vkQueueBindSparse returns after
-#   15-18 µs AMD, 90-96 µs NVIDIA; bound (fence) after 144 / 230 µs for one
-#   page, 278 / 263 µs for 256, 1.86 / 0.83 ms for 4096 (256 MiB). Device
-#   address unchanged, contents correct, never-bound pages read zeros.
-# - One vkQueueSubmit costs 23.5-24 µs of host time on both: 1000 submissions
-#   of one 16-byte update take 24 ms; one submission of all 1000 updates
-#   completes after 152 µs AMD, 77 µs NVIDIA.
-# - Traversal (1M ray queries, the same rays through an exact and a
-#   padded TLAS): padding costs nothing measurable, up to C=16N and N=100,
-#   C=131072 (padded/exact within -1.3%..+1.7% NVIDIA, -0.5%..+0.5% AMD).
-#   Every ray hits the same instance in both: no inactive instance is hit.
+# Arrays, growth and acceleration structures: target design sketch.
+# app_* names are omitted consumer operations/kernels.
+# Not executable. Public signatures: api.md; full protocols: execution-contracts.md.
+# internals.jl owns graph/region compilation, command DAGs, locks and submission.
 
-# ══ A. User-facing API ════════════════════════════════════════════════════════
-
-# ── Arrays ────────────────────────────────────────────────────────────────────
-
-pos = MantleArray(dev, rand(Point3f, 1000))     # fixed: launches over it are direct
-# Changes update the host view at the call and are applied in front of the
-# next submission that touches the array (a run, an eager call, a host read).
-resize!(pos, 5000)                              # the first resize! makes it resizable (B.5)
-pos[1:3] = newpoints                            # a store; lengths must match, as in Base
-copyto!(pos, newdata)                           # a store
-copy!(pos, newdata)                             # Base.copy!: resized to length(newdata) (old contents not kept), then stored
-trim!(pos)                                      # unmaps a reserve's pages beyond the size; nothing else does
-length(pos)                                     # the requested length: a number, nothing waits (B.3)
-
-# In a graph launches name the array, not a count.
+# A. Public use: explicit operation targets are independent of storage lifetime.
+dev = Device()
 g = Graph(dev)
-dispatch!(g, advect!, (pos, vel, dt), launchrange(pos))
-draw!(g, target, pointshader, (pos, colors, cam), launchrange(pos))
-run!(g)
-copy!(pos, rand(Point3f, 3000)); run!(g)        # the run applies the change and copies the new length
+positions = MantleArray(g, zeros(Float32, 3, 1024)) # initialized persistent state
+velocity = MantleArray(dev, zeros(Float32, 3, 1024))
+workspace = MantleArray(g, Float32, 1024; scratch=true)
+# Persistent construction initializes once; explicit fill!/copy nodes run per replay.
+# Scratch data construction instead initializes each execution of its owning region.
+dispatch!(g, app_advance!, (positions, velocity), launchrange(positions))
 
-# A length a kernel decides needs no capacity: the kernel writes within the
-# array's current storage, bounds-checked unless @inbounds.
-# `capacity = n` only reserves room up front, like sizehint!, so a kernel can
-# write that many without a resize.
-alive = MantleArray(dev, Point3f, 0; capacity = 1_000_000)
-dispatch!(g, spawnkill!, (alive, lengthof(alive), pos), launchrange(pos))
-length(alive)                                   # the real length: waits for the kernel that writes it and
-                                                #   reads the cell back; here, during the declaration of the graph
-                                                #   that writes it (no run has written it yet), it throws
+# Persistent leaves can be named by another graph with no payload/size copy.
+consumer = Graph(dev)
+checksum = MantleArray(consumer, zeros(Float32, 1))
+dispatch!(consumer, app_checksum_kernel!, (checksum, positions), 1)
+# Consumer's node retains the SAME positions root after free!(g).
+# Using workspace in consumer rejects its scratch lifetime escape before mutation.
 
-# ── Acceleration structures ───────────────────────────────────────────────────
-#
-# One core type for hardware and software ray tracing. TLAS(dev) picks the
-# hardware path where the device has it; `hardware = false` forces software.
-
-blas = BLAS(dev, vertices, faces)               # vertices::MantleArray{Point3f,1}, faces::MantleArray{TriangleFace{UInt32},1}
-tlas = TLAS(dev; raytypes = 1)                                # storage sized for 64 instances, doubling, capped at the device's
-                                                #   maxInstanceCount; host-known counts build exactly (B.8);
-                                                #   pends a Build of zero instances, so it is never traced unbuilt
-
-h  = push!(tlas, blas, transform)               # one instance (transform::Mat4f)
-r1 = push!(tlas, blas, transforms)              # a range, one instance per element (transforms::MantleArray{Mat4f,1})
-r2 = push!(tlas, marker, positions;             # a range computed on the device from positions (meshscatter);
-           scale = sizes, rotation = rotations) #   positions: an array; sizes, rotations: arrays or one value
-tlas[h] = newtransform                          # a store into the range's source: a refit
-visible!(tlas, r2, false)                       # mask 0 in the range's records: a refit
-delete!(tlas, r1)                               # pending: its slot is freed, a build follows
-build!(tlas)                                    # pending: a full build, applied by the next use
-
-# Per-run work inside a graph: an operation like any other.
-build!(g, tlas)                                 # Build() every run; a kernel-written total does not need it:
-                                                #   refits stay legal (B.8)
-refit!(g, tlas)                                 # Update() every run; changes of the active set pend a build
-trace!(g, pipeline, tlas, (film, cam), (w, h))  # ray tracing pipeline
-dispatch!(g, shade!, (tlas, film), (w, h))      # ray queries in a compute kernel
-
-# Drawn attributes: plain device arrays, mutated in place; one argument type
-# for one value and one per element.
-pos   = MantleArray(dev, points)
-color = MantleArray(dev, [RGBAf(1, 0, 0, 1)])                        # one value for every point
-copy!(color, fill(RGBAf(0, 0, 1, 1), length(points)))                # now one per point: a resize and a store
-# Another array object for an attribute is a new group of draws for the plot (D.3).
-# In a shader: attribute(color, i) == color[min(i, length(color))] (1-based)
-
-# Per-instance data in portable shaders: decoded customindex is the range's one-based slot (stable
-# for the range's life); the instance's index within its range is
-# RayHit.instanceid - rangeoffset(tlas, slot), read from the TLAS range table.
-# Raw native KI indices stay zero-based; core decodes portable RayHit (§7).
-
-# ── Textures ──────────────────────────────────────────────────────────────────
-
-atlas = Image(dev, RGBA{N0f8}, 1024, 1024)      # its texture-table index is given on its first use by a shader
-resize!(atlas, 2048, 2048)                      # a new image under a new index, texels kept where the sizes overlap (B.9)
-
-# ══ B. Core internals ═════════════════════════════════════════════════════════
-
-# ── B.1 Storage ───────────────────────────────────────────────────────────────
-
-struct Region                           # a pool region: fixed arrays, small resizable ones, AS storage
-    block::Block; offset::Int; bytes::Int
+# GPU size has one query API, and one standard mutation API.
+function publish_count!(active, count)
+    if KI.get_global_id().x == 1
+        resize!(active, count[1])
+    end
+    nothing
 end
-mutable struct Reserve{N}               # address space with pages mapped as the array grows
-    const native::N                     # sparse VkBuffer (SPARSE_BINDING|SPARSE_RESIDENCY),
-                                        # placement-sparse MTLBuffer, cuMemAddressReserve/hipMemAddressReserve
-    const bytes::Int
-    mapped::Int                         # bytes with pages behind them (host view, B.4)
-    pages::Vector{PageRun}
-end
-struct Committed                        # a pool region with room to grow (doubling)
-    region::Region
-end
-struct Released end                     # after the last hold (internals.jl section 10)
-struct Unplaced end                     # a graph transient before compile assigns an arena slice
-struct ArenaSlice
-    arena::Arena; offset::Int; bytes::Int # owned by the plan's arena tenancy, never freed as an array region
-end
+active = MantleArray(g, Int32, 0; capacity=1024)
+# app_compact! is an illustrative application graph builder; its implementation
+# uses flags/scan/checked scatter then publishes resize!(active, selected_count).
+# length(active) inside a following kernel is the prepared live count.
+# launchrange(active) is launch geometry, not a second metadata-query API.
 
-# Where a resizable array goes, by dispatch on what the device has and how big
-# the array is. Decided by the submitter that applies a Resize (B.4 step 1),
-# from the storage at that point of the sequence, never at the call. The
-# first resize! keeps the array where it is if the new size
-# fits (the region becomes Committed in place: only a cell write). Beyond its
-# storage, a large array on a device with sparse residency moves into a
-# reserve, where later growth maps pages and the address stays; any other
-# array moves into a pool region of twice the need, and each later doubling
-# is a move (B.6). A sparse page is VkMemoryRequirements::alignment of the
-# sparse buffer (64 KiB on AMD Windows and NVIDIA, measured above). One bind
-# costs 0.15-0.25 ms before the submission that uses the pages (measured
-# above), so a reserve maps at least twice what it had: an array growing by
-# one element per run binds O(log n) times. An array created with
-# `capacity = n` is resizable from the start and placed at creation
-# for n elements: Committed storage, or a reserve where outgrow picks one.
-growth(dev, r::Region, need)   = need <= sizeof(r) ? Adopt() : outgrow(caps(dev), need, Val(caps(dev).sparseresidency))
-growth(dev, s::Committed, need) = need <= sizeof(s.region) ? InPlace() : outgrow(caps(dev), need, Val(caps(dev).sparseresidency))
-growth(dev, s::Reserve, need)   = need <= s.mapped ? InPlace() :
-                                  need <= s.bytes  ? MapPages(s, min(s.bytes, max(need, 2 * s.mapped))) :
-                                                     outgrow(caps(dev), need, Val(caps(dev).sparseresidency))
-growth(dev, s::Evicted, need)   = RestoreTo(need)    # restored into storage of the new size (internals.jl section 9)
-outgrow(c, need, ::Val{true}) = need >= sparsethreshold(c) && fitsreserve(c, need) ? MoveTo(ReservePlan(reservesize(c, need))) :
-                                                             MoveTo(CommittedPlan(2 * need))
-outgrow(c, need, ::Val{false})  = MoveTo(CommittedPlan(2 * need))
-# Core's policy from the device's facts; a device type reports the facts
-# (c.sparsepage, c.sparseaddressspace, a total for the whole device) and
-# decides nothing:
-sparsethreshold(c; pages = 4) = pages * c.sparsepage   # smaller arrays double in the pool; the number is to be measured
-reservelimit(c) = rounddown(min(c.maxalloc, c.sparseaddressspace ÷ 16), c.sparsepage)
-reservesize(c, need) = min(checkednextpow2(checkedmul(4, need)), reservelimit(c))
-# Initial bounded core heuristic: at most 1/16 of total sparse address space
-# per reserve, also within the conservative native allocation bound. Aggregate
-# virtual reservations are admitted by the pool; native reserve failure can
-# select committed storage before mutation. Arithmetic is checked. This default
-# is measurable policy, never a device-specific growth algorithm.
-# A need beyond reservelimit (lavapipe's 2 GiB of sparse address space) moves
-# into Committed storage instead: a reserve is never smaller than the need.
-fitsreserve(c, need) = need <= reservelimit(c)
-# Acceleration structures never live in a reserve (VUID-03615): B.8.
-
-# ── B.2 Array state ───────────────────────────────────────────────────────────
-
+# B. Logical array state plus canonical allocation ownership.
+# Ordinary Mantle views share this logical state; independent imported headers
+# can share allocation_owner/payload synchronization without merging dimensions.
 mutable struct ArrayState <: Resource
-    storage::Union{Region,Reserve,Committed,Evicted,Released,Unplaced,ArenaSlice}   # device storage as applied; graph placement at compile
-                                                 #   changes it (B.4); Evicted under pressure (internals.jl section 9)
-    dims::NTuple                                 # the requested dims: length(a) for a host-set length, and what a
-                                                 #   call's checks use under the locks; the GPU's are in the cell. A
-                                                 #   kernel-written length is read from the cell: length(a)
-                                                 #   waits for its writer, and throws during the declaration of the
-                                                 #   graph that writes it
-    resizable::Bool                              # set at creation when a capacity is given, else by the first
-                                                 #   resize! call (B.7); never cleared
-    lengthsource::Union{HostLength,DeviceLength} # DeviceLength from the first launch with lengthof(a) (B.7); never cleared
-    capacity::Int                                # the current reserve in elements: `capacity = n` at creation, like
-                                                 #   sizehint! for any array, 0 without one; raised to what
-                                                 #   the new storage holds when growth moves it (commit!, B.5)
-    const source::Union{Nothing,AbstractArray}   # the caller's host array for `readonly = true`, else nothing:
-                                                 #   isreadonly(st); Mantle's write methods throw at the call
-                                                 #   (checkwritable, B.5); a restore uploads from it (internals.jl section 9)
-    cell::Union{Cell,NoCell}                      # fixed graph transients have NoCell; device arrays always have a Cell
-    const pool::Pool                             # its device's pool: device(st), pool(st), nextseq!(st)
-    const sync::SyncState                   # protects everything here, and the pending changes; has `freed` (B.10)
-    const holds::Threads.Atomic{Int}             # the creator, each graph naming it, each composite holding it
-    const composites::Threads.Atomic{Int}        # the holds of composites (a TLAS or BLAS range)
-    const dependents::Dict{WeakPlan,Dependence}  # every plan that names it (B.6)
-    readers::ReaderSet                           # composites built from it (B.8); an immutable snapshot
+    storage::Storage                  # Region/Committed/Reserve/Evicted/Imported/etc.
+    requested_dims::Tuple
+    applied_dims::Tuple
+    capacity::Int                     # logical-root element units; back before descriptor publication
+    lengthsource::LengthSource        # HostLength / DeviceLength
+    resizable::Bool
+    cell::CellStorage                 # Cell, or plan-owned fixed scratch metadata
+    lifetime::Lifetime                # Persistent / RunLocal; runtime property
+    scratch_owner::WeakRef            # owning Graph/run, not a different lifetime per Group
+    hostsource::Union{Nothing,AbstractArray}
+    allocation_owner::AllocationOwner # canonical payload identity/byte bounds + physical owner
+    sync::SyncState                   # canonical payload synchronization for data aliases
+    holds::HoldCount
+    dependents::Dependents
+    readers::ReaderSet                # immutable counted composite backreferences
 end
-# A fresh graph transient starts Unplaced/NoCell. Compile assigns ArenaSlice;
-# compiled plans retain their own placements, so replacing this field never
-# alters an older plan. A first resize marks direct-count dependencies stale;
-# the replacement compile prepares its Cell before binding/recording. Later
-# resizes fitting the placed size use the cell. Device-array graph aliases
-# share the original device storage/Cell and never become arena allocations.
-# Dropping an ArenaSlice/Unplaced array state releases metadata (and any Cell),
-# not arena backing bytes: only plan tenancy/release owns those. This is the
-# same MantleArray/ArrayState with runtime storage properties, no role type.
-# Readers: the composites built from the array, counted per reader (a TLAS
-# with two ranges over it counts twice; delete! removes one): a TLAS or BLAS,
-# a screen (a redraw mark). The snapshot is replaced under the
-# array's lock, never changed in place, so a run iterates it without a lock
-# (internals.jl pendreaders_locked!) and a change can check under its locks that the
-# snapshot it locked by is still current (B.4).
-#
-# Views (GPUArrays' derive) refer to this state with a static offset, dims and
-# strides. A view is the same MantleArray type as its parent (no role
-# parameter): the offset, dims and strides are the view's own fields (`a.view`,
-# `nothing` for a root array, whose size is the state's), and every check
-# whether an array is a view reads them. Shrinking never unmaps an array's
-# pages (they go back when the array is freed, or by trim!(a)), and no
-# pressure step unmaps them, so a view never reads unmapped memory unless
-# trim! was called.
-isview(a::MantleArray) = a.view !== nothing
-# The length a call checks under the locks: the requested one (`dims` above),
-# never the cell, since reading a kernel-written length back would wait under
-# a lock. A view's own dims are static.
-requestedlength(a::MantleArray) = isview(a) ? prod(a.view.dims) : prod(a.state.dims)
 
-# ── B.3 Changes: requests, scheduled ──────────────────────────────────────────
+struct Imported
+    allocation::ExternalAllocationHold
+    offset::Int
+    bytes::Int
+end
+# Root registry key includes native allocation/context/generation; never pointer alone.
+# Imported subviews share root+sync and retain allocation owner, not a mutable header.
+# Imports cannot be moved/evicted/arena-aliased or resized beyond this bound.
 
-# A change is a step in the ordered stream, like any operation. The call only
-# enqueues it: under the resource's lock it appends the request, with a
-# device-wide sequence number, to the resource's pending list and updates
-# what the host reports (length(a) of a host-set length is the requested
-# length: a number; nothing physical changes). Nothing of the array is
-# allocated, nothing is copied to the device, and it never starts over for
-# memory (a changed member snapshot only makes it lock again, lockexpanded);
-# a store's only work is one copy of its data into an upload region (below).
-# New storage, pages, the copy of the contents, the cell write and the
-# retirement of the old storage are done by the submission that applies the
-# change (B.4), in sequence order, after every earlier access.
+# Fixed scratch has plan-owned placement. Resizable scratch uses plan-owned metadata
+# whose address/initial dims are reset at run entry. It must be initialized on each
+# executable path before content reads; metadata cannot retain a prior run's result.
+# Graph replacement retires old placement but never copies/resets persistent roots.
+# Unplaced/evicted capacity is a backing requirement, not resident-byte accounting.
+# Placement/restore backs it before publishing descriptors; virtual spare is excluded.
+
+# C. Scheduled host changes.
 abstract type Change end
-# a[r] = data, copyto!, copy!: the data is copied once, at the call, from the
-# caller's memory into an upload region: host-visible system memory acquired
-# for this store before the lock. The region is not the array's storage, so
-# nothing about the array changes at the call; it is retired with the token
-# of the submission that applies the store (or with none when a later store
-# covering it replaces it, or the array is released).
-# `span` is the byte range in the parent (through a view's static offset).
-# Which storage it lands in is decided when it is applied: the storage the
-# array has at that point of the sequence, so a store pended before a resize
-# is copied along with the old contents, and one pended after it writes the
-# new storage.
-struct Store{R<:Resource,S} <: Change
-    seq::UInt64; target::R; upload::Region; span::S
+struct Resize{E} <: Change
+    sequence::UInt64
+    target::ArrayState
+    dims::Tuple
+    keepbytes::E                     # known bytes or prepared min(old live bytes, new bytes)
 end
-# span is a UnitRange{Int} of parent bytes when contiguous; otherwise a
-# destination mapping (view = ArrayView(...), indices = r) for a scatter.
-# GPURef stores use the same Store, with the slot as target. A strided store
-# never qualifies for inline/copy-by-span; the prefix uses a scatter kernel.
-# resize!: the requested dims, and how many bytes of the old contents to keep
-# (Keep: up to the smaller size; Discard, copy!'s case: none).
-struct Resize <: Change
-    seq::UInt64; target::ArrayState; dims::NTuple; keep::Int
+struct Store{M} <: Change
+    sequence::UInt64
+    target::ArrayState
+    upload::Region
+    mapping::M                        # actual root coverage, not strided bounding span
 end
-struct BuildAccel <: Change            # a TLAS or BLAS: Build() or Update(); the capacity is the applier's (B.8)
-    seq::UInt64; target::AccelStructure; mode::Union{Build,Update}
+struct BuildAccel <: Change
+    sequence::UInt64
+    target::AccelStructure
+    mode::BuildMode
+    geometry_version::GeometryVersion
 end
-# The steps an applying submission emits for these (never pended themselves):
-# BindPages (pages of a reserve, through the sparse queue), MoveStorage (a
-# copy into new storage), CellWrite (address and size), MoveAccel (a
-# structure's new storage and scratch), Restore (an evicted array's host copy
-# back).
-uses(c::Change) = ((c.target, Write()),)
-uses(c::BuildAccel) = ((c.target, Write()), ((m, Read()) for m in allmembers(c.target))...)   # transitively: a BLAS's geometry too
 
-# Pending changes coalesce per target, not per record (a TLAS, its records and
-# its range table share one record): a later Store covering an earlier one
-# into the same target, consecutive Resizes into one (the last dims, the
-# smallest keep), the BuildAccels of one structure into one (a Build if any of
-# them is a Build, else an Update; B.8). A
-# merged change takes the latest sequence number of those it merged, so it is
-# applied after everything pended before any of them. Nothing merges across a
-# change a running plan holds for after its run (takepending): a store pended
-# before a held Resize and one pended after it stay two stores. A hold drop due after a
-# change is applied is not a change: it waits in the record's `deferred`
-# list, so coalescing never drops it.
-# Coverage means actual destination elements, not a strided mapping's bounding
-# interval: a store into odd elements cannot replace a pending even-element
-# store. Scatter upload size is the packed data size, not that interval.
-pendone!(c::Change) = coalesce!(syncstate(c.target).pending, c)   # under the target's lock
-nextseq!(x) = Threads.atomic_add!(device(x).changeseq, UInt64(1))   # x: anything on a device (an array state, a structure, a GPURef)
+function Base.resize!(a::MantleArray, dims::Tuple)
+    checkroot(a)                      # view resize rejects
+    validate_dimensions(a, dims)      # checked product/ranges, readonly and imported bound
+    queuechange!(a.state) do snapshot
+        Resize(nextsequence(a), a.state, dims, preservedbytes(snapshot, dims, sizeof(eltype(a))))
+    end
+    a
+end
+Base.resize!(a::MantleArray, n::Integer) =
+    resize!(a, growlast(requested_or_explicit_shape(a), n))
+# preservedbytes retains an ordered prepared extent when the old live size is GPU
+# written; it must not compute a host Int from stale requested_dims. The shared
+# copy recipe prepares the old descriptor and copies min(old live bytes,new bytes)
+# before publishing new dimensions/address. Known extents use native copies;
+# unknown extents use the core bounded copy kernel or a qualified native equivalent.
+# requested_or_explicit_shape never downloads a GPU count under a lock.
+# Host lengthsource queries of device metadata use an explicit snapshot path.
 
-# The one shape of every change: resize!, stores, push! and delete!
-# on a structure. One locked call over `uses`, expanded to the readers of the
-# arrays it changes (their structures get pending builds in the same call)
-# and to the members of the composites it changes; `apply` checks what must
-# hold at the call (not freed, in bounds), updates what the host reports, and
-# returns the requests. It cannot fail for lack of memory: it allocates
-# nothing. A composite written this way is correct by construction: its
-# consumers write `apply`, nothing else.
-function change!(apply, uses)
-    lockexpanded(uses; readers = true) do recs, x
-        cs = apply()
-        foreach(pendone!, cs)
-        foreach(c -> notifyplans!(c.target), cs)     # into the inboxes of the plans naming each changed resource
-        Pended()                                     #   (and naming composites built from it; internals.jl section 8)
+# Device lowering of Base.resize! is compiler-owned. A shape-writer effect:
+#   validates 0 <= product(dims) <= capacity;
+#   updates that invocation's local descriptor;
+#   writes only size metadata through its inferred SizeWrite capability;
+#   leaves storage address unchanged, allocates nothing, and is not a grid barrier.
+# Other invocations see entry descriptors. Following dispatches see prepared dims.
+# The capability is ABI-internal, not a public metadata-pointer argument.
+# A view cannot publish root dimensions. Checked invalid sizes signal an error;
+# @inbounds does not grant an allocation. No clamping or implicit retry is added.
+
+function prepare_changes!(uses)
+    snapshots = locked_snapshots(uses)  # include pending/member/namer versions
+    prepared = Prepared()
+    for snapshot in snapshots
+        prepare_storage_and_commands!(prepared, snapshot)  # outside record locks
+    end
+    prepared
+end
+
+function apply_changes!(target, uses, prepared, ownrecipe)
+    lockexpandeduses(uses) do locked
+        validatesnapshots(locked, prepared) || return Again()
+        # Missing or outgrown prepared capacity returns before claim.
+        steps = ordered_steps(locked, prepared)
+        commands = lower_core_recipes(steps, ownrecipe)
+        # Commands have explicit IDs/effects/predecessors, including:
+        # copy old contents -> metadata publish -> descriptor prepare -> consumers;
+        # flags -> scan -> checked scatter -> count publish;
+        # geometry preparation -> native build -> query/trace.
+        validate_command_dag!(commands)
+        token = submitprepared!(target, commands, reservedpublication(locked))
+        commit_accepted_changes!(locked, steps, token)
+        token
     end
 end
+# Claim/accept/publication failure rules are execution-contracts §2.
+# No live root/membership reads occur inside native record/emit functions.
+# An accepted sparse bind followed by later preparation failure is tracked/retired;
+# it cannot be rolled back or released as unused tokenless storage.
 
-# ── B.4 Applying changes: what the submitter does ────────────────────────────
+# Store source is copied once at the host call into upload memory before locking.
+# Under root locks validate known destination mapping against the ordered state.
+# GPU-written logical bounds defer the full-range check to prepared GPU metadata.
+# Only known-valid extents can select inline emitstore!/copy; otherwise use the
+# shared checked-store recipe (not stale requested_dims or an unchecked scatter).
+# Consecutive compatible resizes coalesce; stores coalesce only by actual coverage
+# and never across a held resize/deferred version. Changes keep device-wide order.
 
-# Every submitter (a run's stage, an eager call, a host read, a vendor view,
-# an eviction copy) applies the pending changes of what it locks, in front of
-# its own work, in the same submission. Two steps:
-#
-# 1. Before acquiring storage, capture each record's pending list and storage
-#    under that record's lock, briefly. Copy mutable vectors: reading a Vector
-#    concurrently with push!/coalesce! is not a snapshot. Release the locks,
-#    then prepare!(prepared, snapshots) decides what applying them needs and allocates it, one item
-#    at a time into `prepared`: for a Resize, growth(dev, storage at that
-#    point, requested size) (B.5) gives InPlace, Adopt, pages to map, or new
-#    storage; for an evicted array (or a composite member evicted before it
-#    became one), restore storage of its requested size; for a BuildAccel of a
-#    structure whose total outgrew its capacity, the doubled AS storage,
-#    scratch, records and range-table storage (B.8). This is where pressure
-#    happens (acquire!: unmapping, eviction, waiting for retirement), and
-#    the only place a change allocates storage (a Store's upload region was
-#    acquired at its call, B.3).
-# 2. Under the locks, submitwith! takes the pending changes in sequence order
-#    and emits them with the prepared items (take!). If an item is missing or
-#    no longer fits (a change arrived, was coalesced or was applied between the
-#    two steps), it returns Again before emitting anything; the submitter
-#    releases what it prepared and starts over from step 1. Whatever was
-#    prepared and not taken goes back.
-#
-# The stale mark for plans that compile decided something about a length
-# (a direct launch over it, a temporary sized for it, a TLAS total) is set at
-# the call (marklength!, marktotal!): a flag, the next run recompiles, nothing
-# physical happens. Everything else about staleness is decided when the
-# change is applied:
-#   - a move of storage a plan recorded by handle marks the parts of that plan
-#     that recorded it (they are recorded again before they are next
-#     submitted, after the prefix that moved the storage, like a marked
-#     BuildRecording); nothing recompiles. A plan between its stages
-#     gets the same: its later stage re-records, and the move, ordered after
-#     its earlier stages' accesses, has copied what they wrote;
-#   - a change the applying plan cannot follow mid-run (a direct launch over
-#     the array's length, a temporary sized for fewer elements: compile
-#     decided those) is left pending by that plan's own later stages, with
-#     every later change on the same target (it is applied after the run, and
-#     the next run recompiles), and makes any other submitter return WaitFor:
-#     it waits outside its locks until that run has submitted its last stage,
-#     and starts over (from inside a host function it throws: it could wait
-#     in a cycle; inhostfunction below; another run past its stage 1 leaves
-#     the change for after its own run instead). Plans not between their
-#     stages are only marked stale (B.6).
-# A run past its stage 1 never waits: a change another plan's run cannot
-# follow is left, with every later change on its target, for after this run,
-# like the changes it cannot follow itself. Every other submitter (stage 1 of
-# a run included) gets WaitFor and waits outside its locks: a run's stage 1
-# outside its graph lock too (internals.jl run!(g)).
-function takepending(records, self)
-    cs = sort!([c for r in records for c in r.pending]; by = c -> c.seq)
-    held = heldforrun(cs, self)                      # changes self's later stages leave for after the run
-    w = waitingfor(setdiff(cs, held), self)          # other plans between stages that a change would stale
-    if w !== nothing
-        pastfirst(self) || return w                  # WaitFor
-        held = [held; blockedfrom(setdiff(cs, held), w)]   # those changes and the later ones on their targets
-    end
-    taken = setdiff(cs, held)
-    return Taken(taken, unique(syncstate(c.target) for c in taken))
-end
-pastfirst(::Nothing) = false                         # not a run
-pastfirst(pl::Plan) = between(pl)                    # set once stage 1 has submitted
+# D. Capacity and dependencies.
+# Capacity plans physical backing and maximum scratch. It never determines the
+# kernel-visible live length. Host growth:
+#  - within bound: metadata write only;
+#  - qualified QueueMapping reserve: acquire pages before locks, bind with token;
+#  - otherwise: prepare larger committed region, ordered copy, metadata publish.
+# CUDA/HIP host VMM alone does not provide queue-ordered mapping; initially committed.
+# Trim commits reduce backed capacity; coherent GPU metadata checkpoints precede
+# host page-binding preparation where needed. Restore publishes HostCopy.shape,
+# not stale requested_dims, before later ordered Resize steps. Unknown GPU logical
+# store bounds use a prepared checked kernel, never unconditional inline/copy.
+# Shrink retains capacity; explicit array trimming is deferred, not initial public API.
+# Handle moves rerecord only dependent parts; selection-domain growth re-emits the
+# retained RegionNode recipe, candidate command sequence and scratch together.
 
-# The full submit path, shared by all submitters (under the locks of
-# `records`, after step 1). The submitter's own work is recorded already:
-# `ownparts` are recorded parts and BuildRecordings. The changes go into a small
-# command buffer in front of it, in the same submission. Only after the
-# changes are emitted are the parts' command buffers taken: a marked
-# BuildRecording, or a part that recorded a handle a move just replaced, is
-# recorded again then (B.8, B.6). The changes' uses are added to the
-# submitter's: the submission waits for every earlier access the changes
-# conflict with, on any queue, and records the changes' writes as the
-# resources' last writes, so later readers on other queues wait for them, and
-# storage a move replaced is retired with this token only after every earlier
-# reader was waited for. `ownwaits` lets a run pass the waits it computed for
-# all its segments before recording any of them. `target` is the channel a
-# run picked for the segment's kind, or an eager submission's EagerQueue, whose
-# channel is picked here from the waits, before anything is recorded
-# (internals.jl section 8). Returns Again or WaitFor
-# (nothing emitted), or the token and the records whose changes it applied (a
-# later segment of a run that touches one of them waits on this token;
-# internals.jl section 6).
-function submitwith!(target, records, prepared, ownuses, ownparts; self = nothing, restores = true,
-                     ownwaits = waitsfor(ownuses), present = nothing)
-    taken = takepending(records, self)
-    done(taken) || return taken                      # WaitFor
-    steps = Step[]
-    for r in records                                 # evicted resources first (internals.jl section 9); a run
-        restores || break                            #   looks only when its plan is marked for restore
-        s = restoresteps(state(r), state(r).storage, takeor(prepared, state(r)))
-        done(s) || return Again()
-        append!(steps, s)
-    end
-    for c in taken.changes
-        s = stepsof(c, prepared)                     # B.5, B.8: the steps, with the prepared items taken
-        done(s) || return Again()                    # missing or too small: nothing emitted, start over
-        append!(steps, s)
-    end
-    validateown(ownparts, storageafter(steps)) || return NeedDestination()
-    # OwnWork carries a pure validator, true by default. Staged Array uses it
-    # to reject a raced growth before any mapping or token is claimed.
-    # NeedDestination escapes submitapplying to its caller; retrying there
-    # with the same staging allocation would never make progress.
-    changeuses = [u for c in taken.changes for u in uses(c)]
-    waits = [waitsfor([changeuses; ownuses...]); ownwaits]
-    ch = pick(target, waits)                         # internals.jl section 8
-    binds = Token[]
-    foreach(s -> bindnow!(ch, s, binds), steps)      # pages first, through the sparse queue
-    pre = Builder(device(ch), queuekind(ch))
-    foreach(s -> emitstep!(pre, s), steps)           # copies, stores, cell writes, record writes, builds, with barriers
-    cmds = recordown(ownparts, ch, steps)            # internals.jl section 6; an eager call packs here
-    # The steps' accesses, and a non-run submitter's own (`ownuses`; a run
-    # passes none: its accesses are its segments' tokens), are recorded as
-    # eager accesses on the SyncStates and put into the inboxes of the other
-    # plans naming those resources (internals.jl section 8). Their waits cover
-    # the naming plans' last runs, read under those plans' sync locks.
-    token = submit!(ch, [finish(pre); cmds...]; eager = [changeuses; ownuses...], self,
-                    waits = [waits; binds], present)
-    # No fallible work after acceptance: pre-reserve commit/retirement/notification
-    # capacity before claim. A bookkeeping failure poisons/quarantines the domain.
-    commit!(taken, steps, token)   # remove from the records; update the storage they changed; retire
-    return token, taken.records    #   replaced storage with token; deferred hold drops with (token,)
-end
-# A change of a structure pends the Updates of the structures over it (its
-# readers) in the same change! call, which locks them (readers = true), with
-# later sequence numbers: a BLAS Build is followed by its TLASes' Updates, in
-# one submission if it takes both, and otherwise the TLAS's Update waits, when
-# some submission takes it, for the BLAS's write through the sync states
-# (a build reads its members).
-# Pages are bound on the sparse channel through sparsesubmit! (internals.jl
-# section 9, the device type's bindpages!), marked bound so a retried
-# submission does not bind them again, and the submission waits on the tokens.
-bindnow!(ch, s::Step, binds) = nothing
-bindnow!(ch, s::BindPages, binds) = s.bound === nothing &&
-    push!(binds, (s.bound = sparsesubmit!(sparsechannel(ch), bindpages!, (s.reserve, s.pages), ((s.target, Write()),))))
-
-# Plans a change makes stale and that are between their stages (other than
-# `self`): the plans among the dependents of the array (B.6) for which the change is one
-# compile decided (stales(d, c)); handle dependences re-record instead (above).
-# `between` is set and cleared under the record locks a run takes (internals.jl
-# section 6): a plan not yet past its stage 1 sees the stale mark and starts
-# over, so a submitter never waits on a run that is itself waiting.
-function waitingfor(cs, self)
-    w = Plan[]
-    for c in cs, (wp, d) in alldependents(c.target)
-        p = wp.plan.value
-        p === nothing || p === self || !between(p) || !stales(d, c) || push!(w, p)
-    end
-    isempty(w) ? nothing : WaitFor(unique(w))
-end
-alldependents(t::AccelStructure) = t.dependents  # plans sized from it (Raycore's build temporaries, D.1)
-alldependents(st::ArrayState) = st.dependents
-# Outside every lock. A task inside a host function of a running graph
-# throws before waiting on anything: it could wait for its own run. Not
-# detected: a task a host function starts and waits for; like two host
-# functions that run each other's graphs, that can deadlock (internals.jl
-# lockgraph). No fairness: the submitter starts over when the run ends and
-# may wait again if the plan's next run got past its first stage first.
-function waitforruns(w::WaitFor)
-    inhostfunction(current_task()) && throw(ArgumentError(
-        "used an array a running graph cannot follow mid-run (a direct launch over its length, a temporary sized for it); use it before or after the run"))
-    for p in w.plans
-        lock(() -> while between(p); wait(p.runend) end, p.runend)
-    end
-end
-waitforruns(::Again) = nothing
-# Whether the task is running a host function of some graph (runhost! sets
-# g.hostcaller around the call). A declaration or compile holding a graph's
-# lock is not "inside a run". A scan of the device's graphs, held weakly;
-# current_task() is used only for this check, as in lockgraph.
-inhostfunction(task) = any(g -> (@atomic g.hostcaller) === task, livegraphs(REGISTRY))
-
-# Composite resources: a TLAS reaches its range sources and BLASes through
-# cells, a BLAS its geometry, so no plan names
-# the members. Every submitter locks with lockexpanded instead of locked: it
-# reads each composite's member snapshot (immutable, replaced on every change)
-# transitively (TLAS → BLASes and range arrays, BLAS → geometry), locks the union in id order, checks under the locks that every
-# snapshot it read is still current (===), and starts over otherwise. A record
-# a composite owns brings the composite's members too: a TLAS's records and
-# range table share its record, so Array(t.records), which locks that record
-# and so takes t's pending build, has t's members locked as well (their
-# pending stores are applied first, and the build's reads of them are
-# recorded under their locks). A change (change!, readers = true) also
-# expands an array to its readers' snapshot, transitively (array → BLAS →
-# TLAS), since it pends their builds.
-# `f` gets the records and the expansion `x`; expand(x, uses) rewrites the
-# uses of composites, transitively:
-#   a read of a composite         → a read of it and of each member;
-#   a build or refit (BuildUse)   → a write of the structure, a read of each member;
-#   AnyWrite (compile's placeholder for unknown members) → dropped:
-#     the expanded uses name the members.
-# Submitters that are not runs (eager calls, host reads, vendor views,
-# eviction copies, and the steps a run applies) wait for and record the
-# expanded list. Runs use neither: between graphs, a plan naming a composite
-# is among its members' namingplans (through their readers snapshots), so a
-# simulation step writing an array a frame's TLAS is built from waits for
-# the frame's last run and puts the array into the frame's inbox, and the
-# frame's next run waits for the step (internals.jl section 8). Runs expand
-# only what their inbox names (internals.jl lockstage).
-function lockexpanded(f, uses; readers = false, lent = false)
-    while true
-        x = expansion(uses; readers)                  # each snapshot read under its own lock, briefly
-        r = locked(records(uses, x); lent) do               # the uses' records and every member's, by id
-            current(x) || return Again()
-            Done(f(records(uses, x), x))
-        end
-        done(r) && return r.value
-    end
+# Internal SizedBy(f,a) evaluates requested host shape or the GPU size's CAPACITY.
+# It is not a public alternate size query. Algorithm scratch is explicitly scratch.
+function reduction_recipe!(sink, result, input)
+    partial = scratch_array(sink, eltype(result), SizedBy(nblocks, input))
+    emit_partials!(sink, partial, input)
+    # Partial's live blocks are derived from the same input descriptor, not assumed
+    # to equal its capacity. Unwritten scratch tail cannot participate in reduction.
+    emit_finish!(sink, result, partial, input)
 end
 
-# ── B.5 resize! and stores ────────────────────────────────────────────────────
-
-Base.resize!(a::MantleArray, n::Integer) = resize!(a, growlast(size(a), n))   # sets the last dimension
-function Base.resize!(a::MantleArray{T,N,<:Device}, dims::Dims{N}) where {T,N}
-    isview(a) && throw(ArgumentError("resize! of a view; resize its parent"))   # the array's own fields (B.2)
-    resizeto!(a, dims, Keep())
+# E. Stable compaction without a public size handle.
+function compact_recipe!(sink, active, particles, predicate)
+    flags = scratch_array(sink, UInt32, SizedBy(identity, particles))
+    offsets = scratch_array(sink, UInt32, SizedBy(identity, particles))
+    emit_flags!(sink, flags, particles, predicate)
+    emit_exclusive_scan!(sink, offsets, flags, particles)
+    # Capacity-bounded descriptor is an internal view of the SAME root allocation.
+    # It cannot escape this producer or become another hazard/ownership identity.
+    producer = checked_producer_descriptor(sink, active)
+    emit_scatter!(sink, producer, particles, flags, offsets)
+    emit_count_publish!(sink, active, offsets, flags, particles) # one item, even input=0
 end
+# emit_count_publish!'s body uses resize!, whose inferred effect schedules the
+# subsequent descriptor preparation. Consumers depend on both payload and size.
+# A GPU-produced local view is ordinary view(parent, GPU bounds) INSIDE a kernel.
+# Multi-kernel consumers retain their bounds in descriptors/slots; no integer-only
+# host helper is allowed to recover them by a hidden scalar readback.
 
-# A read-only array throws at the call of each of Mantle's write
-# methods (resize!, stores, copyto!, copy!), before anything is acquired or
-# locked: the flag is set at creation and never changes. dispatch! throws the
-# same at the call, eager or declared, from the per-argument access it derives
-# at declaration (argument_usage).
-checkwritable(a::MantleArray) = isreadonly(a.state) &&
-    throw(ArgumentError("a write to a read-only array (created with readonly = true)"))
-
-# The request, and nothing else. The length change reaches the array's
-# readers in the same locked call (their structures get a pending Build; the
-# capacity a new total needs is the applier's, B.8). Plans with a direct
-# launch over the array's length or a temporary sized for fewer elements are
-# marked stale here (that depends only on the requested length, B.6); whether
-# the storage moves is decided when it is applied.
-function resizeto!(a::MantleArray, dims, contents)
-    checkwritable(a)                                  # a read-only array throws
-    st = a.state
-    change!(((st, Write()),)) do
-        usable(a)                                     # freed through the creator's handle: throws, under the lock
-        checkinstances(st, prod(dims))                # a TLAS total past maxInstanceCount throws (B.8)
-        keep = keepbytes(contents, st, dims)          # Keep: the smaller of the requested sizes so far and now
-        st.dims = dims                                # what length(a) reports
-        st.resizable = true
-        marklength!(st, dims)                         # B.6
-        Change[Resize(nextseq!(st), st, dims, keep); (lengthchange(t, st) for t in st.readers)...]
-    end
-    return a
+# F. Acceleration structures: one core owner, with geometry-version dependencies.
+# Logical scene state has no ray-type stride. Table/layout-specific native binding
+# views have independent accepted-version tracking and share logical geometry.
+# Per-geometry/instance selectors are ordinary resources, never native SBT offsets.
+mutable struct TLAS{D<:Device} <: AccelStructure
+    device::D
+    hardware::Union{Nothing,Bool}      # explicit requirement, not a per-backend policy
+    members::MemberSet
+    ranges::RangeTable
+    geometry_versions::GeometryVersions
+    bindings::NativeBindings          # layout/path-keyed native objects and versions
+    sync::SyncState
+    holds::HoldCount
 end
-# A graph array: the same within the size its slot was placed for; beyond it,
-# the graph recompiles at its next run (under the graph lock).
+# Each native binding owns storage, builtcount, accepted-build versions and dirty
+# sources; it stores scratch REQUIREMENTS, not a permanently reserved workspace.
+# Core places build/refit workspace by operation liveness in its arena/temp pool.
+# Logical scene versions are not cleared by one binding's build.
+# Keys/geometry/instance counts stay runtime values; no graph-sized type parameters.
+# BLAS has the same version/lifetime policy over its geometry, no backend copy.
+# A run-local composite explicitly opts into scratch lifetime if it names scratch
+# members. Persistent composites reject scratch members before taking holds.
+# Structures/ranges retain the geometry allocation and record dependencies.
 
-# Applying a Resize (step 1 of B.4 decided and allocated, step 2 emits), by
-# dispatch on (storage at that point, prepared growth):
-stepsof(c::Resize, p) = resizesteps(c.target, storageat(c, p), takeor(p, c), c)   # storageat: after the earlier steps
-resizesteps(st, s, ::Missing, c) = Again()            # not prepared: start over
-resizesteps(st, s::Union{Region,Reserve,Committed}, ::InPlace, c) = (CellWrite(st, address(s), c.dims),)
-resizesteps(st, r::Region, ::Adopt, c) = (Becomes(st, Committed(r)), CellWrite(st, address(r), c.dims))
-resizesteps(st, s::Reserve, g::MappedPages, c) = (BindPages(st, s, g, nothing), CellWrite(st, address(s), c.dims))
-resizesteps(st, old, new::Reserve, c) =               # a move into a new reserve binds its pages first
-    (BindPages(st, new, firstpages(new), nothing), MoveStorage(st, old, new, min(c.keep, sizeof(old))),
-     CellWrite(st, address(new), c.dims))
-resizesteps(st, old, new::Committed, c) =
-    (MoveStorage(st, old, new, min(c.keep, sizeof(old))), CellWrite(st, address(new), c.dims))
-resizesteps(st, ev::Evicted, new::RestoreStorage, c) =   # restored into storage of the requested size
-    (restorecopies(st, new, min(c.keep, sizeof(ev.host)))..., CellWrite(st, address(new.storage), c.dims))
-# A move is a copy, a write of the array: applied, it waits for every earlier
-# access on any queue (B.4), and the old storage is retired with its token;
-# commit! raises the array's capacity to what the new storage holds (B.2). A
-# step whose storage no longer fits (prepared for a size another change
-# replaced) is Again. A move of storage a plan recorded by handle marks that
-# plan's parts for recording again (B.4, B.6).
-
-# Stores: the data is copied once at the call, into the store's upload
-# region; the rest is the applier's: a small store is written inline by the
-# applying submission from the region's bytes (emitstore!: vkCmdUpdateBuffer
-# up to the device type's limit, caps facts c.inlinestore and c.inlinealign;
-# Vulkan: 65536 bytes at 4-byte offsets and sizes,
-# chapters/clears.adoc:800-805), a large one by a copy from the region. A store into an array with readers pends their Update
-# (a store into a TLAS source is a refit; into a BLAS's index array a Build,
-# B.8). A store into an evicted array is applied after its restore, which the
-# applier does first (B.4 step 1). A store through a view with non-unit
-# strides is not one byte range: the packed elements go into the upload
-# region like any store, and the applying submission scatters them (a copy
-# kernel in its prefix, in sequence like any step). A store mutates the
-# array it names: no second copy of the array, no double buffering.
-function Base.setindex!(a::MantleArray{T,N,<:Device}, data, r::AbstractRange) where {T,N}
-    length(data) == length(r) || throw(DimensionMismatch("setindex! of $(length(data)) elements into $(length(r))"))
-    checkwritable(a)                                  # a read-only array throws, before the region is acquired
-    st = a.state
-    span = storedestination(a, r)                    # parent byte span, or (view, indices) for a scatter
-    up = acquireupload!(pool(st), length(data) * sizeof(T))   # packed data, not a strided destination's bounding span
-    ok = false
-    try
-        copyto!(hostview(up, T), vec(data))   # the one copy, from the caller's memory; a conversion error returns the region
-        change!(((st, Write()),)) do
-            usable(a)                                 # freed through the creator's handle: throws, under the lock
-            checkindex(Bool, 1:requestedlength(a), r) || throw(BoundsError(a, r))   # the requested length (B.2)
-            Change[Store(nextseq!(st), st, up, span); (update(t, st) for t in st.readers)...]
-        end
-        ok = true
-    finally
-        ok || retire!(pool(st), up, ())               # a throw under the lock: the region goes back
-    end
-    return a
+function pendupdate_locked!(structure, source, version)
+    update_source_version!(structure.geometry_versions, source, version)
+    mark_binding_views_stale!(structure.bindings, source, version)
+    notify_naming_plans!(structure)
 end
-stepsof(c::Store, p) = storesteps(c, storageat(c, p), inlineor(c, caps(device(c.target))))
-storesteps(c, s, ::Inline) = (InlineStore(c.target, s, c.span, c.upload),)   # emitstore! from the region's bytes
-storesteps(c, s, ::Staged) = (StagedStore(c.target, s, c.span, c.upload),)   # a copy from the region
-# inlineor: Inline() within c.inlinestore at c.inlinealign offsets and sizes, else Staged();
-# a mapped/strided destination selects Scatter() and a copy kernel instead.
-# takeor(p, key): the item prepared for key, or Missing(). It is only taken
-# (kept from release!) when commit! runs: an Again or a throw before the
-# submission leaves every item to the submitter's release!.
-Base.copyto!(a::MantleArray{T,1,<:Device}, data::AbstractVector) where {T} = (a[1:length(data)] = data; a)
-# copy! with a new length: the Resize (old contents not kept) and the Store,
-# one after the other in the sequence, pended in one locked call so nothing
-# can come between them.
-# The same length is a plain store: nothing about the array's size changes,
-# so no Resize, no `resizable`, and no stale mark for plans that launch
-# directly over it (RayMakie's setattribute! calls copy! on every update).
-# A view keeps its length (copyintoview!, below).
-function Base.copy!(a::MantleArray{T,1,<:Device}, data::AbstractVector) where {T}
-    isview(a) && return copyintoview!(a, data)       # the array's own fields (B.2)
-    checkwritable(a)                                 # a read-only array throws, before the region is acquired
-    st = a.state
-    n = length(data)
-    up = acquireupload!(pool(st), sizeof(T) * n)     # before any lock
-    ok = false
-    try
-        copyto!(hostview(up, T), vec(data))   # the one copy; a conversion error returns the region
-        change!(((st, Write()),)) do
-            usable(a)
-            span = parentbytes(a, 1:n)
-            n == requestedlength(a) &&               # the requested length (B.2): no wait under the lock
-                return Change[Store(nextseq!(st), st, up, span); (update(t, st) for t in st.readers)...]
-            checkinstances(st, n)                    # a TLAS total past maxInstanceCount throws (B.8)
-            dims = (n,)
-            st.dims = dims
-            st.resizable = true
-            marklength!(st, dims)
-            Change[Resize(nextseq!(st), st, dims, 0); Store(nextseq!(st), st, up, span);
-                   (lengthchange(t, st) for t in st.readers)...]
-        end
-        ok = true
-    finally
-        ok || retire!(pool(st), up, ())
-    end
-    return a
+function build_accepted_locked!(structure, binding, required, count, token)
+    record_accepted_build!(binding, required, count, token)
+    remove_covered_dirty_versions!(binding.dirty, required)
 end
-copyintoview!(a, data) = length(a) == length(data) ? (a[1:length(data)] = data; a) :   # setindex! checks readonly
-    throw(ArgumentError("copy! of $(length(data)) elements into a view of $(length(a)); resize its parent"))
+# A graph writing geometry declares no manual refit just to avoid stale queries.
+# Core inserts an update at its first dependent read, even in the same segment.
+# Graph external writes publish transitive dirty versions per accepted prefix.
+# No blanket "this graph builds it somewhere" exclusion is legal.
+# A later failed build leaves the earlier write dirty for another consumer.
 
-# ── B.6 Dependents ────────────────────────────────────────────────────────────
+# Member changes:
+# source positions/vertices -> eligible Update;
+# count/topology/index changes -> Build under native rules;
+# hidden range -> mask zero; deleted range -> inactive (Build);
+# growth -> prepared storage/scratch replacement and token-safe retirement.
+# Host-known totals build exactly. GPU totals use capacity count with valid mask-zero
+# TLAS padding; BLAS padding uses degenerate geometry, never NaN activity toggles.
+# Every native Update preserves builtcount/activity/topology constraints.
+# Native exact-device-count alternatives require independent legality qualification.
 
-# Every plan that names an array registers in its dependents, so an eviction
-# can mark the plans that must restore it before their next run (internals.jl
-# section 9). A plan is made stale only where compile recorded something the
-# cell cannot update:
-struct Dependence
-    direct::Bool        # a direct launch or draw with its length (the array was fixed at compile)
-    handle::Bool        # its buffer handle in a command: an index-buffer bind, a build input, a
-                        #   Vulkan buffer copy (re-recorded instead of recompiled)
-    sizedfor::Int       # a temporary or a selection sized for this many elements (typemax if none)
-    compiled::Tuple     # the storage and length compile saw
+function emit_build_recipe!(sink, structure, binding, required)
+    offsets = emit_offsets!(sink, structure, binding, required)
+    records = emit_records!(sink, structure, binding, required; after=exits(offsets))
+    build = emit_native_build!(sink, frozen_build(binding, required);
+                               after=exits(records))
+    build
 end
+# These are core command-DAG entries. Backend emitbuild! receives immutable prepared
+# state and complete dependencies. It cannot compute membership, dirtiness or order.
+# Native representation-only builds on disabled iterations must be proven valid/
+# observationally equivalent; logical data writes still obey the condition.
 
-# Marked where it is known, under the array's lock:
-#   at the call (marklength!): a requested length marks plans sized for fewer
-#   elements and plans with a direct count (the first resize! of a fixed
-#   array, which compile launched over directly);
-#   when a move is applied (B.4): plans that recorded the storage's handle get
-#   the parts that recorded it marked for recording again, not a recompile;
-#   the stale flag is not set for them.
-# Marking stale sets the plan's stale flag and the graph's recompile flag,
-# through weak references; a collected plan or graph is skipped. Compile reads
-# the requested state: an array is resizable from its creation with a
-# capacity or from its first resize! call (the `resizable` flag, a host fact
-# set at creation or at the call), whether or not the Resize
-# has been applied, so a plan compiled after the call launches over it
-# indirectly; a handle compile records is the storage applied so far, and a
-# pending move re-records it when applied.
-function markstale!(w::WeakPlan)
-    pl = w.plan.value; pl === nothing && return
-    @atomic pl.stale = true
-    g = pl.graph.value; g === nothing || (@atomic g.recompile = true)
-end
+# G. Images and consumer composition.
+# Sampled/storage/subresource views retain canonical Image root identity. A native
+# generation has a fresh table entry on restore/resize; old entry/image retire with
+# every old use. Sampler weak interning and lifetime are independent from images.
+# See execution-contracts §§7/8/11/16 for formats, filters, feedback and resolves.
 
-# Registration, after compile and record, before the plan becomes the graph's
-# plan: under each dependency's lock, compare what compile saw with the state
-# now (storage identity, length, dims against sizedfor); if anything moved in
-# between, return Again and compile again. The structures the plan builds or
-# refits are locked too: their command lists change here, and mark! walks
-# them under the same lock. A plan unregisters itself when it is retired
-# (recompile!, release!), under the same locks, so the tables do not grow and
-# a retired plan is never marked again.
-# A dependence's `state` is an array state: matches compares it with what
-# compile resolved.
-# Registering adds the plan to the `namers` of every resource it names, with
-# its use from compile (internals.jl section 8; the members of the composites
-# it names reach it through their readers snapshots). A GPURef's slot is
-# such a resource like any other: addnamer! names it, and a store into
-# it is ordered against the plan's runs like any store. It puts the resources
-# it reads or writes that another plan names, or that have eager accesses,
-# members included, into its own inbox: its first run waits for their other
-# users like any later run. The sync locks of the plans naming those
-# resources come first (lock order), from a snapshot checked under them; a
-# plan registering or retiring meanwhile only makes the locking start over,
-# nothing recompiles. This is the one place that walks a composite's members
-# for ordering, at compile, not at run. unregister! does the reverse under
-# the same locks: it leaves the namers, adds its last-run tokens to the
-# `retired` list of every resource it named (members of the composites it
-# named included), and puts those another plan names into that plan's inbox,
-# so their next accesses wait for its last run and storage it used is
-# released only after it.
-function register!(pl::Plan)
-    while true
-        xs = expandeduses(pl)                        # what it names, and the members of its composites as reads
-        others = otherplans(pl, xs)                  # a snapshot: the plans naming any of them
-        r = lockplans([pl; others]) do
-          locked([dependencyrecords(pl); [syncstate(c.structure) for c in accelcommands(pl)];
-                  [syncstate(r) for (r, _) in xs]]) do
-            busy = transferwaits([syncstate(r) for (r, _) in xs], nothing)
-            isempty(busy) || return WaitForTransfers(busy)
-            expandeduses(pl) == xs || return Retry()           # a member was added meanwhile
-            otherplans(pl, xs) ⊆ others || return Retry()      # lock again with the new plan
-            all(d -> matches(d.state, d.dependence.compiled), pl.depends) || return Again()   # stale: recompile
-            foreach(((r, u),) -> addnamer!(syncstate(r), pl, u), nameduses(pl))   # direct names; snapshots replaced
-            foreach(((r, _),) -> shared(r, pl) && pushinbox!(pl, r), xs)
-            foreach(d -> (d.state.dependents[WeakPlan(pl)] = d.dependence), pl.depends)
-            foreach(c -> push!(c.structure.commands, c), accelcommands(pl))   # marked by later changes (B.8)
-            Registered()
-          end
-        end
-        retried(r) || return r                       # Registered or Again
-    end
-end
-retried(::Retry) = true
-retried(_) = false
-# Also a resource with pending changes: a store or a new TLAS's zero-instance
-# Build pended before this plan existed reached only the plans naming it then.
-shared(r, pl) = any(q -> q !== pl, namingplans(r)) || !isempty(eageraccesses(syncstate(r))) ||
-                !isempty(syncstate(r).pending)
-# A change of a composite's members (push!, delete!) changes no
-# plan. The member's readers snapshot is replaced at the call (B.8), so
-# from then on the plans naming the composite are among the member's
-# namingplans: the member's writers lock them and wait for their last runs.
-# Those plans read the new member only after the step applying the
-# composite's Build, which holds the sync locks of the member's writers
-# (internals.jl lockstage, expanded). A removed member keeps the composite as
-# a reader until the submission that removed it has passed (delete!, B.8).
+simulation = Graph(dev)
+state = MantleArray(simulation, zeros(Float32, 3, 1024))
+solver = Group(simulation, "timestep")
+solver_state = (state, velocity)
+# Application method emits nested Newton/Krylov/line-search regions through its
+# explicit operation targets. No backend-specific solver copies or graph partitioning.
+app_declare_solver!(solver, solver_state)
+repeat!(solver, 4)
 
-# A run checks the stale flag under its records' locks before it claims a
-# token (the mark is set under an array lock the run also takes) and returns
-# Again; run!(g) recompiles. A change a running plan cannot follow mid-run is
-# left for after the run by the plan's own later stages and makes every other
-# submitter wait until the run has submitted its last stage (B.4,
-# takepending): the call that pended it never waits. A plan that registers,
-# or starts running, after the change was pended finds its stale flag set
-# under the locks and recompiles first.
-
-
-# ── B.7 Lengths at compile ────────────────────────────────────────────────────
-
-# launchrange(a) puts a reference to the array into the node, not an Int; the
-# decision is made at compile from the storage then.
-launchrange(a::MantleArray) = LengthOf(a)
-extents(s, r::LengthOf) = extents(s, r, fixedness(r.array.state), r.array.state.lengthsource)
-extents(s, r::LengthOf, ::Fixed, ::HostLength) = (depend!(s, r.array; direct = true); Direct(length(r.array)))
-extents(s, r::LengthOf, _, _) = Indirect(Bound(r.array))       # the head (or a prepare node) writes the command
-fixedness(st) = st.resizable ? Resizable() : Fixed()          # (a field typed by state in real code)
-# lengthof(a) among a launch's arguments makes a's length kernel-written: the
-# call (a declaration or an eager launch) sets lengthsource to DeviceLength
-# under a's lock and marks the plans that launch over a directly, like a
-# resize! (B.6); launches over a use dynamic extents from then on (above).
-
-# Temporaries sized from an array: a size expression evaluated at compile.
-# Host length: twice the current length. Kernel-written length: the capacity.
-MantleArray(l::GraphDevice, T, s::SizedBy) = transient(l, T, s)   # s = SizedBy(nblocks, a)
-MantleArray(dev::Device, T, s::SizedBy) = MantleArray(dev, T, s.f(sizing(s.array, s.array.state.lengthsource)))
-
-# An array created from data uploads at the call: creation is not a change,
-# since no graph can name the array before it exists. The storage is
-# allocated, then the data is streamed from the caller's memory (an mmapped
-# file is a plain Array the caller passes) in chunks, each copied into
-# an upload region and written by one eager submission cut to the submission
-# budget, or written directly where the storage is host-visible. At most a
-# few chunks are in flight, so the host memory it needs is bounded by them,
-# not by the array. It returns once every chunk is submitted; the writes are
-# recorded on the array's sync state, so later uses wait for them. With
-# `readonly = true` the state also keeps a reference to `data`, no copy,
-# which a restore after eviction uploads from.
-function MantleArray(dev::Device, data::AbstractArray{T,N}) where {T,N}
-    a = MantleArray(dev, T, size(data)...)
-    for chunk in uploadchunks(dev, sizeof(data))      # byte ranges sized from caps(dev) and the budget
-        writechunk!(a, data, chunk)                   # host-visible storage: a direct copy; else upload region +
-    end                                               #   submitapplying (internals.jl section 11), region retired with its token
-    return a
-end
-placesize(s, x::SizedBy) = (n = sizing(x.array, x.array.state.lengthsource); depend!(s, x.array; sizedfor = n); x.f(n))
-sizing(a, ::HostLength) = 2 * length(a)
-sizing(a, ::DeviceLength) = a.state.capacity
-
-# Eager launches over a kernel-written length also use GPU-resolved extents
-# (native indirect or capacity predication):
-# one behaviour for the eager and the graph form.
-
-# Draws: vertex, index and instance counts are numbers or LengthOf
-# references; indirect draws from Bound slots unless the array is fixed, and
-# always for a when! draw (the count is multiplied by the Bool flag;
-# internals.jl section 2). A count of 0 draws nothing. Vertices are pulled by
-# address. An index buffer is bound by handle (a dependence with handle =
-# true).
-
-# Graph arrays: resize! within the size the slot was placed for is a pending
-# cell write; beyond it the graph recompiles at its next run (graph lock).
-# Window-sized arrays are placed for the window's capacity (the largest
-# monitor unless given); a window larger than that recompiles the graph too.
-# Window-sized images are created per swapchain generation at the window's
-# size on the same arena memory, which maps only the pages that size needs
-# (internals.jl section 7).
-
-# ── B.8 Acceleration structures ───────────────────────────────────────────────
-
-# One core type per level; a device type builds hardware structures, Raycore
-# software ones. Both levels are composites (B.4): they read their members
-# through cells, hold them (composite holds, internals.jl section 10) and are
-# their readers (B.2).
-abstract type AccelStructure end
-mutable struct TLAS{P} <: AccelStructure     # P: Hardware() or Software()
-    const device::Device
-    const path::P
-    slots::Vector{Union{Nothing,InstanceRange}}  # host side; a deleted range's slot is reused
-    members::MemberSet                       # immutable snapshot: sources, transform inputs, BLASes
-    const rangetable::MantleArray{RangeEntry,1}   # on the device; shares the TLAS's sync state
-    const records::MantleArray               # instance records (device type's record type); shares it too
-    const offsets::MantleArray{UInt32,1}     # range offsets, read by shaders for per-instance data
-    const kernels::RecordKernels             # the offsets and records kernels (below)
-    capacity::Int                            # instances the storage and scratch are sized for; builds use the count
-    builtcount::Int                          # the count of the last Build, -1 before the first; every Update carries it
-    appliedtotal::Int                        # the total as of the changes applied so far (commit!); what commands record
-    totalsource::Union{HostTotal,DeviceTotal} # DeviceTotal once a range's source has a kernel-written length (host view,
-                                             #   set by push!/delete!, which mark!); then builds are over the capacity
-    storage::AccelStorage                    # hardware: AS object on a pool Region; software: Raycore's arrays
-    scratch::Region                          # build scratch for `capacity`, replaced with it (not a graph transient)
-    const commands::WeakSet{BuildRecording}    # plans' builds and refits of it, marked by changes (below)
-    const dependents::Dict{WeakPlan,Dependence}   # plans sized from its capacity (D.1's temporaries; B.6)
-    const cell::Cell                         # AS address (Vulkan) or resource ID (Metal)
-    const countcell::Cell                    # native build count: exact host total, capacity for DeviceTotal; offsets prepare writes it
-    const sync::SyncState
-    const holds::Threads.Atomic{Int}
-end
-members(t::TLAS) = t.members.resources
-# The TLAS holds its own arrays (range table, records, offsets; the software
-# storage arrays) with composite holds, so none of them is ever evicted
-# (internals.jl section 9) and they are released with it. They are created
-# resizable (Committed, B.1): launches over them, Raycore's build kernels
-# among them, are indirect, so their growth with the capacity makes no plan
-# stale and never waits for a run (B.3).
-
-struct InstanceRange
-    blas::BLAS
-    source::MantleArray                      # transforms or positions; a single transform is a 1-element array
-    inputs::Tuple                            # scale, rotation: arrays or one value
-end
-# On the device a range names cells, not addresses: every array it reads has a
-# cell index. Slots are
-# stable for a range's life: decoded RayHit.customindex is the one-based slot.
-# RayHit.instanceid - offsets[slot] is one-based within the range (execution-contracts.md §7).
-struct RangeEntry
-    hitgroup::UInt32                         # logical 1-based group; native offset uses t.raytypes
-    blascell::UInt32
-    sourcecell::UInt32
-    inputcells::NTuple{2,UInt32}             # scale, rotation; 0 for "one value", in valueslots
-    valueslots::NTuple{2,Float32x4}
-    mask::UInt8                              # the instances' visibility mask: 0 hides them, a refit
-    active::Bool                             # false only for a deleted range's slot: inactive records, a Build
-end
-
-# Records: two kernels compiled when the TLAS is created (t.kernels; fixed
-# arguments: the range table, the offsets and the records, read through
-# their cells, so a move of the records does not stale them, and the cell
-# arena). One computes each slot's offset from the lengths in the source cells
-# (a prefix sum) and writes the native build count into countcell (capacity
-# for DeviceTotal, exact host total otherwise); one writes every
-# instance record (transform from the source and inputs, mask from the entry,
-# BLAS address or resource ID from the BLAS cell), and records with mask 0
-# from the device total up to the build count, so a count that ran ahead of
-# a source's cell builds no unwritten record. Both kernels read cells
-# directly (about 195-220 ns more than a slot read, once per build).
-#
-# Capacity is the applier's, like an array's storage: push!, delete! and a
-# source's resize! only pend a Build (and the range-table entry). The
-# submitter that applies the Build computes the total from the requested
-# state; if it outgrew the capacity, step 1 of B.4 allocated the doubled AS
-# storage, scratch, records and range-table storage (preparecapacity), and
-# the Build's steps start with the capacity steps (B.8 capacitysteps). Missing
-# or too small: Again, nothing emitted.
-#
-# The change prefix emits the BuildAccel changes of one structure coalesced
-# into one (B.3): a Build if any of them is a Build. A Build records its count
-# as builtcount and, when that count is new, marks the structure's commands,
-# so every Update command is recorded again with it (B.4: after this prefix).
-# An Update carries builtcount, never the current total, since an update must
-# keep the count of the last build (header); an Update before any Build is a
-# Build. The first prepare kernel's barrier is a global memory barrier after
-# everything the prefix wrote before it (cells, the range table, stored
-# source data); each later step has its own. The prepare kernels are the
-# structure's: the offsets and records kernels of a TLAS, the zero-area fill
-# of a BLAS over kernel-written lengths (none for other BLASes), the same
-# list current! records.
-stepsof(c::BuildAccel, p) = buildsteps(c, outgrown(c.target), takeor(p, c))
-buildsteps(c, ::Fits, _) = (BuildStep(c.target, effectivemode(c.target, c.mode)),)
-buildsteps(c, ::Outgrown, ::Missing) = Again()        # not prepared: start over
-buildsteps(c, ::Outgrown, grown) = (capacitysteps(c.target, grown)..., BuildStep(c.target, Build()))   # a new AS: a Build
-function emitstep!(b, st::BuildStep)
-    s = st.structure
-    after = emitprepared!(b, preparekernels(s), Deps((), barrier(PrefixWrites() => AnyRead())))
-    emitbuild!(b, nothing, compiledbuild(s, st.mode, buildcount!(s, st.mode)), after)
-end
-# emitprepared!(b, kernels, first): the first kernel with `first`, each later
-# one with a barrier after the one before it (the records kernel reads the
-# offsets the offsets kernel wrote). Returns the build's Deps: the barrier
-# after the last kernel, or `first` itself merged into the build's barrier
-# when there is no kernel (a BLAS with no kernel-written length), so the
-# barrier is never lost.
-function emitprepared!(b, kernels, first)
-    deps = first
-    for k in kernels
-        emitdispatch!(b, nothing, k, deps)
-        deps = Deps((), barrier(Write(k) => Read(Next())))
-    end
-    return merge(deps, Deps((), barrier(PrepareWrites() => BuildInput())))
-end
-effectivemode(t, ::Build) = Build()
-effectivemode(t, ::Update) = t.builtcount < 0 ? Build() : Update()   # nothing built yet: a refit is a Build
-# Under t's lock, held by the submitter. A new count marks t's commands, so
-# every Update command is recorded again with it after this prefix (B.4).
-function buildcount!(t, ::Build)
-    n = hostcount(buildcount(t))
-    n == t.builtcount || (t.builtcount = n; mark!(t))
-    return n
-end
-buildcount!(t, ::Update) = t.builtcount
-
-# The count a build or refit carries, by device type. Vulkan's direct build
-# takes it as a host value the driver records into the command. Vulkan's
-# indirect build reads it from memory but is not used, on any driver: RADV
-# 26.2.3 and NVIDIA 595 do not have it (accelerationStructureIndirectBuild =
-# false), and on AMD's Windows driver, which has it, it is slower than the
-# exact count because the driver builds for the maximum (measured in the
-# header). Metal reads it from a buffer (instanceCountBuffer). Storage sized
-# for `capacity` takes any count up to it
-# (vkdocs commonvalidity/build_acceleration_structure_nonindirect_common.adoc:13-17).
-buildcount(t::TLAS) = buildcount(t, countsource(t.device))
-buildcount(t::TLAS, ::CountFromMemory) = fromcell(t, t.totalsource)   # Metal
-fromcell(t, ::HostTotal) = FromCell(t.countcell)
-fromcell(t, ::DeviceTotal) = FromCell(t.countcell)   # prepare writes fixed capacity, not changing logical total
-buildcount(t::TLAS, ::CountRecorded) = recordedtotal(t, t.totalsource)   # Vulkan, below
-recordedtotal(t, ::HostTotal) = total(t)          # the host view, exact, no padding
-recordedtotal(t, ::DeviceTotal) = t.capacity      # a kernel writes the total: built over the capacity
-buildcount(b::BLAS) = primitives(b)    # the primitive count, host view (the geometry's capacity for a
-                                       #   kernel-written length, below); a BLAS is never counted from memory
-# hostcount(FromCell(_)) is the host view total(t) too: what builtcount keeps.
-# A total a kernel writes has no host value. Where the device reads the count
-# from memory (Metal) countcell carries capacity for DeviceTotal, just as
-# the recorded-count path does. This fixed count keeps Updates legal without
-# host readback or guessing whether a logical count changed. Such a TLAS is
-# built over `capacity`, with mask-0 records past the device total that
-# reference a valid BLAS (a reference of 0 would make them inactive): the
-# count stays the capacity and no record changes between active and
-# inactive, so a refit after the kernel changed the total is legal (the
-# padding measured in the header; the only padded case). A BLAS over arrays
-# whose length a kernel writes is built over the geometry's capacity
-# (maxVertex too, which an update must keep), with zero-area primitives past
-# the device length written by a prepare kernel in its BuildRecording (zero
-# area, not NaN: NaN would make them inactive). An update may change only
-# instance definitions, transforms and vertex positions
-# (chapters/accelstructures.adoc:159-170), so a run that writes a BLAS's
-# vertices pends an Update and one that writes its index array a Build.
-
-# Graph operations. A plan's build or refit of a TLAS or BLAS is a
-# BuildRecording: its own small command buffer, submitted inside the segment's
-# submission between the plan's command buffers. Its barrier (the node's,
-# from barriers!: a full memory barrier, since the members are not known at
-# compile; internals.jl section 4) is recorded with it, first. It records the
-# count (Vulkan) and the storage handle by value. Nothing is compared at run:
-# a change that alters what it recorded (a new count from push!, delete! or a
-# source's length; a MoveAccel; a Build that sets a new builtcount) marks the
-# structure's commands under the structure's lock, and the run records the
-# marked ones again, after the change prefix (B.4). So a change of the count
-# or the capacity never recompiles or re-records the plan. On Metal, which
-# reads the native build count from the cell, a changed host count still
-# marks Updates. A changed device logical total does not change builtcount.
-build!(g::Graph, t::AccelStructure) = declare!(g, BuildNode(t, Build()))
-refit!(g::Graph, t::AccelStructure) = declare!(g, BuildNode(t, Update()))
-# refit!(g, t) runs the records kernels and the Update (they are part of the
-# node); a refit before any build of t is a Build. A kernel-written total
-# needs no build! per run: refits stay legal (above).
-
-mutable struct BuildRecording{C}            # C: the device type's native command buffer
-    const structure::AccelStructure
-    const mode::Union{Build,Update}
-    const deps::Deps                         # the build node's barrier, recorded with it (the one barrier call site)
-    const kind::QueueKind                    # the segment's; a run submits it to its pick for the kind
-    marked::Bool                             # set by a change under the structure's lock; true until first recorded
-    cmd::Union{Nothing,C}                    # the device type's native command buffer, or nothing
-    recordedmode::Union{Build,Update}        # what it recorded: an Update before any Build records a Build
-    recordedcount::Int                       # what a Build recorded, for builtcount
-    lasttoken::Union{Nothing,Token}          # its last submission; the replaced buffer is retired with it
-end
-BuildRecording(s, mode, deps, ch) = BuildRecording(s, mode, deps, ch, true, nothing, mode, 0, nothing)
-mark!(t::AccelStructure) = foreach(c -> (c.marked = true), t.commands)   # under t's lock
-# Recorded again with the ordinary builder verbs: no verb of its own. It
-# records from the structure's state after the steps of the submission it
-# rides in (afterstate: the applied storage, scratch, capacity, total and
-# builtcount, with this submission's steps on top, before commit! makes them
-# the applied ones), never from the host view, which push! and delete! change
-# at their call. Under the structure's lock: every stage locks the SyncStates
-# of the structures its BuildRecordings build (lockstage; a set fixed per
-# plan), so a concurrent push! cannot change `marked` or the slots while it
-# records.
-function current!(c::BuildRecording, steps)
-    c.marked || return c.cmd
-    old = c.cmd
-    s = c.structure
-    st = afterstate(s, steps)
-    mode = c.recordedmode = effectivemode(st, c.mode)
-    c.recordedcount = commandcount(st, mode)
-    b = Builder(s.device, c.kind)            # command objects reserved by prepare! (B.4), so nothing here fails
-    # The node's barrier first, on the first prepare kernel (records kernels
-    # of a TLAS, the zero-area fill of a BLAS); each later step its own.
-    after = emitprepared!(b, preparekernels(s), c.deps)   # c.deps reaches the build if there is no kernel
-    emitbuild!(b, nothing, compiledbuild(st, mode, c.recordedcount), after)
-    c.cmd = finish(b)
-    c.marked = false
-    old === nothing || retire!(pool(s), old, (c.lasttoken,))
-    return c.cmd
-end
-commandcount(st, ::Build) = st.total          # the applied total (exact, or the capacity for a kernel-written one)
-commandcount(st, ::Update) = st.builtcount
-# At submit, under s's lock (internals.jl submitted!): a plan's own Build sets
-# builtcount, and a new count marks s's commands like a prefix Build does.
-built!(s, ::Build, c) = c.recordedcount == s.builtcount || (s.builtcount = c.recordedcount; mark!(s))
-built!(s, ::Update, c) = nothing
-# A refit requires the instance count and active set of the last build. Every
-# change of the active set (push!, delete!, a source's length) pends a
-# BuildAccel(Build()) and marks the structure's commands; the next submission
-# that touches the structure applies the Build (coalesced with any pending
-# Update into a Build), and the refit's command carries builtcount.
-
-# The instance limit: a TLAS total past the device's maxInstanceCount
-# (caps(dev).maxinstances) throws at the call that raises it: push!, a resize!
-# or copy! of a source (B.5). Checked
-# inside `apply`, under the TLAS's lock (change! locks an array's readers),
-# before anything is pended, so a throw
-# changes nothing. The total is the host view; the capacity doubles up to the
-# same limit (below).
-checkinstances(t::TLAS, total::Integer) = total <= caps(t.device).maxinstances ||
-    throw(ArgumentError("a TLAS total of $total instances is past the device's maxInstanceCount"))
-# A source array about to hold n elements: every TLAS over it, with its
-# ranges over the source counted at n.
-checkinstances(src::ArrayState, n) =
-    foreach(t -> checkinstances(t, totalwith(t, src, n)), tlasreaders(src))
-
-# A member's hold is taken under the member's record lock, inside the locked
-# call of the change that adds it (push!): the hold
-# and the composites count change together, so evictable, checked under the
-# same lock, never sees one without the other. A member evicted before it
-# became one is restored by the next submission that uses the composite (B.4
-# step 1 covers the composites' members), not here: the call allocates
-# nothing. Throws for a freed or released member (nothing changed yet: apply
-# calls it first).
-holdmember!(st::ArrayState) = (usable(st); addcompositehold!(st))   # internals.jl section 10
-holdmember!(x) = addhold!(x)        # a BLAS: never evicted
-
-# Changes, through change! (B.4): requests only. One locked call over the
-# TLAS (its range table and records share its record) and the range's
-# members: the member holds are taken under their locks (holdmember!, above),
-# the slot is assigned, the member snapshot and the arrays' reader snapshots
-# are replaced, and the range-table entry and a Build are pended. Nothing of
-# the TLAS is allocated: a new slot past the range table's size pends a Resize
-# of the table (an array like any other, its contents kept), and the capacity
-# a new total needs is the applier's (above). The entry's bytes go into an
-# upload region of one RangeEntry acquired before the lock. A throw
-# drops the holds taken so far and the region.
-function Base.push!(t::TLAS, blas::BLAS, source::MantleArray; scale = 1f0, rotation = nothing)
-    r = InstanceRange(blas, source, (scale, rotation))
-    uses = ((t, Write()), ((m, Read()) for m in holdsof(r))...)   # the range's arrays, the BLAS
-    up = acquireupload!(pool(t), sizeof(RangeEntry))
-    held = Any[]
-    ok = false
-    try
-        change!(uses) do
-            checkinstances(t, total(t) + instances(r))   # past maxInstanceCount: throws, nothing taken yet;
-                                                         #   instances(r): its source's requested length
-            for m in holdsof(r)                          # under each member's lock: the hold and the count together
-                holdmember!(m); push!(held, m)
-            end
-            slot = freeslot!(t)
-            t.slots[slot] = r
-            foreach(a -> addreader!(a, t), rangearrays(r))   # replaces each array's reader snapshot
-            t.members = MemberSet(t)
-            marktotal!(t)                                # plans sized from t's total (D.1; B.6)
-            mark!(t)                                     # its BuildRecordings record a new count
-            Change[entrychanges(t, slot, entry(t, slot), up)...;   # Resize of the range table if the slot is new, the entry's Store
-                   BuildAccel(nextseq!(t), t, Build())]
-        end
-        ok = true
-    finally
-        ok || (foreach(dropcompositehold!, held); retire!(pool(t), up, ()))
-    end
-    return r
-end
-
-function Base.delete!(t::TLAS, r::InstanceRange)
-    up = acquireupload!(pool(t), sizeof(RangeEntry))   # the inactive entry's bytes
-    ok = false
-    try
-        change!(((t, Write()), ((a, Read()) for a in rangearrays(r))...)) do
-            slot = findslot(t, r)                         # a range not in t (deleted already) throws here
-            t.slots[slot] = nothing
-            t.members = MemberSet(t)
-            marktotal!(t)
-            mark!(t)
-            # r's arrays keep t as a reader (one count each), and the holds on
-            # r's arrays and BLAS stay, until the submission that applies this
-            # build has passed: it writes the TLAS, so it waited for every earlier
-            # trace (B.4); after it nothing reaches them through t. Until then a
-            # write of r's arrays still waits for the plans naming t (internals.jl
-            # section 8). Dropped by sweep!, outside every lock.
-            defer!(t.sync, tokens -> (foreach(a -> dropafter!(a, tokens, st -> dropreader!(st, t)), rangearrays(r));
-                                      foreach(st -> dropafter!(st, tokens, dropcompositehold!), holdsof(r))))
-            Change[entrychanges(t, slot, inactiveentry(t, slot), up)...; BuildAccel(nextseq!(t), t, Build())]
-        end
-        ok = true
-    finally
-        ok || retire!(pool(t), up, ())
-    end
-end
-
-# A source's length changes (resize! of a positions array): the Resize is
-# pended with the array's readers locked (change!, readers = true), and
-# lengthchange pends a Build on each reader TLAS and marks it; the capacity a
-# new total needs is allocated by the applier. A store into a source pends an
-# Update (`update`, B.5), a refit; `update(b::BLAS, st)` is a Build when st is
-# b's index array.
-
-# Capacity: storage and scratch for `capacity` instances, doubling until the
-# total fits, starting at 64, capped at the device's maxInstanceCount (a
-# total past it throws at the call that raises it, checkinstances above); it
-# does not shrink on its own. For host-known totals, builds/refits carry the
-# exact count and capacity is expected to cost memory only (the driver gets
-# the count, not the capacity; not measured with storage sized beyond the
-# count, to confirm in phase 5). Growing, hardware: a new AS object on a new
-# pool Region (AS storage cannot be sparse) and new scratch, prepared by the
-# applier (B.4 step 1); the old ones retired with the applying token; the
-# structure's BuildRecordings are marked; traces and ray queries take the AS
-# by address through the cell where caps(dev).accelbyaddress is enabled;
-# otherwise descriptors are handle dependents and are replaced/retired safely.
-# Device-written totals build over capacity with mask-0 records (B.8), so their
-# capacity also affects build cost. Software: the five arrays
-# grow like any array (their Resize steps, B.5).
-# The steps, emitted before the Build's own; commit! sets t.storage, t.scratch
-# and t.capacity when the submission is made. The instance records hold
-# `capacity` entries and are rewritten by every build, so their move keeps no
-# contents.
-function capacitysteps(t::TLAS{Hardware}, g::Capacity)
-    mark!(t)                                         # BuildRecordings record the new storage
-    (resizesteps(t.records.state, t.records.state.storage, g.records, Resize(0, t.records.state, (g.capacity,), 0))...,
-     CellWrite(cellstate(t), acceladdress(t.device, g.as), ()),
-     MoveAccel(t, t.storage, g.as, t.scratch, g.scratch))
-end
-capacitysteps(t::TLAS{Software}, g::Capacity) = softwaresteps(t, g)   # the five arrays' Resize steps (D.1)
-# storage, scratch and capacity are as applied (like an array's storage,
-# B.2): only an applying submission changes them, at commit. Applying
-# MoveAccel retires the old storage and scratch with its token.
-
-# free!(t) drops the creator's hold; at zero, its ranges' composite holds on
-# arrays and BLASes are dropped with the TLAS's last tokens and its storage
-# retired. Its finalizer does the same through the pool's inbox.
-
-# A BLAS: the same shape as a TLAS one level down. Storage on a pool Region
-# sized from its geometry, with a capacity that doubles; it holds its vertex
-# and index arrays (composite holds) and is their reader. A new topology (the
-# geometry's length changed) is a Build into its storage, a MoveAccel to new
-# storage beyond its capacity (a new address through its cell); moved
-# vertices with the same topology are an Update, new indices a Build (an
-# update may not change them, header). Either way the TLASes over
-# it (its readers) get an Update: the records kernel reads the BLAS address
-# from its cell, and an update may change which BLAS an instance references
-# (header). Shared between TLASes through its geometry: one BLAS per marker
-# mesh.
-
-# ── B.9 Residency and textures ────────────────────────────────────────────────
-
-# Metal: every pool block, reserve and acceleration structure is in one
-# residency set per device, added to every Mantle queue (addResidencySet);
-# rawalloc/rawfree and binds add and remove allocations and commit. A BLAS
-# reached only through a TLAS is resident without any plan naming it. Per
-# plan: its ICBs, its argument memory and the pipelines its ICBs name.
-
-# Textures: a device-wide table (Vulkan: a descriptor set with
-# update-after-bind, partially bound, update-unused-while-pending bindings, or
-# a descriptor buffer; Metal: an argument buffer of texture resource IDs). A
-# texture's index is a value in its cell; shaders read it from their slots.
-# A texture written in place keeps its index. A regrown or replaced texture
-# gets a new, unused index, scheduled like any change: the applying
-# submission's prepare! creates the new image (a copy step keeps the texels
-# where the sizes overlap), its descriptor is written into the unused index
-# before the prefix (no pending command buffer uses that index,
-# descriptorsets.adoc:793-807), the cell write is a step, and the old index
-# and image are retired with that submission's token, then reused. A restored
-# image (internals.jl section 9) gets a new index the same way. The table and
-# its free list are the device's, under the table's own lock (a leaf).
-
-# ── B.10 Free and leaks ───────────────────────────────────────────────────────
-
-# free!(a) through the creator's handle: marks the state freed under its lock
-# (later calls through any handle throw: eager calls, declarations, stores)
-# and drops the creator's hold. Runs of graphs that still hold the array do
-# not check `freed`. At the last hold (internals.jl section 10, release!):
-# under the record's lock the pending changes are discarded (sources retired
-# with no tokens, prepared storage released), deferred hold drops are called
-# with the record's last tokens, the storage becomes Released(), the old
-# storage and the cell are retired with those tokens, and the state leaves
-# the eviction list. Every holder type (TLAS, BLAS, a RenderObject)
-# has a finalizer that pushes its hold drops through the pool's inbox.
-
-# ══ C. What a device type implements ══════════════════════════════════════════
-
-caps(dev)                    # facts, no policy: .sparseresidency, .sparsepage, .sparseaddressspace,
-                             #   .accelbyaddress,
-                             #   .displayattached (watchdog risk); .display is usable WSI, .inlinestore and .inlinealign (B.5),
-                             #   .maxinstances (maxInstanceCount, B.8; schema in execution-contracts.md §6);
-                             #   core's sparsethreshold, reservesize (B.1) and submission budget are
-                             #   computed from them
-countsource(dev)             # CountRecorded() (Vulkan) | CountFromMemory() (Metal): where a TLAS build gets its count
-createreserve(dev, bytes)    # -> Reserve
-bindpages!(ch, token, binds, waits)     # queue operation: vkQueueBindSparse | Metal sparse buffer mapping update (MTL4UpdateSparseBufferMappingOperation in Metal.jl; selector to check on the SDK); signals token; host cuMemMap/hipMemMap are NOT this operation
-unbindpages!(ch, token, unbinds, waits) # the same, unbinding
-instancerecordtype(dev)      # VkAccelerationStructureInstanceKHR | MTLIndirectAccelerationStructureInstanceDescriptor
-accelsizes(dev, path, n)     # storage and scratch for n instances or a geometry
-placeaccel(dev, path, region)        # AS object on a pool Region
-acceladdress(dev, as)        # vkGetAccelerationStructureDeviceAddressKHR | gpuResourceID
-emitbuild!(b, node, cmd::CompiledBuild, deps)   # Build or Update; host exact / device capacity; recorded on Vulkan, count cell on Metal
-emitstore!(b, dst, upload)                      # an inline store in a change prefix, from the store's upload region
-                                                #   (B.5): vkCmdUpdateBuffer within .inlinestore; Metal, CUDA, HIP:
-                                                #   inline limit 0, a copy from the store's upload region, acquired
-                                                #   at the call
-emitdraw!(b, node, cmd::CompiledDraw)           # inside beginrender!/endrender!; direct or indirect, as compile decided
-bindindices!(b, node, storage)                  # vkCmdBindIndexBuffer on the storage's buffer
-tableentry!(dev, table, index, texture)         # a host write to an unused index (not a recorded command)
-
-# Software acceleration structures implement the same core calls with kernels
-# (D.1); `path = Software()` dispatches there.
-
-# ══ D. Consumers ══════════════════════════════════════════════════════════════
-
-# ── D.1 Raycore: the software TLAS ────────────────────────────────────────────
-
-# Storage: five device arrays, resized in place, never replaced.
-struct SoftwareStorage
-    nodes::MantleArray{BVHNode2,1}
-    instances::MantleArray{InstanceDescriptor,1}
-    blasnodes::MantleArray{BVHNode2,1}
-    blasprims::MantleArray{Triangle,1}
-    blasdescs::MantleArray{BLASDescriptor,1}
-end
-
-# The build is kernels over the instance count, with temporaries sized from
-# the capacity; bounds reduction on the device, no readback. sortperm! is
-# Mantle's (AcceleratedKernels' kernels launched through dispatch!), so it
-# works on graph arrays.
-function buildaccel!(l, t::TLAS{Software}, ::Build)
-    s = t.storage; n = LengthOf(t.records)
-    MantleArray(l, UInt32, SizedBy(identity, t.records)) do codes
-    MantleArray(l, UInt32, SizedBy(identity, t.records)) do perm
-        bounds = MantleArray(l, AABB, 1)
-        dispatch!(l, instancebounds!, (bounds, t.records), n)
-        dispatch!(l, mortoncodes!, (codes, t.records, bounds), n)
-        sortperm!(perm, codes)
-        dispatch!(l, emittopology!, (s.nodes, codes, perm), n)
-        dispatch!(l, refitnodes!, (s.nodes, t.records), n)
-    end end
-end
-buildaccel!(l, t::TLAS{Software}, ::Update) = dispatch!(l, refitnodes!, (t.storage.nodes, t.records), LengthOf(t.records))
-
-# Kernels get the TLAS as a struct of five device arrays; each has its own
-# entry in the head's cell table, at any nesting depth. Traversal of an empty
-# TLAS returns a miss (length(nodes) == 0 from the slot).
-devicearg(dev, t::TLAS{Software}) = StaticTLAS(map(a -> devicearg(dev, a), fields(t.storage))...)
-
-# Raycore's TLAS has no finalizer that finalize()s its arrays: holds keep them
-# alive while a recording or StaticTLAS uses them. There is no blas_array
-# (device pointers stored in device memory), and no host readback or
-# synchronize() between build steps.
-
-# ── D.2 Hikari ────────────────────────────────────────────────────────────────
-
-# The scene owns one TLAS. Scene changes are pending TLAS changes (from host
-# calls, or pended by runs of other graphs that write the TLAS's source arrays,
-# B.8). The integrator is declared once into the screen's frame graph (one
-# graph per screen), outside any plot's group, and kept across scene
-# and plot changes (a plot is a group of draws and recompiles nothing). Its film and sample count are device arrays the screen holds, so
-# accumulation survives runs and recompiles; its work queues are window-sized
-# graph arrays, so a window resize within the capacity records the window's
-# segments again (internals.jl section 7) and declares nothing. It holds no
-# build or refit node: the pending update is applied by the first submission
-# that touches the TLAS, so a frame with no change does no
-# acceleration-structure work. Only a scene whose transforms a
-# kernel of this graph writes declares refit!(g, scene.tlas); a kernel-written
-# count needs no build! per run (B.8: built over the capacity, refits stay
-# legal).
-function declare!(g, vp::VolPath, scene)
-    fill!(vp.active, Int32(1))
-    bounce = Group(g, "bounce")                  # a value; its place in g's order is here
-    trace!(bounce, vp.pipeline, scene.tlas, (vp.queue, vp.hits), launchrange(vp.queue))
-    dispatch!(bounce, shade!, (vp.hits, vp.queue, lengthof(vp.queue), vp.active, scene.materials, scene.tlas),
-              launchrange(vp.queue))             # writes the queue's next length and active = length > 0
-    repeat!(bounce, vp.maxdepth ÷ 2; while_nonzero = vp.active)   # launches only; active is a count
-end
-# No scene change drops the integrator's plans (there is no
-# notify_scene_changed). fill_aux_buffers! does not wait for idle.
-# Adapt.adapt_structure (Raycore's, and Mantle's Vulkan and Metal TLAS) does
-# not call Raycore.sync!.
-
-# ── D.3 RayMakie ──────────────────────────────────────────────────────────────
-
-# A plot attribute is a MantleArray, mutated in place: length 1 for one
-# value, n for one per element. Shaders read attribute(a, i) =
-# a[min(i, length(a))], so both are one pipeline. An attribute
-# whose type changes is the plot deleted and inserted (a group of draws, no recompile);
-# a value that picks another pipeline (transparency) is a store into the flags
-# of one recorded when! draw per variant; a new Hikari material type recompiles
-# the plan that declares the shade kernel. A RenderObject holds its arrays;
-# its finalizer drops them through the pool's inbox.
-mutable struct RenderObject{A<:NamedTuple,O<:NamedTuple}
-    group::Union{Nothing,Group}                # its draws in the frame graph, while inserted
-    attributes::A                              # name => the MantleArray its draw reads
-    const pipeline::GraphicsPipeline           # with the arguments' types: the pipeline key
-    const owned::O                             # name => the plot's own MantleArray (host data lands here)
-    const visible::MantleArray{Bool,1}         # the when! flag of its draw (a store: no recompile)
-    const rect::MantleArray{Vec4f,1}           # the scene's rectangle, shared by the scene's plots (one store
-end                                            #   per layout change), applied in the vertex stage
-
-# update!(plot; …) calls this once per changed attribute (ComputePipeline's
-# changed set); everything is pending and lands in the next frame's submission.
-function setattribute!(screen, r::RenderObject, name, data::AbstractArray)   # host data
-    own = r.owned[name]
-    copy!(own, data)                                                       # a store; a resize if the length changed
-    r.attributes[name] === own || redeclare!(screen, r, name, own)
-end
-setattribute!(screen, r::RenderObject, name, data::MantleArray) =          # a device array: zero copy
-    r.attributes[name] === data || redeclare!(screen, r, name, data)
-setattribute!(screen, r::RenderObject, name, value) =                      # one value
-    setattribute!(screen, r, name, [value])                                # a one-element store (inline, B.3)
-# Another array object for an attribute: the plot's draws are declared again
-# over it, a new group of draws the next run records on its own; nothing
-# recompiles. The group goes to the end of the plots' order; where the order
-# matters, sort!(screen.plots; by) restores it (a list rewrite).
-function redeclare!(screen, r::RenderObject, name, a::MantleArray)
-    r.attributes = Base.setindex(r.attributes, a, name)
-    deleteplot!(screen, r)
-    insertplot!(screen, r)
-end
-setvisible!(r::RenderObject, v::Bool) = (r.visible[1:1] = [v])          # the head multiplies the draw's count by it
-
-# The frame graph, declared once per screen. The plots' group starts with the
-# clears, so the render pass exists before the first plot. Each plot is a
-# group of draws in it: inserting or deleting one compiles and records that
-# group's draws only and rewrites the pass's list; the plan is not recompiled,
-# and every other plot's recording stays. Each draw keeps its own pipeline and
-# index buffer, so a large mesh draws as it would alone.
-function declareframe!(g, screen)
-    screen.plots = Group(g, "plots")                                      # the plots' place in the frame
-    clear!(screen.plots, screen.window, screen.background)                # the pass's load operations
-    clear!(screen.plots, screen.depth, 1f0)
-end
-function insertplot!(screen, r::RenderObject)                             # Makie's insert!
-    r.group = Group(screen.plots, "plot")                                 # appended: the order is the draw order
-    when!(r.group, (screen.window, screen.depth), r.visible, r.pipeline,
-          (values(r.attributes)..., r.rect, screen.camera),
-          launchrange(r.attributes.positions))                           # one when! draw over the positions' length
-end
-function deleteplot!(screen, r::RenderObject)                             # Makie's delete!
-    delete!(screen.framegraph, r.group)
-    r.group = nothing
-end
-
-# The render loop: no walk over plots or render objects.
-function renderloop!(screen)
-    while isopen(screen.window)
-        foreach(resolve!, takedirty!(screen))       # only plots whose inputs changed (their edges put them there)
-        run!(screen.framegraph)                     # pending changes, head, recorded draws, present
-        # A plot added or deleted (insertplot!, deleteplot!) is applied by
-        # this run before its stages: its group's draws compiled and recorded,
-        # the pass's list rewritten (internals.jl section 5).
-    end
-end
-
-# A plot from a simulation's device arrays: mesh!(vertices, faces) makes its
-# draw read them. Each run of the simulation writes them; the frame draws
-# over their current lengths. The frame's run reads them, so it waits for
-# the simulation's write, and the simulation's next
-# write waits for the frame (B.4, lockexpanded). The screen is one of their
-# readers, so a run that writes them marks it for redraw (internals.jl
-# section 6). Faces are an index buffer bound by handle (B.6).
-
-# Glyph atlas: an Image with an index in the device's texture table; a larger atlas gets a new
-# index through its cell. Glyph UVs are stored in texels and normalized in the
-# shader by the atlas's size read at run time, so atlas growth touches no
-# text or scatter plot.
-# Frames are recorded, not walked: no DrawBinding/rebind!, no repacking of
-# argument memory on the host per frame, no frame_signature, no per-frame
-# scene-tree walk.
-
-# meshscatter (ray traced): one BLAS per marker mesh (shared through the
-# geometry arrays, held by every range that uses it), one instance range
-# following the positions.
-function meshscatter_instances!(tlas, plot)
-    marker = blas!(plot.scene, plot.marker[])        # application helper: the scene's BLAS for this geometry
-    push!(tlas, marker, plot.attributes.positions; scale = plot.attributes.markersize,
-          rotation = plot.attributes.rotation)
-end
-# positions is the plot's array: the TLAS is its reader, so a change of it
-# reaches the TLAS (B.8). Moving particles, same count: a store into the
-# array pends a TLAS refit. A new count: the resize! pends a build with the exact count (storage
-# beyond the capacity is allocated by the submission that applies it, B.4);
-# the BLAS stays.
-# Another device array (update!(plot; positions = b)): the range is deleted
-# and pushed again over b, a pending Build. Hidden: mask 0 in the
-# range's entry, a refit. A colour: a store into the material table.
-
-# Per frame, steady state: pending changes applied at the start of the frame's
-# submission, the head (1.3-3.5 µs measured), indirect draws, a refit or
-# build only if one is pending, the trace. No recompile and no re-record.
-# GPURef stores and per-frame stores (the camera, a one-element array)
-# are scheduled changes.
+frame = Graph(dev; priority=1, share_scratch=false)
+# A renderer's root uses order against simulation, while independent frame work can
+# overlap subject to budget/hazards. Priority does not secretly choose arena sharing.
+app_declare_render!(frame, state)
+run!(simulation)
+run!(frame)

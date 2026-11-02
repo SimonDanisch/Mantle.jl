@@ -1,0 +1,64 @@
+{
+  "date": "2026-10-29",
+  "scope": "Shared Mantle operation layer / explicit recorded-call plan update; static documentation evidence only",
+  "base_revision": "a30a423da24cfc841e09943b409ea091383f93cc",
+  "runtime_source_changed": false,
+  "full_gpu_suite_started": false,
+  "current_contracts": {
+    "device_ownership": "one owning Mantle Device/domain per array, many graph-node uses",
+    "eager": "standard Julia GPU array interfaces; no extra public numerical device argument",
+    "recorded": "call!(Graph/Group, supported_function, args...; kwargs...)",
+    "implementation": "one shared Mantle definition/recipe, reused by eager and recorded frontends",
+    "capabilities": "one shared selector intersects enabled hardware/compiler semantics, shapes/layouts/aliases/workspace and execution requirements; compares eligible candidates using performance evidence",
+    "returns": "per-definition contract, not ! spelling or an every-call-future rule",
+    "snapshots": "standard blocking Array(a); recorded call!(target,Array,a) future; established Readback(previous_future) replay request only",
+    "cpu_callbacks": "explicit HostCall during replay; no automatic CPU/eager fallback for unknown functions",
+    "backend_boundary": "native facts, intrinsic lowering and command encoding; no algorithm/selection/scheduling duplication"
+  },
+  "checks": {
+    "documentation": {
+      "command": "python3 experiments/review-2026-10-29/check-plan-reconciliation.py",
+      "result": "pass",
+      "artifact": "plan-reconciliation-checks.json",
+      "documents": 7,
+      "original_findings": 24,
+      "followup_findings": 10,
+      "abstract_models": 9,
+      "fixed_mwes": 8,
+      "batches": 5,
+      "unique_ledger_items": 742
+    },
+    "julia": {
+      "tool": "bt_julia_eval",
+      "env_path": "/sim/Programmieren/VideoEdit",
+      "code": "include(joinpath(pwd(), \"dev\", \"Mantle\", \"experiments\", \"review-2026-10-29\", \"check-julia-docs.jl\"))",
+      "julia_version": "1.12.7",
+      "result": "pass",
+      "parsed_sketches": 3,
+      "unqualified_example_call_names": 55,
+      "static_routing_guard_controls": 11,
+      "limitations": "Syntax/name/pattern checks only; no Mantle import, method execution or native/runtime qualification"
+    },
+    "whitespace": {
+      "command": "git diff --check",
+      "result": "pass"
+    }
+  },
+  "target_sha256": {
+    "docs/api.md": "c84908f7e809e17b7c7959a827f5d08a18965e0a6ead33a00d4f64c93bc4ddde",
+    "docs/examples.jl": "28553ce092102475dfd0ea4a72972a53cb14c188e57b72551ef9916aa11d57e0",
+    "docs/execution-contracts.md": "a52df28f722a12652a0dc1eaa129e48aa74f77b5c8144287895834878949d421",
+    "docs/internals.jl": "8ee2038803624811c1baf9700a50495d7ef5821fef7a7aac1bb57f7cc2206600",
+    "docs/recording-plan.md": "314d03b8872b06f51a8b935ed4db0900801ce3b736bb79ab658d0b816d8a0791",
+    "docs/refactor-ledger.md": "f20a1f3cc42e69dbe48fd4381e447a8dbda89c10048e85fc3ef34c366ded9b31",
+    "docs/resizing-and-raytracing.jl": "3525c1c1e472cdfc705aa82493d9657c6934836cbf498cb38d168c58178efbfa",
+    "experiments/review-2026-10-20/consumer-coverage.md": "ff8b48d1e26e4053d5bd450e0c9a42455a1e7f101e568aa4ae2bef60f269e2c3",
+    "experiments/review-2026-10-29/explicit-routing-ruling.json": "6346c866f5b1398db496d60c1f2c72d4fce7526780f04a78af1e47220c7ad58a",
+    "experiments/review-2026-10-29/check-plan-reconciliation.py": "e0c744e1cc6edbedbbc6e0fcbf53edf1adb5cb0913227cb1e7aad1628136724d",
+    "experiments/review-2026-10-29/check-julia-docs.jl": "4416955aee0e2196cc05a98f26485fc62c4831eeeff2739a39a9b916b98dfb6b",
+    "experiments/review-2026-10-29/plan-reconciliation.json": "570140e74a5852e0f311a3e08a6fe3d34d7f88d32301391cef109f8466a2fc96",
+    "experiments/review-2026-10-29/api-ergonomics-audit.json": "c096098f50d0d8e9ccd9291c44d648973a055b538f1a35b7d0263618057c7d0a"
+  },
+  "historical_evidence": "Original review reports and before-edit archives retained; earlier validation artifacts only prove their recorded inputs",
+  "implementation_status": "open; F110\u2013F114 and related phase/native/consumer gates require replacement implementation"
+}

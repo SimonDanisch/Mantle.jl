@@ -13,10 +13,13 @@ wrapper. They do not validate a driver, GPU visibility or scheduling performance
 
 ## 1. Synchronization and lifetime argument
 
-An access means an access to a root allocation, including a view, a cell,
+An access retains canonical root allocation identity, with a proven byte span or
+image subresource when known and whole-root overlap otherwise, including a view, a cell,
 argument memory, indirect commands, build scratch, descriptors and composite
 members. The argument depends on sound resource discovery and access inference;
-unknown code is conservatively ReadWrite, never silently omitted. Atomic-only
+unknown code is conservatively ReadWrite, never silently omitted. Metadata and
+descriptor-slot epochs are separate uses. One frontier/hazard algorithm derives
+internal edges, alias reuse, native barriers and external conflicts (§16). Atomic-only
 Unordered uses may overlap each other; they still conflict with ordinary reads
 and writes. Queue execution order alone does not imply memory visibility: core
 also derives the required native memory dependencies and ownership transitions.
@@ -174,6 +177,13 @@ core. Optional native acceleration cannot require users to pick a backend.
 | `vendorview(dev, region, T, dims, strides)` | Borrowed native array view; owns no storage. Core validates device identity, acquires the resource lease and delays its hold drop until the foreign completion token. |
 | `videorequirements(dev, spec)` | Supported profile/format, DPB/reorder limits, native session memory and bitstream alignment. Unsupported profile selects an eligible CPU decode path outside a GPU recording, not a late failure in emit. |
 | `createdecoder(dev, spec, regions)` / `emitdecode!(b, node, cmd, deps)` | Native session bound to core-owned regions, and one already-parsed decode command. Session/DPB slots are resources; parser, seek policy and codec conformance stay in the video package. |
+| `foreignallocation(dev, foreign)` | Retained allocation identity/context/generation, bound extent, strides and owner hold; core canonicalizes aliases and validates readiness/leases. Never adopt a foreign allocator as another Mantle pool. |
+| `recordlibrary(dev, recipe, bindings, workspace, stream)` | Qualified closed native library recording; core supplied explicit effects/control bounds, private stream lease and pool workspace. Capture is local to this recipe, never consumer code or the surrounding Mantle plan. |
+| `recordregion(dev, spec, emit)` | Native region builder setup/finish around core's emission callback. Core walks the child command DAG; the backend never walks Mantle nodes or chooses expansion. Returns a held native region recording. |
+| `compileexecutionset(dev, spec)` | Native program/execution-set object from core's frozen compatible programs/layout/resource set; core owns selection, cache publication and retirement. |
+| `emitregion!(b, node, cmd, deps)`, `emitgenerated!(b, node, cmd, deps)` | Execute an already-recorded native region or bounded generated-command stream from frozen handles/buffers/sets and complete edges. No host walk of a Mantle command tree. |
+| `transfercaps(dev, peer, spec)`, `emittransfer!(b, node, cmd, deps)` | Native bridge facts/encoding for an explicitly selected transfer; core owns source snapshot, destination publication, holds and any host-cut bridge. |
+| `communicatorfacts(dev, native)`, `recordcommunication(dev, recipe, bindings)` | Native participant/library facts and one eligible closed communication recording; core validates participation, effects, ownership and failure protocol. |
 
 `Builder`, piece builders and finish may allocate host/native command objects
 from prepared capacity, but no device storage. Core must prepare all encoder,
@@ -206,53 +216,47 @@ and [HIP VMM](https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_runtim
 
 ### Execution features and bounded submissions
 
-Freeze a portable CUDA/HIP baseline: kernels receive an immutable pointer to
-plan argument slots, as the Vulkan/Metal plan does. Dynamic array descriptors,
-GPURef values and logical extents are loaded from slots by the device wrapper.
-A device without indirect launch launches the compiled capacity and predicates
-work before calling the body. `when!` is an entry predicate; bounded repeat is
-core-unrolled into an execution DAG, cut between iterations. GPU state is
-re-read per iteration; empty bodies cannot skip collective barriers incorrectly.
-Expansion precedes dependency analysis: a head writes plan-owned loop control,
-every body node reads it, and the next head therefore follows all prior tails.
-Each iteration has distinct command/argument slots; data/scratch resources stay
-shared where declared. Compiled shader code is reused. Compile/record memory
-grows with maximum iterations × body size; termination still incurs the
-remaining predicated commands on this baseline. No constant-size native-loop
-or early-termination performance claim follows. No host readback is inserted.
-Native indirect/conditional nodes are candidates
-when supported and equivalent. Tests must compare results for zero, one and
-capacity counts; capacity-launch overhead is a performance qualification cost.
+Kernels receive prepared plan slots on all backends. Source Cells remain internal;
+Base.length/size read a dispatch descriptor, and inferred device resize! publishes
+size (§16). Normal consumer code does not receive another metadata handle.
 
-This does not permit host mutation of an in-flight graph executable or assume
-HIP supports CUDA conditional nodes. Compile once against capacity; exceeding it
-recompiles. Device slot loads are part of the wrapper, not backend-specific
-consumer branches. The compile key includes this ABI and enabled feature set.
+Retain nested loop/condition regions until core selects an eligible native region
+encoding or the portable bounded expansion. Native facts describe legal node kinds,
+nesting, update rules, geometry and budget behavior; API identity alone does not
+select a policy. Native executables are immutable in flight. Core owns the fallback,
+including control reset, stop latching and explicit command/argument slots.
 
-A budget is an estimate, not a hard execution-time guarantee. Core cuts
-submissions between nodes and between repeat iterations, and cuts a library
-candidate into its tiles where its estimate exceeds the budget; a candidate
-exposes `partition` only when tiles preserve its declared effects and
-ordering, and reductions require an explicit combine, never arbitrary grid
-cuts. A plain launch is cut only when its caller passes `split = true`: then,
-where its estimate exceeds the budget, it runs as consecutive workgroup ranges
-in separate submissions, and the entry wrapper adds each range's first
-workgroup so the kernel sees the full grid. Core reshapes nothing else to fit
-a watchdog.
+Without indirect launch, capacity predication gates whole inactive workgroups.
+Partial groups preserve collective participation with neutral lanes; no arbitrary
+early exit before a barrier. Bounded expansion connects all body exits before the
+next head, even when a kernel ignores iteration. Nested child controls reset on
+each enclosing invocation. A when!-region samples/latches its condition at entry;
+body writes to that source cannot retroactively change the current region predicate. Internal metadata prepares share the region's control.
+Expanded size is maximum iterations times body size; native-loop alternatives
+must be selected before this information is erased. Compile/plan/termination cost
+is a required measurement, not a universal constant-size promise.
 
-Failing to fit is an explicit error. A launch whose estimate exceeds
-`jobtimeout` throws `LaunchTooLong(origin, estimate, timeout)` at compile; the
-roofline estimate is a lower bound, so this fires only for a launch that
-cannot finish in time. A lost device throws `DeviceLost`, which lists the
-launches of each channel's last submissions (core keeps the last few per
-channel) with their estimates and the timeout: the kill surfaces late (RADV
-reports it at the next submission), so the error names candidates, not one
-culprit. Core's `waitfor(::Token)` passes the native wait a timeout of twice
-`jobtimeout`, counted from the moment the submission before it on that channel
-passed; a wait that runs out poisons the failure domain and throws the same
-`DeviceLost`. No library name proves bounded execution. Qualify heavy DNN/LLM
-workloads on display GPUs; never promise universal timeout avoidance for
-arbitrary user kernels.
+Multi-command heads, changes, build preparations and library recipes are lowered
+to core command IDs and explicit internal predecessor edges BEFORE recording.
+An empty node-predecessor list plus a memory barrier does not create native DAG
+order. DAG backends translate these edges; linear backends encode the corresponding
+barriers. Cross-recording dependencies become submission edges/waits.
+
+A submission budget and calibrated roofline/IR costs are estimates. Partition only
+at legal operation/iteration boundaries or with the caller's split=true workgroup
+contract. Reduction partitions require a combine, and cooperative/cluster work
+must retain its declared geometry/residency constraints. LaunchTooLong requires
+a validated unsatisfied execution constraint or independently justified bound;
+a heuristic estimate alone cannot prove that a launch is impossible.
+
+waitfor(Token;timeout=Inf) separates a host deadline from watchdog facts. A finite
+deadline expiring throws WaitTimeout, leaves work/holds pending and does not poison
+the device. A semaphore wait can include an arbitrarily long chain of otherwise
+legal submissions on other queues. Actual native device loss still makes the
+failure domain terminal and quarantines objects. Diagnostics retain recent
+submissions, estimated costs and their provenance. No arbitrary-kernel watchdog
+guarantee follows. See the native distinction between
+[VK_TIMEOUT and device loss](https://docs.vulkan.org/refpages/latest/refpages/source/vkWaitSemaphores.html).
 
 ## 4. Presentation retirement
 
@@ -365,7 +369,9 @@ KernelInterface's capability tables.
 | `inlinestore`, `inlinealign` | Nonnegative Int byte limit, positive Int alignment. Zero limit selects upload-copy. |
 | `throughput`, `bandwidth`, `crossqueuecost` | Immutable type→operations/second record, positive bytes/second, nonnegative seconds. Add `costsource` = :measured/:driver/:estimate; zero throughput means ineligible, never division by zero. |
 | `transfer`, `displayattached` | Bool: useful transfer queue, watchdog/display risk. display means usable WSI and is independent of displayattached; headless use does not turn off a physical watchdog. queuekinds/openchannels carry family/index and command kinds. |
-| `jobtimeout` | Seconds or Inf when no bound is known; an unknown watchdog bound is not proof of unlimited execution. Core applies its documented conservative submission estimate. With Inf, no `LaunchTooLong` check and no host-wait timeout apply (§3). |
+| `jobtimeout` | Seconds or Inf when unknown; this is watchdog risk, not a host-wait deadline or proof of unlimited execution. Core budgets conservatively; calibrated estimates do not prove an execution lower bound (§3). |
+| `execution` | Immutable enabled facts for indirect dispatch/trace/count, nested native control, generated-command stages/tokens/execution sets, device graph launch, cooperative/cluster limits and dynamic shared-memory constraints. Core selects constructions; no backend policy table duplicates KI facts. |
+| `libraries`, `bridges` | Eligible closed-recording/library workspace/control facts and peer/external/host-bridge transport facts, including visible host-cut requirements. Unsupported paths do not acquire dummy verbs. |
 | `devicekey`, `compilerkey`, `enabledfeatures` | Immutable native identity/architecture, compiler+ABI version key, sorted enabled feature tuple. Compilation requires equality of relevant keys; device type identity alone is insufficient. |
 
 Core owns dimension and byte-span validation before allocation, placement or
@@ -482,138 +488,231 @@ shader indexing. `KI.rt_launch_id_x()` retains its existing zero-based contract;
 new portable raygen code uses `KI.get_global_id()` for a one-based launch index.
 Do not silently change the existing KI builtin while migrating its callers.
 
-`rayquery(tlas, origin, direction; tmin = 0f0, tmax = Inf32,
-mask = 0xff, accept = AcceptAll(), intersect = BoxIntersection()) -> RayHit{Float32}` is a portable device
-operation. It returns the closest accepted hit. Direction is not normalized:
-origin + t*direction defines distance t. Invalid intervals/nonfinite origins or
-zero direction are errors in checking builds, never native undefined behavior.
-The ray mask uses eight bits; an instance is eligible iff its mask & ray mask
-is nonzero. No facing cull by default. An opaque hit and an accepted nonopaque
-hit have the same result contract. Pure `accept(hit)` may reject a candidate;
-traversal order and callback invocation count are not specified, so accept must
-not mutate queues, random-number state or other shared resources.
+### Portable queries and hits
 
-RayHit fields are `hit::Bool`, `distance::Float32`, `instanceid::UInt32`,
-`customindex::UInt32`, `primitiveid::UInt32`, `geometryid::UInt32`,
-`barycentrics::NTuple{2,Float32}`, `frontface::Bool`, `kind::UInt32`.
-Indices are one-based when hit=true. On miss the indices and barycentrics are
-zero, frontface=false and distance=tmax. A triangle has kind=0; its weights in
-face-vertex order are (1-u-v,u,v). Equal-distance overlapping hits may select
-any tied primitive: require equivalent accepted geometry, not identical native
-traversal order. Software and hardware candidates obey the same mask/interval/
-filter and transform semantics within an explicitly tested numeric tolerance.
+rayquery(tlas,origin,direction,args::Tuple=(); tmin=0f0,tmax=Inf32,
+mask=0xff,accept=AcceptAll(),intersect=BoxIntersection(),hitgroups=nothing,
+raytype=1,anyhit=false,attributes=Nothing,capture=nothing) returns RayHit{Q}, Q=attributes.
+This is device code inside an ordinary kernel on Vulkan, Metal and software.
+The default finds the closest accepted hit; anyhit=true requests any accepted
+intersection and permits early termination. Both invoke no shading handler. A
+bounded hit-collection/transparent-shadow consumer keeps its existing explicit
+algorithm; it is not implemented by order-dependent side effects in a filter.
+accept(hit,ray,args...) is a pure Bool predicate; intersect(report,candidate,args...)
+is the procedural candidate generator. If hitgroups is supplied, its selected
+intersection/filter functions replace the shorthand intersect; supplying both a
+nondefault intersect and a table rejects. The global accept predicate additionally
+filters table hits. No callable mutates shared resources, RNG or traversal state;
+reporting candidates is the sole permitted traversal effect. Invocation count/order
+are unspecified. Hikari may instead keep its existing explicit wavefront/query
+algorithm; this interface does not force shading callbacks into its trace kernel.
 
-customindex is Mantle's stable range slot. rangeoffset(tlas,slot) is the count
-of instances preceding that range, so instanceid-rangeoffset is one-based within
-the range. Native custom indices encode slot-1 and core decodes on shader access;
-the same conversion applies in native RT callbacks. Range slots cannot exceed
-native custom-index representation; check the actual native limits, never a
-constant inferred from one workstation. No scene-wide geometry concatenation.
+origin + t*direction defines distance; never normalize a transformed direction.
+Validate finite origins/directions, nonzero direction and legal t interval. Masks
+are eight bits and an instance participates iff instance-mask & ray-mask != 0.
+No default facing cull. A required filter must see every candidate that could win,
+including triangles marked opaque in storage: core selects an eligible nonopaque/
+forced-filter construction or declines the native candidate; opacity never skips
+alpha tests. Surface-transparency accumulation/stochastic material sampling remains
+an explicit consumer algorithm, not an order-dependent any-hit side effect.
 
-TLAS(dev;raytypes=1) fixes the ray-type count for its native instance-record
-layout. Pipelines sharing it must use that count; core validates this before
-enqueue. A different ray-type layout requires a different TLAS. Default one
-covers existing consumers and keeps native record offsets independent of which
-pipeline last used the TLAS. Check (groups*raytypes) against native offset limits.
+The initial catalog uses Float32 rays: other precision requires a qualified
+extension, never silent narrowing to native Float32. RayHit{Q} keeps hit::Bool,
+distance::Float32, UInt32 instanceid/customindex/primitiveid/geometryid/kind,
+barycentrics::NTuple{2,Float32} and frontface::Bool. Index fields are one-based on a hit; miss has
+zero IDs/barycentrics, frontface=false and distance=tmax. Triangle barycentrics are
+(u,v), with weights (1-u-v,u,v). Equal-distance ties may pick either equivalent
+accepted primitive. customindex is the stable logical range slot; instanceid is
+the logical instance, independent of native split/packing. rangeoffset retains
+its within-range mapping. Native index conversions and actual width limits are
+checked internally. Preserve logical geometry IDs if a native lowering splits a
+logical structure; no scene-wide geometry concatenation is required.
 
-For a kernel-written instance total, every portable build path uses a fixed
-capacity count and valid mask-zero padding, including native count-from-memory.
-Its count cell carries capacity, while logical offsets/lengths remain separate;
-all Updates keep builtcount. A native exact-count optimization must prove legal
-updates or choose builds without host readback, and qualify against this baseline.
+hitattributes(hit) returns the hit's concrete Q and checks hit=true; reading
+attributes on a miss signals an error rather than manufacturing zero(Q).
+Nothing is the default query result attribute type and consumes no attribute
+storage. Private optional attribute storage keeps validity separately from packed
+isbits bytes, so miss construction does not need zero(Q), an invalid Q value,
+a heap box or a scene-sized Union. Decode Q only after the validity check.
+For attributes=Q other than Nothing, capture(hit,ray,args...) -> Q explicitly
+projects each accepted candidate's typed attributes; omitting capture means use
+its attributes unchanged and requires that type to be Q for every reachable hit.
+A mixed table can normalize different group attributes through a typed capture,
+including deriving a triangle result from barycentrics. The shared compiler
+retains only the current accepted result Q; it never boxes heterogeneous payloads
+or introduces a Union-sized return tied to scene geometry count. capture is pure
+and may be called whenever the current closest result improves. Candidate and
+returned attributes are separate contracts; rejecting a candidate never changes
+the retained result. Scalar attribute types/layouts are checked at compile time. Without a table,
+attributes=Q also declares the shorthand procedural reporter schema. With a table,
+each group declares its own schema A independently of the query result Q. Triangles
+provide barycentric attributes. Every filter/capture receives the immutable world
+ray explicitly; closest_hit also receives that ray, not a hidden stage global.
 
-A pipeline is an immutable, concretely parameterized Julia value:
+### Logical hit functions and geometry selection
 
-- `RayTracingPipeline(;raygen, closest_hit, miss, any_hit=nothing,
-  payload=Nothing, maxdepth=1)` is the convenient one-ray-type form. A tuple of
-  closest_hit callables denotes multiple logical hit groups. Each shader receives
-  the same explicit argument tuple; remove the old chit_miss_take_args switch.
-- `TriangleHitGroup(closest_hit; any_hit=nothing)` and
-  `ProceduralHitGroup(intersection, closest_hit; any_hit=nothing)` are values.
-  The general constructor accepts a rectangular hit-group × ray-type tuple of
-  these values, one miss callable per ray type and a concrete isbits payload
-  type. Old payload symbols such as :f32_7 become NTuple{7,Float32}.
-- `push!(tlas, blas, transforms; hitgroup=1)` assigns a logical one-based group
-  index to a range. `hitgroup!(tlas,range,index)` pends a record update; it does
-  not expose an SBT byte offset. Every tracing pipeline must have compatible
-  geometry kinds and that group index. Invalid indices fail before enqueue.
-  Two pipelines sharing one TLAS must agree on these logical group meanings.
-- Core lays out records in group-major, ray-type-minor order. Native instance
-  record offset is (hitgroup-1)*raytypes, per-ray offset is raytype-1, and
-  geometry stride is zero: all geometry in that instance uses its logical
-  group and exposes geometryid to the callback. Require a matching procedural/
-  triangle group; mixed-kind native BLAS needs separate compatible instances.
-- Core computes aligned SBT regions from native handle size, handle alignment,
-  base alignment and maximum stride, obtains handles through
-  `shaderhandles(dev,native)` and uploads through ordinary pool-owned resources.
-  No shader arguments are duplicated into SBT records: callbacks read the same
-  plan slots. The SBT and pipeline are held by recordings and retired by tokens.
-  Metal function tables expose equivalent logical groups; a software candidate
-  dispatches the callable tuple. The backend reports native requirements and
-  creates native objects, never builds a second material/range policy.
+TriangleHitGroup(closest_hit=nothing;any_hit=nothing) and
+ProceduralHitGroup(intersection,closest_hit=nothing;any_hit=nothing,attributes=Nothing)
+are immutable typed function descriptions. Triangle candidate attributes are the
+two barycentrics; a procedural group's attributes=A declares a concrete isbits
+schema with no GPU resource handles/pointers. closest_hit=nothing is legal for
+query-only tables. A program that invokes shading requires the selected handler.
 
-`traceray(origin,direction;raytype=1,tmin=0f0,tmax=Inf32,mask=0xff)` is the
-portable callback-invoking operation inside a raygen/hit program. Core lowers
-logical raytype to record/miss indices and the KI trace/reorder/execute sequence;
-SER is selected by capability without consumer extension branches. Native operand
-limits are checked: Vulkan record offsets are limited to 16 ray-type choices,
-not an arbitrary UInt32 offset. Recursion is bounded by program maxdepth and the
-selected native/software implementation. Existing raw KI rt_* operand builtins
-remain available for qualified shader implementations; their numeric native
-conventions are not the portable traceray interface. The program's typed payload
-is compiler-owned stage IO; no argument resource or native pointer may be hidden
-in it outside the declared resource set.
+HitFunctionTable(groups) is the common logical table, not a native handle.
+A flat tuple of groups is the one-ray-type form; a tuple of equal-length row tuples
+is group-major, ray-type-minor. Reject ragged/empty rows. Callable types represent
+the finite program set; geometry/instance counts, IDs and selectors are runtime
+values, never type parameters. The general program constructor is
+RayTracingPipeline(;raygen,hitgroups::HitFunctionTable,miss::Tuple,
+payload=Nothing,maxdepth=1), with one miss function per ray type and concrete
+isbits payload P. The closest_hit/miss/any_hit convenience form uses the same explicit callback
+signatures and normalizes to this table; both forms together reject. maxdepth bounds nested traceray calls.
 
-The trace's accel argument binds the program's TLAS; it is not another element
-of the explicit shader args tuple. `traceray(origin,direction,payload;...) -> P`
-returns the pipeline's concrete payload type P after the selected closest-hit
-or miss callable returns P. Omitting the payload is legal only for payload=Nothing
-and supplies nothing. Raygen's return is ignored. `raypayload()` reads the current
-stage's incoming P, `rayhit()` supplies the decoded RayHit in closest/any-hit,
-and `currentray()` supplies the immutable origin/direction/interval/mask in hit,
-miss and intersection stages. These are compiler stage IO, not mutable global
-state. Hit/miss callables still receive only the same explicit args tuple and
-return P; they may access only discovered resources. The Nothing callbacks in
-HK-10 therefore return nothing. Any-hit is a pure Bool filter of the current hit;
-intersection returns nothing or `RayIntersection(t, attributes::NTuple{2,Float32})`.
-Out-of-interval/nonfinite reports are rejected. The portable filter never mutates
-payload or relies on candidate invocation order; qualified native-only any-hit
-controls remain below this interface. This fixes return/IO semantics as well as
-SBT layout, without a consumer-managed payload buffer or hit-object protocol.
+TriangleGeometry(vertices,faces) and ProceduralGeometry(bounds) are typed source
+descriptions. BLAS(target,geometries::AbstractVector;scratch=false) retains a logical
+ordered geometry list; the existing single-geometry constructors normalize to it.
+Core handles compatible native grouping/splitting once, preserving logical IDs,
+or selects its shared traversal construction. Native restrictions cannot force
+backend-specific scene representations. The geometry list is an indexed value
+collection with typed emission barriers, not a tuple type encoding scene size.
 
-The SBT formula/alignments are constrained by the
-[Vulkan ray-tracing contract](https://docs.vulkan.org/spec/latest/chapters/raytracing.html).
-Native facts add `sbtproperties(dev) -> (handlesize,handlealign,basealign,maxstride,maxrecordoffset,maxrecursion)`
-and `shaderhandles(dev,native)`. These are capability-gated verbs.
+push!(tlas,blas,transforms;hitgroup=1) and hitgroup!(tlas,range,selector) accept:
+- One integer group ID, broadcast over all geometries/instances of the range.
+- A host tuple/vector with one ID per logical BLAS geometry, shared by its instances.
+- A device integer matrix with rows=geometry and columns=instance within the range.
 
-Procedural BLAS uses `BLAS(dev,bounds)` with a concrete AABB element format
-(minimum,maximum Float32 triples). Its intersection callable reports finite t
-and up to two Float32 attributes within the supplied ray interval, or no hit;
-core/native lowering owns candidate/report/accept traversal. rayquery applies its explicit intersect callable to AABB candidates; the default
-BoxIntersection treats the boxes themselves as primitives. A procedural pipeline
-uses its group's intersection callable, so a sphere query and sphere pipeline
-must supply the same geometric operation. Bounds updates are refits,
-geometry-kind/count changes are builds. NaN padding is not a portable
-inactive-state mechanism. A pure callable is shared by software traversal and
-native intersection stages; it does not manage native hit-object or SBT state.
+The host selector is snapshotted; the device selector is a declared resource read
+at execution. One-based IDs choose table rows; raytype chooses columns. Group kind,
+shape/index bounds and active counts are validated before unsafe native indexing;
+GPU-invalid selections record failure and cannot become arbitrary function pointers.
+The finite table declares the complete allowed program/resource set. GPU-written
+selectors participate in prepare/barrier/version dependencies, not host downloads.
 
-Core computes the union of resource uses across raygen, every hit group, miss,
-intersection and any-hit. A buffer touched only in closest-hit still receives
+TLAS has no public raytypes setting: logical scene data does not depend on a
+pipeline's record stride. Native binding views may depend on a table layout/ray-type
+count. Shared core caches/holds them by scene version and layout; geometry storage
+is shared and their build/update/retirement costs are measured. Updating one view
+cannot clear the dirty version of another view. A stable compatible binding reuses
+its recording; switching layout cannot patch a live native record. These are
+internal representations, not extra public TLAS/device families.
+
+For example, an eligible Vulkan SBT layout uses a slab per instance/geometry-group
+selection: record = instance_base + (geometryid-1)*R + (raytype-1). Record contents
+select the logical group for that geometry; identical slabs can share storage.
+The old fixed geometry stride zero is not the general layout. Check actual native
+offset/stride/attribute/recursion limits, alignment and all byte arithmetic.
+GPU-changing mappings use bounded prepared records or an eligible shared dispatch
+construction, with memory/traffic costs exposed. Core owns packing/deduplication,
+not a backend material manager. Metal intersection/visible-function constructions
+and shared typed dispatch use the same logical selection; neither API's table
+layout is the public contract. Native providers report enabled compiler/device
+facts and create/encode the chosen objects. No attribute or program truncation.
+
+### Streaming procedural intersections and callback ABI
+
+The one-returned-intersection sketch is replaced by a streaming reporter:
+intersection(report,candidate,args...) -> nothing. RayCandidate exposes logical
+IDs plus worldray and objectray (origin,direction,tmin,tmax,mask), and the instance
+transforms needed to convert geometry results. objectray already applies the
+inverse instance transform exactly once; its direction is not normalized, so t
+has the same meaning in both spaces, including nonuniform scale. Report distances
+in that parameterization; report attributes use the group's declared coordinate
+convention (not a silently transformed normal). Triangle/procedural attribute
+normal transformations remain explicit shader math.
+
+report(t,attributes) -> Bool offers one candidate; report(t) uses Nothing
+attributes. The result means continue reporting: it is false only when an
+anyhit=true query has accepted a hit and is finished, otherwise true. It is not
+an acceptance/final-winner result. A callback can use report(t,a) || return nothing
+to avoid unnecessary root work. Ignoring the continuation flag remains correct;
+core ignores later reports after termination. Closest-hit reporting remains true
+even after an accepted root, since a later root may still be closer.
+A procedural function may call it repeatedly, in any order, with finite in-interval
+roots and the declared attribute schema. Core validates each report, runs the
+selected any_hit and global accept filters before commit, and retains the closest
+accepted t/result, or the first accepted result for anyhit=true. A rejected near sphere root must leave its far root eligible.
+Attributes are invocation-local values: they cannot retain report/candidate or
+hide GPU resources. Infinite procedural loops retain ordinary shader watchdog
+obligations; no per-hit allocation, root-count type specialization or host callback.
+
+All programmable paths use these explicit callback signatures:
+- raygen(args...); its return is ignored.
+- intersection(report,candidate,args...) -> nothing.
+- any_hit(hit,ray,args...) -> Bool; it is a pure filter, never payload mutation.
+- closest_hit(hit,ray,payload,args...) -> P.
+- miss(ray,payload,args...) -> P.
+
+The same intersection and alpha-filter function bodies serve inline queries,
+program execution and software traversal. Resources come from explicit args and
+callable captures. Query-only execution does not invoke closest_hit/miss. Existing
+implicit rayhit/raypayload/currentray convenience sketches are superseded by these
+explicit values; raw native KI stage builtins remain qualified low-level interfaces.
+traceray(origin,direction,payload;raytype=1,tmin=0f0,tmax=Inf32,mask=0xff) -> P inside
+a ray program uses its bound TLAS/table/args and invokes the selected handler.
+The same anyhit=false default/optional early-accept mode is available on traceray;
+its selected hit handler receives the accepted hit (not necessarily closest when
+anyhit=true). Omitting payload is legal only for P=Nothing. No user-managed native payload buffer
+or hit object is required. Metal may lower the logical program to query plus typed
+function dispatch; Vulkan may use native stages when eligible. Recursion/native
+restrictions select a semantics-preserving candidate or diagnose unsupported raw
+features; they never require a consumer backend branch. SER remains an optional
+semantics-preserving optimization, not different shading code.
+
+On both inline-query paths, generated intersections may not carry user attributes
+in native committed-hit storage. Shared core retains its typed best attributes
+beside the native query and verifies the committed identity before returning them;
+a later triangle cannot accidentally receive a previous box's attributes. Native
+Vulkan report/any-hit and Metal query/commit or intersection-function constructions
+encode the same filter-before-commit semantics. Their attribute packing is an
+adapter/compiler ABI matter under common layout rules. Native attribute limits
+filter eligibility; a larger A may use shared query-local state when legal rather
+than truncate. Native-only raw features can reject when no qualified candidate
+exists. The default BoxIntersection streams the finite in-interval entry/exit surface
+roots of the box, deduplicating a tangent; it does not mistake a clipped tmin
+inside a box for a surface. Attributes are Nothing. AABB bounds are
+minimum/maximum Float32 triples; updating bounds is a refit,
+changing geometry kind/count is a build. Inactive padding is valid geometry/masks,
+never NaNs. These choices are design rulings informed by the native mechanisms:
+[Vulkan traversal and SBT](https://docs.vulkan.org/spec/latest/chapters/raytracing.html)
+and [Metal intersection queries and filters](https://developer.apple.com/videos/play/wwdc2021/10149/).
+
+Core computes resource uses from entry-point-reachable functions: a full program
+includes raygen, hit groups and miss; a query-only entry includes only its
+intersection/filter/capture functions. A buffer touched only in closest-hit still receives
 holds, readonly validation, placement and barriers. Native ray-pipeline support
 is optional; portable ray queries and ordinary shade-kernel candidates remain
 available when ray pipelines or procedural native stages are absent. Arbitrary
 native-only shader intrinsics are not promised software emulation. SER is a
 semantics-preserving hint: a no-op is correct; silently skipping an any-hit alpha
-test is not. Select the native Hikari pipeline only when its alpha/media/light
-semantics match the requested operation. Its current opaque-only RT shortcut is
-not an acceptable reference for alpha-textured scenes.
+test is not. Any future native-program candidate must match requested alpha/media/
+light semantics; an opaque-only result is not a reference for alpha-textured scenes.
 
-Hikari has both typed shading queues and typed closest-hit groups today
-(Hikari/src/integrators/volpath/rt-pipeline.jl:530–575). A new material type may
-specialize either or both. Core's ordinary pipeline cache keys include all group
-callable code identities, payload and layout; delete the consumer's mutable
-_VP_RT_PIPELINES cache during migration. Do not force all shading into one
-monolithic kernel or erase the existing RT specialization path.
+The refreshed baseline is Hikari 407f9b2, Makie 42e6355fb and Mantle 3e9943f.
+Hikari/RayMakie now use ray-query wavefront tracing; their old RT pipeline and
+_VP_RT_PIPELINES cache are historical evidence, not code to preserve or delete
+again. Mantle's pushed core query_record/query_transparent owns the traversal loop
+over thin Vulkan/Metal query verbs. Preserve current typed lobe/material queues,
+cut-set specialization and compile/cache improvements. A future programmable hit
+function path remains a separate capability profile; do not force current Hikari
+back to the deleted pipeline or claim it already qualifies that path.
+
+The pushed Metal query_begin specialization uses a single Metal.intersect call
+when no candidate processing is required. The target plan preserves that native
+construction but moves its eligibility/cost choice to the shared selector (§9).
+Core checks the complete query requirements: geometry kinds, closest/occlusion
+mode, opacity, filters, procedural reports and requested result attributes. A
+missing procedural payload alone must not bypass required alpha/filter work.
+Metal reports enabled native/compiler facts and encodes the selected intrinsic;
+Vulkan supplies its applicable native query operations. Shared core owns filter,
+report/commit, closest-hit/result and fallback policy once. Native call differences
+are adapter mechanics, not permission for a second traversal/renderer algorithm.
+A pure capture may execute after a native complete result if that result supplies
+all necessary fields; capture alone need not force a candidate loop. Required
+candidate-time filtering/reporting must never be bypassed. An eligible
+complete-result call can bypass the candidate loop without duplicating
+that loop or adding consumer backend branches. Preserve the optimization and
+qualify its completed-work benefit; do not treat the source's timing comment as
+new measurement evidence.
 
 For kernel closures/functors, resource discovery includes `(kernel,args...)`:
 callable fields containing arrays or GPURefs are explicit ABI arguments too.
@@ -646,9 +745,13 @@ backend. Destination reads are part of the attachment's access contract.
 
 `Image(...; samples=1)` requests an exact supported sample count through
 imagerequirements; unsupported format/count fails before allocation/declaration.
-All attachments in one pass must match extent and sample count. copyto! from a
-multisampled colour image to a matching single-sample image declares a resolve
-(CompiledCopy(ResolveImage(...))), never a shader memcpy or a host transfer.
+All attachments in one pass must match extent and sample count. Plain copyto!(dst,src)
+is eager; call!(target,copyto!,dst,src) declares the recorded form. Both use the
+same shared copy/resolve definition and return the identical destination. A
+multisampled colour source with matching single-sample destination selects a
+resolve construction (internally CompiledCopy(ResolveImage(...))), never a byte
+memcpy or implicit host transfer. An image's construction target does not choose
+the execution mode or recording destination.
 The resolve consumes the source's GPU uses and produces a normal image use;
 compile/liveness derive barriers and aliasing. Sampling or Array on a
 multisampled image requires an explicit resolve first. Sample count enters the
@@ -670,6 +773,30 @@ they do not create a separate pass or backend policy model.
 
 ## 9. Selection, tuning and default launch geometry
 
+The shared Mantle operation layer owns the ONLY candidate eligibility/selection
+policy for both ordinary eager methods and recorded call! operations. A backend
+reports enabled native facts and encodes the selected commands/intrinsics; it does
+not choose algorithms/workspace/fallbacks or keep an independent operator policy.
+Intersect hardware facts with actual compiler support, semantic precision/ordering,
+argument shape/layout/alias constraints, workspace and graph/control eligibility.
+Reuse KI tables. Capability presence alone is not a measured performance win.
+Eager calls materialize immediately; graph compile materializes the retained recipe
+using final region requirements. Replay does not probe, tune or reselect. Only
+invalidation/explicit tuning affects a later compile. Per-function Julia frontends
+are shared across hardware, not a matrix of duplicated per-backend overloads.
+Reuse existing common GPUArrays/KA/Julia algorithms where possible; refactor their
+emission boundary rather than copying eager and recorded numerical bodies.
+
+The hookup is ordinary Julia dispatch, expanded in api-guide.md/internals.jl:
+recipe(::typeof(mul!),argument_tuple) returns a typed MatMulRecipe;
+candidates(::MatMulRecipe) lists shared emission functions and requirement metadata.
+materialize(context,RegionNode) uses this list with enabled facts/final region
+requirements, then calls the selected emit function to create private DAG commands.
+Eager operation! calls it immediately; graph materialize_regions! calls the same
+function at compile. No user Graph mutation or eager mul! call occurs during recipe
+emission. Replay does not call the frontend or select again. Native providers
+supply facts/encoders, not a candidates(dev,f) algorithm-selection table.
+
 Core stores `Candidate{F,R}` values with the implementation callable, requirement
 predicate, implementation version, cost model, workspace description and optional
 partitioner/region compiler. All candidates describe the same operator semantics,
@@ -677,17 +804,20 @@ including aliasing, numeric accumulation type, epilogues and output ownership.
 An `implements` attribute alone cannot excuse different alpha tests, overflow,
 rounding or memory ordering. Filter by requires and validfor(args) before reading
 a measured score. Optional library candidates additionally require recordability,
-caller-owned workspaces and the current target kind (a repeated Group permits
-kernel candidates only). Unsupported candidates are declined before compilation.
+caller-owned workspaces and the enclosing region's actual control/recording
+requirements. A native library subgraph is eligible when its complete node kinds,
+parameter bounds and effects satisfy them. Unsupported candidates decline before
+compilation; vendor origin alone does not exclude a valid recording.
 
 SelectionKey is an immutable value of (operator identity/code, argument element
 types, logical shapes or explicit bounded shape classes, strides/layout,
 base-alignment classes, alias relationships, target execution kind,
 compiler/feature/ABI key, candidate-set version). Addresses and objectid of arrays
 are not keys. Plan capacity/shape dependencies guarantee continued eligibility;
-a move preserving those classes needs no reselection. Growth outside the bound
-or a changed code/config/candidate version invalidates the entry and marks the
-plan for recompile. GPU-written live lengths are represented by their capacity
+a move preserving those classes needs no reselection. Growth outside the bound or a changed code/config/candidate version invalidates
+the retained RegionNode recipe and marks its plan for recompile. Materialization
+reselects and rebuilds the complete command sequence/workspace atomically while
+preserving public output roots; recompiling an old kernel list is insufficient. GPU-written live lengths are represented by their capacity
 class; selection never reads them back to the host. Measured exact-shape scores
 cannot win a different class merely because element types match.
 
@@ -797,7 +927,7 @@ creates a fresh device/context generation. Every old array, graph, pipeline and
 borrowed view remains invalid and reports DeviceClosed/DeviceLost before native
 use. free! of old handles is idempotent and never calls a destroyed driver twice.
 Finalizer inboxes of a closed pool discard CPU bookkeeping safely. A reset from
-that device's own HostCall or foreign lease throws before closing admission;
+that device's own hostcall! or foreign lease throws before closing admission;
 waiting for itself would deadlock. Registry mutation does not hold the registry
 lock across waits/driver destruction. Borrowed test wrappers cannot reset their
 inner native device. Legacy WSI's final-shutdown limitation remains explicit.
@@ -918,28 +1048,42 @@ imports may optimize the same copy job when qualified; that is not a different
 lifetime/commit protocol.
 
 Empty native blocks can be cached within a bounded core warm-cache policy;
-`trim!(dev)` releases empty caches after passed retirements without waiting for
-live uses. It never unmaps an array's live pages (trim!(array) is distinct).
+The private core helper `trim!(dev)` releases empty caches after passed retirements
+without waiting for live uses. It is neither exported nor declared public, and is
+not an application maintenance step. It never unmaps an array's live pages.
+Explicit array-backing trimming is deferred, outside the initial public API;
+logical shrinking retains capacity.
 Memory/leak fixtures wait/sweep/trim before comparing physical reservation;
 normal run latency is not forced to pay rawfree/rawalloc for every reusable block.
 Under pressure, empty caches are trimmed before evicting live resources.
 
 `devicecopy!(dst,src)` is the explicit cross-device operation for device arrays,
-including views. The portable baseline takes one consistent Array(src) snapshot,
-then schedules that complete snapshot into dst through the ordinary store path
+including views. The portable baseline takes one coherent source-root snapshot
+through the shared snapshot/copy/hold protocol, then schedules that snapshot into
+dst through the ordinary store path
 and waits for its destination application token. It returns dst after completion,
 without idling unrelated work. It can allocate host memory proportional to the
-copy and fails before modifying dst if the snapshot/allocation fails. Different
+copy and fails before modifying dst if the snapshot/allocation fails. This explicit
+transport operation snapshots a persistent root after accepted prior uses; it
+never executes any graph that names the source. Different
 sizes/types follow copyto!'s validation/conversion rules; no silent relocation
-of later operations. Graph-array arguments and implicit mixed-device arithmetic
-remain errors. Qualified peer/external-memory candidates may replace staging
+of later operations. Explicit call!(target,copyto!,dst,src) transport recipes may name a foreign source and
+publish a destination in the target domain; ordinary mixed-device arithmetic
+remains an error. A persistent source already named by a graph can be retained by transport;
+scratch cannot escape its run. Qualified peer/external-memory candidates may replace staging
 while preserving source snapshot, destination publication and resource holds;
 no zero-copy or nonblocking claim is made for arbitrary driver pairs. This
 baseline deliberately reuses existing read/store logic rather than inventing a
-cross-driver graph scheduler. Graph composition remains within one device domain.
+cross-driver graph scheduler. Ordinary execution remains device-local; explicit transport/communication regions
+connect per-device graphs with declared readiness/completion (§16).
 
+Streamed weights retain their explicit lifetime/interval contract; ordinary
+Graph construction is persistent, and only scratch=true requests arena lifetime.
 Streamed weights keep `streamed=true` as the keyword. Their retained host source
-is immutable by the same contract, and each graph declares a transient resident
+is immutable by the same contract. Streamed weights are read-only: inferred
+writes/resize reject through the shared readonly validation before publication.
+Uploading an old host source must never silently reset GPU-mutated state; mutable
+state requires a separate persistent copy. Each graph declares a run-local resident
 interval plus upload-copy nodes before the weight's uses. Core places/aliases
 that interval and derives transfer edges, so several weight windows can overlap
 compute without a consumer-written partition or backend-specific loader. The
@@ -1012,31 +1156,811 @@ throw RecordStateRead. A failed guard must unwind before a subsequent valid
 record. `cellaccesses(g)` exposes compiled memory-origin facts (node id/role,
 source-cell reads/writes), derived from the actual selected code's taint/IR
 analysis and checked against resource uses. It distinguishes source Cells from
-ordinary argument slots and GPURef data slots. Only head/prepare, TLAS record/
-offset preparation and explicit lengthof writers may access source Cells;
-ordinary launch/raster/shade kernels read prepared slots. Cell pointers cannot
-escape through an opaque native argument or an untracked raw-pointer cast.
-The public launch API does not expose source-cell addresses except lengthof.
+ordinary argument slots and GPURef data slots. Only head/prepare, TLAS record/offset preparation and compiler-inferred device
+resize! metadata writers may access source Cells;
+ordinary launch/raster/shade kernels read prepared slots. Cell pointers cannot escape through an opaque native argument or an untracked raw-pointer cast.
+The public launch API does not expose source-cell addresses; only the compiler-owned resize! intrinsic lowering receives an internal write capability.
 A backend must qualify the check against its compiler output rather than merely
 stamp every ordinary kernel with "no cell reads". THR-04 and KL-10 define the
 executable acceptance cases; debug checking is off on performance runs.
 
 ## Graph-declared readback snapshots
 
-`Readback(array)` and `Readback(graph, array)` declare a snapshot at their graph
-position and return a one-shot future. The copy has an explicit source-read and
+Array(array) is the standard blocking conversion of accepted device work/ordered
+pending resource changes; it never chooses or runs a graph. call!(target,Array,array),
+target Graph/Group, declares a recorded position and returns a one-shot future,
+regardless of prior compilation. Both use one shared snapshot/copy/hold/visibility
+recipe. No public eager Readback(array) operation is added; fetch starts no work. Readback(previous_future) requests the next execution of an existing
+output ID; source identity never selects a declaration position. The copy has an
+explicit source-read and
 destination-write dependency, so source liveness reaches the copy and later
-source writes follow it. Readback destinations do not alias transient storage.
+source writes follow it. Readback destinations do not alias explicit scratch storage.
 Vulkan's recorded copy includes a transfer-write to host-read visibility barrier;
 coherent host-cached staging is read only after the captured execution token.
 The shared-memory implementation uses a normal graph copy kernel.
 
-Each output has a reusable staging slot owned by its live plan. Each execution
-with requests publishes a snapshot carrying that run's token and a hold on the
-slot's Buffer. `fetch` waits for that token and makes an owning CPU array; no
+Graph owns stable output IDs and pending requests. Each plan generation owns its
+output bindings and reusable staging slots. Compatible plan replacement rebinds
+pending requests by output ID; it does not cancel them merely because the old
+plan retires. Already submitted futures keep the old generation/token/storage.
+Deleting an output or freeing the Graph rejects its unsubmitted requests.
+Each execution with requests publishes a snapshot carrying that run's token and
+a hold on the slot's resource. With no request for an output, do not transfer its
+payload or materialize an old CPU result. Core lowers its known request state using
+an eligible conditional-copy construction or an optional precompiled snapshot
+segment, retaining source ordering when bypassed. This is the same region/segment
+machinery, not a backend output scheduler. Do not cache 2^N recordings for N outputs.
+Any remaining control/submission overhead is reported separately from payload bytes.
+`fetch` waits for the captured token and makes an owning CPU array; no
 submission is made. Before replay overwrites a previous outstanding snapshot,
-core materializes it. `free!(plan)` remains nonblocking: it rejects unsubmitted
-requests and drops its slot hold, while submitted futures keep their storage
-until collection. Run failures reject requests rather than leaving waiters
-blocked. A moved native source binding is recompiled/recorded before replay;
-a changed logical shape is rejected by this fixed-shape implementation.
+core materializes it. Internal plan retirement remains nonblocking and drops its
+slot holds, while submitted futures keep their storage until collection. Pending
+requests belong to the live Graph/output, not to the retired plan. At the start of a run attempt, bind its
+pending-request set before preparation/claim. A skip or failure before a copy is
+accepted rejects its bound request; do not leave it waiting for an unspecified
+future run. Requests created later remain pending for the next attempt. Already
+accepted copies retain their published token/storage and complete or fail according
+to that work; later unrelated stage/present failure cannot erase acceptance. A moved native source binding is recompiled/recorded before replay;
+a changed logical size is captured with payload using capacity-bounded storage.
+Exceeding the recording/placement bound rebuilds the affected plan/output slot,
+preserving Graph identity and already submitted snapshots. The public lifecycle
+is run!(g)/free!(g); Plan and record! remain internal.
+
+The first warmup execution consumes an armed output request like any other run.
+Each wanted later execution requires Readback(previous_future) before run!;
+fetch remains tied to the captured execution, never a latest-value query. Warmup
+can mutate persistent state and has no implicit reset. See the canonical sequence
+in api.md's Warmup, repeated requests and retention section.
+
+A new request copies the stable Graph/output descriptor, not the previous future
+or its captured payload/token/generation. Completed futures are removed from the
+Graph's pending set; the Graph must not retain a completed-result history. Preserve
+outstanding snapshots before staging reuse, but release obsolete plan/slot holds
+once their tokens and live result references permit. Result retention is bounded
+by live requests/results plus a bounded staging cache, subject to ordinary Julia
+collection; holding N snapshots can legitimately require N captured payloads.
+Native staging/CPU memory bounds still require the existing F117 qualification.
+
+## 15. AScanner qualification of the existing GPU-size model
+
+The 2026-10-29 AScanner/Bosgame review adds consumer migration and qualification
+coverage to an already settled design. It does not introduce a new array-shape abstraction or general overflow policy.
+Public spelling now follows Base.length/size and Base.resize!; Cells/preparation
+remain the same internal size model. Explicit storage lifetime follows api.md.
+Source fingerprints and inspected paths are recorded in
+`experiments/review-2026-10-29/ascanner-gpu-extents.json`. The consumer already has
+working retained-frame and CUDA qualification evidence; the observations below
+are source-level migration gaps, not newly executed failures.
+
+### Settled representation and compaction
+
+An array's capacity is its allocation bound. Its logical size is GPU-resident
+resource metadata: the Cell/compiler-inferred device resize! model already specified in the plan,
+conceptually `a.size::GPURef`. Head/prepare nodes propagate that size into
+consumer argument slots and launch commands. Ordinary numerical kernels use
+the prepared descriptors (§14); this is not a second unrelated user-managed
+counter that must be threaded through every array operation.
+
+A stable application builder `app_compact!(target, active, particles, predicate)`
+emits declarations to evaluate flags, scan them,
+scatters selected values and publishes the resulting count with
+`resize!(active, selected_count)`. Reserve output capacity for the maximum input count: a
+correct selection cannot produce more outputs than inputs. Scratch is declared
+explicitly. A final count writer executes even for an empty input and publishes
+zero; numerical work and the count write are ordered before consumers.
+No host count readback or automatic growth/retry is required for this operation.
+The builder is illustrative application/library composition, not a public Mantle
+compact! overload or a recorded-call registration requirement.
+
+`length`/`size` inside subsequent kernels observe the logical GPU size. Composed
+operations plan scratch and maximum work from capacity, then consume that live
+size on the GPU. Changing it within the allocation bound does not require shader
+compilation or plan rebuilding. Host Base.length/size read/wait for GPU metadata.
+Those host integers are explicit snapshots, not deferred dependencies. Graph
+recipes consume prepared size metadata; callers use launchrange(a) for changing
+geometry. call!(target,Array,a) captures a graph position; Array(a) captures
+accepted work eagerly. CPU results use ordinary host length/size.
+
+A view used in a kernel can be constructed there from its parent and GPU bounds.
+The parent and bound resources remain dependencies. Composed operations over
+such a subrange must carry those bounds to their internal kernels; a local
+view does not convert an integer-only host planning helper into a dynamic one.
+This review does not require a new public `dynamicview` constructor or array type.
+
+### Concrete consumer migration
+
+In the inspected `MatrixConverter.ge2sym!` source, `select_flagged!` returns a
+GPURef, the next `loose_resize!` method accepts only `Integer`, and later arguments
+call `Int32(m)`. That is a consumer conversion gap: the resulting logical size
+must remain GPU state and downstream operations must use it. Adding a hidden
+scalar download would defeat the retained computation. This source path was not
+executed by the review.
+
+The working contact path uses full-size views, separate GPU counts and inactive
+sentinels. Preserve its validated results while migrating appropriate operations
+to the canonical array-size metadata. The `cub.jl` reduction/scan/sort helpers
+currently accept host integer lengths; their dynamic-input paths need the same
+migration. P6.A24 and P11.G94 track this work rather than a new core design.
+
+### Additional consumer qualification
+
+These are **specified, unimplemented** acceptance cases for the existing
+P4.A3/A10/A11/A12 contract and its composed operations. They are not native test
+passes. Use independent expected values and poisoned inactive storage; retain
+KL-01–10's underlying size/bounds/growth/readback invariants, migrating their
+old explicit size-handle calls to inferred device resize! effects. KL-05's
+out-of-capacity publication becomes a checked rejection, not a permitted invalid
+logical descriptor; no automatic growth/retry is introduced.
+
+| Gate | Required behavior |
+|---|---|
+| KL-11 | One recorded compaction replays through counts 0, 1, G-1, G, G+1, capacity, 0 and active again. Kernel-visible size and consumer work agree; count publication handles empty input, tails remain outside the logical result, and compile/record counters stay unchanged within bounds. |
+| KL-12 | Compaction → scan → stable key/value sort → run reduction/unique → gather/copy/reduction composes without host count reads or integer conversion. Empty identities, ties, maximum-valued keys and poisoned tails have exact expected results. |
+| KL-13 | A kernel constructs views from GPU-produced offsets/counts; composed consumers receive those same bounds. Parallel COO rows, columns and values use a consistent logical count. No extra public view/array abstraction is introduced. |
+| KL-14 | A repeated/conditional body publishes an extent more than once before different consumers. Cover active, empty, skipped, zero-trip and reopened executions. Prepared descriptors refresh after each producer, not only at the run's head; partial workgroups preserve collective participation. |
+| KL-15 | Producer/consumer graphs share an array and its logical-size state. Plan replacement, retained handles and host snapshots preserve matching payload/size and their existing synchronization/lifetime contracts. |
+| KL-16 | A CUDA.jl allocation imported into a CUDA graph uses its existing storage with retained ownership and explicit stream ordering. GPU-size changes reach downstream descriptors without host readback or mutation of an in-flight native graph. |
+
+P4.G4/P6.G4 require the relevant cases on every joined backend, including native
+indirect launch and capacity predication. Extent dependencies include aliases,
+callable captures and library-internal launches; extend the existing KL-10
+compiler-origin audit to these consumers. A predicated launch must preserve
+workgroup barriers and reduction identities for its partial tail.
+
+Phase 11 must exercise the actual sparse-conversion and retained contact paths,
+not only toy kernels. Keep the same-GPU interleaved performance comparison at
+capacities 32/128/512 and a large sparse-live case. Bosgame's saved report already
+shows slower larger frames despite one native graph launch. Distinguish live
+work from capacity/padding work, and record scratch peak and complete frame
+latency. Fixing host-count assumptions is not itself a measured speedup.
+
+## 16. Composable regions, resource effects and review corrections
+
+This section supplies execution protocols for api.md's reconciled entry points.
+It replaces the old early-expansion/kernel-only/lifetime-by-location restrictions;
+it does not create another runtime. Existing atomic, WSI, pressure and direct-restore
+evidence/rulings remain in force. Implementation and native qualification are open.
+
+### 16.1 Explicit targets, ownership and lifetime
+
+An array owns exactly one Mantle Device/domain. Arbitrarily many nodes in sibling
+Groups or unrelated graphs may reference the same root. Each node declares its
+uses and retains holds; group membership is not an array/device property. Neither
+adapt(group,a) nor adapt(graph,a) is a recording API. A recording-device wrapper,
+array retargeting or target-bound output alias is forbidden.
+
+Ordinary eager methods retain Julia signatures: mul!(C,A,B), broadcast!(f,C,...),
+Array(a). A recorded ordinary operation uses call!(target,f,args...;kwargs...),
+target Graph/Group. It has a thin Julia-dispatch frontend to a known shared Mantle
+operation definition/recipe. There is no public mul!(dev,...)/mul!(group,...) pair.
+Core resolves target ownership internally for validation/materialization; there
+is no public Device(Graph/Group) constructor/query overload. KA.get_backend(a)
+returns the owning Mantle Device. Direct kernel launches still use dispatch!(target,...).
+
+Known lowering is not generic capture. A composed library either explicitly emits
+recorded calls/raw dispatches or supplies a qualified closed-library recipe. Dotted
+syntax remains eager; arrays/KA backends do not carry context. An unsupported f
+rejects before declaration publication, never executes eagerly as a fallback and
+never silently becomes a CPU callback. Native capture is a capability-qualified
+candidate construction, not the universal API contract.
+
+Target-aware library graph builders are called directly with a Graph/Group, e.g.
+PrintSim.step!(group,world,state,dt). They compose declarations during construction
+and require no call! wrapper/registration or replay-time CPU invocation.
+Conversely, a consumer host controller that updates inputs, submits runs or waits
+remains ordinary host orchestration; call! must not capture or defer that controller.
+The function's actual body/contract determines which case applies, not its name.
+
+Known recorded host-to-device copy definitions own the host source snapshot at
+declaration and replay that captured content. Updating the original host array is
+not an in-flight/baked-argument patch. Per-run host input changes are explicit
+ordered stores or declaration replacement. A device-to-device copy reads its source
+at its graph position instead, with ordinary data dependencies. These are common
+copy semantics; an unknown function still never becomes a CPU callback.
+
+The minimum recorded catalog is in api.md. A reduction with an ordinary device
+array destination, e.g. call!(group,sum!,abs2,r,A), returns that identical array;
+a later device kernel reads r[1]. This is not a CPU-result future. Its recipe
+tracks input/capture reads, destination writes and destination reads for init=false.
+GPU-written live lengths are descriptor inputs, not host-side isempty/size branches.
+Empty sums still publish their identity; init=false preserves initialized prior
+contents on empty input. This contract uses existing sum!/array semantics rather
+than introducing a new public scalar result handle or guessing all reductions'
+return contracts. Existing domain-specific device-output kernels remain valid.
+
+The shared operation definition states its returns. mul! returns the original C
+because its body does so. A ! suffix says nothing about which argument/value is
+returned; no generic mutation/alias heuristic supplies a return contract. Stable
+device-array outputs/metadata aliases may be returned when that definition can
+declare them. A CPU value available only after execution has an explicit typed
+future contract under the common output protocol; Array is the required snapshot
+case. This is not an every-call-is-a-future rule. Each additional operation family
+must specify and test its result contract. In device control, use device-output
+forms (e.g. in-place reduction to device storage); CPU snapshot nodes reject.
+
+An actual hostcall! means Julia CPU work executes during replay, on staged host
+arguments with explicit writes and a host cut. call!(g,mul!,...) instead lowers a
+supported GPU operation; it does not replay the original Julia mul! each run.
+Qualified native library/event handoffs retain their disclosed stage/cost protocol.
+A library helper forwards the explicit target at every recorded child call and
+workspace allocation. This is one portable operation implementation, not a second
+operator algorithm per backend.
+
+For GPU-sized operands, explicit graph operation providers retain shape dependencies
+before generic host axis instantiation and prepare/validate descriptors on device.
+Host length/size synchronize for GPU-written metadata. Ordinary returned integers
+are snapshots; arbitrary arithmetic over them does not retain hidden graph
+provenance. Use launchrange(a) for changing launch geometry. Retained recipes track
+their own declared shape/eligibility dependencies; raw integer arguments stay fixed.
+
+Persistent roots have creator/naming/composite/lease holds independent of which
+graph constructed them. Graph release drops graph holds only. Persistent creation
+data initializes once at its ordered construction point; explicit nodes reset it
+on replay. Deferred GPU-source copies must retain/order that source version through
+the shared snapshot/copy protocol before later writes, not read a later first-use
+version. Host data uses an owned snapshot unless readonly/streamed immutable-source
+retention was explicit. scratch=true requests
+run-local storage independently of the owning device. Scratch data construction
+emits initialization for each execution of its explicit owning region; type/dims
+construction leaves bytes undefined until written. Scratch metadata initializes
+per run/path. A raw Write effect is not proof of full initialization; high-level
+recipes declare coverage and raw authors retain their ordinary obligations.
+
+A scratch handle cannot escape its owning run, be immediately host-read, or be
+held by a persistent composite. Other regions in that same graph may use it when
+initialization/control/liveness permit. call!(owner_target,Array,a) copies before
+its lifetime ends and holds independent staging. Eager Array(a) cannot read
+run-local graph scratch. readonly/streamed retention and foreign import require persistent ownership;
+reject conflicting lifetime options atomically.
+
+Declaration validates all generated nodes/controls/effects/captures/holds together,
+reserves publication and commits once. Failure leaves nodes/holds unchanged. An
+inferred resize writer and its prepares cannot be published partially.
+
+### 16.2 Size effects and producer descriptors
+
+Device resize! is a metadata-write intrinsic. Inference supplies its ABI-internal
+write capability; ordinary device arrays expose no Cell pointer or separate public
+size handle. It validates dimensions/capacity, changes that invocation's descriptor
+and publishes metadata without changing address or allocating. Aliases of the same logical root header in
+that invocation observe the local size update; independent headers/ordinary views retain their
+own extents. Compiler alias/effect lowering must qualify this without adding
+source-Cell reads to ordinary length queries. Other invocations
+retain entry descriptors; no grid-wide barrier is implied. Subsequent dependent
+dispatches receive prepared dimensions, including aliases/captures/library kernels.
+Static views retain their own extents; device-local views from GPU bounds are normal
+views with explicit parent/bound dependencies.
+
+Compaction uses one canonical root and size. Checked internal producer descriptors
+cover available capacity while its previous logical length may be zero. Flags ->
+scan -> scatter -> final resize publisher are explicit command dependencies, and
+consumer descriptors follow both payload and metadata. Empty input still executes
+a single count publisher. Scratch partials track their actual live block count,
+not their allocation capacity. This is the implementation protocol for the settled
+size model, not another public array type or capacity-overflow policy.
+
+The authoritative applied dimensions live in the Cell once a GPU writer exists;
+host requested dimensions describe only ordered pending host changes. Never restore
+or validate a store using stale requested dimensions as if they were the GPU result.
+Host stores with unknown logical bounds use a prepared descriptor and checked store
+kernel, not an unconditional inline/copy command. Invalid ranges record an error
+without writing. copy!(a,data) can establish known dimensions through its atomic
+discard-resize/store sequence. For rank > 1, host resize!(a,n) requires known prefix
+axes; otherwise provide explicit dims rather than implicitly downloading size.
+
+Capacity is the usable allocation bound, including backed page rounding rather
+than the larger unbacked virtual reserve. Unplaced/evicted resources retain that
+bound as an allocation/restore requirement; the field is not a resident-byte count
+and capacity(a) does not allocate or execute work. Placement/restore must establish
+backing of at least that bound before publishing address/capacity descriptors. If
+it cannot, fail preparation rather than expose an unbacked producer range. Native
+storage and its prepared capacity version remain held for all submitted users.
+Device resize and producer bounds use that prepared backed capacity. Explicit trim
+captures/validates one logical-size version, may require a visible metadata checkpoint
+before host-native page binding, and reduces capacity only at accepted unmap commit.
+Later host growth may remap the existing virtual range. Resizes/uses cannot race a
+checkpoint's version lease. Candidate output-capacity requirements are revalidated;
+an explicit trim cannot leave a checked producer writing unmapped pages.
+
+Host growth after a GPU size writer also retains an ordered preserved-prefix
+extent. Prepare the old descriptor and copy min(old logical bytes, new logical
+bytes) before publishing the new dimensions/address. Do not freeze a keepbytes
+integer from stale requested dimensions when queuing Resize. Known extents use a
+native copy; GPU extents use the shared bounded copy recipe or a qualified native
+equivalent without a host scalar roundtrip. New elements beyond the old logical
+extent remain uninitialized until explicitly written, even when their backing
+already existed. This uses the same shape/metadata preparation and copy protocol.
+
+Eviction HostCopy retains the coherent GPU dimensions as well as bytes. Restore
+publishes that saved shape and the new address/capacity, then applies later pending
+host resizes in sequence. It never overwrites saved GPU dimensions with the stale
+host requested shape. These use the existing snapshot/transfer-lease protocol;
+no independent size counter or backend restore algorithm is introduced.
+
+### 16.3 Regions, recipes and native control
+
+RegionNode retains a semantic operation recipe, arguments, code/eligibility key,
+effects and stable outputs. Compile materializes it with fresh plan-owned scratch;
+eager execution uses the same recipe. An invalid shape domain re-emits the recipe,
+not just the old kernels. Retained recipe shape dependencies are validated at their origin. Ordinary host
+shape integers are fixed snapshots, never silently assumed to remain dynamic.
+
+Nested Group/Loop/condition trees remain structured until core selects an enabled
+encoding. Native candidates report supported node families/nesting/update limits;
+portable expansion is one shared core algorithm. Control resets follow lexical
+invocation, not just top-level run. Internal prepare/build/library work participates
+in region predicates and exit frontiers. hostcall! inside GPU control is diagnosed;
+ordinary Group host callbacks retain the staged host protocol. Library eligibility is
+actual recordability, effects, caller workspace and control support, not a blanket
+kernel-only rule. Private-stream closed capture can supply a library subgraph.
+
+References: [CUDA conditional/device graph constraints](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html),
+[cuBLAS graph support](https://docs.nvidia.com/cuda/cublas/index.html#cuda-graphs-support).
+These establish available native mechanisms, not universal eligibility or a HIP
+equivalent. Measure expanded/native compile time, executable/slot bytes, stop cost
+and full workload time; a native region that cannot meet budget semantics declines.
+
+### 16.4 One command DAG and complete alias frontiers
+
+Each emitted command, including within a head, change prefix, build preparation or
+closed recipe, has identity, declared effects and explicit predecessors. A builder
+does not reconstruct order from a barrier or drop an edge merely because it points
+outside its local native recording; core represents that edge as a segment wait.
+
+Maintain maximal writer/reader frontiers per proven byte span/subresource and
+descriptor epoch, retaining the union needed by both conditional outcomes. Unknown
+uses fall back to the root. A linear chain therefore retains a frontier, not O(N²)
+historical conflicts. Canonical root ownership is unchanged. Composite AnyWrite
+reservations remain conservative where membership is dynamic, with cost reported.
+
+For alias reuse, every maximal old user must precede every minimal new user, or
+an equivalent join/entry. Interval position in a topological list is insufficient:
+two independent readers can finish in either order. sharing! adds those edges and
+revalidates queue waits/scheduling. Every command rewrite/split subsequently rebuilds
+affected hazards, costs, lifetimes and summaries before recording.
+
+### 16.5 Derived acceleration versions
+
+Core models geometry writes as versions and inserts a matching build/refit before
+the first dependent AS read in a graph, including a write and trace in one segment.
+A fixed recorded build can execute every replay without host rediscovery. Native
+representation-only builds may execute in a disabled region only if logical query
+results are preserved and the count/activity/topology constraints remain valid;
+otherwise choose an eligible kernel/native region construction before recording.
+
+External writes publish transitive BLAS/TLAS dirty versions per accepted segment.
+Only an accepted build consuming that version removes it. A build elsewhere in the
+graph, a later geometry write or a future unsubmitted build cannot justify clearing
+it. Failed host/preparation stages therefore retain the updates needed by another
+graph. Member/backreference snapshots and accepted tokens use the existing ordered
+locks and retirement rules; no per-backend dirty/version owner is added.
+
+#### Acceleration storage, growth and maintenance
+
+Logical BLAS/TLAS lifetime, source-array backing, native AS bytes and operation
+workspace are different resources under one core allocator/retirement policy.
+Retain geometry/transform inputs for future builds/refits and shader reads; a
+native build having copied some inputs does not revoke logical resource holds.
+Native binding generations additionally retain the exact child BLAS objects,
+instance mapping, descriptors and table data they may traverse. Logical removal
+alone cannot release a child still named by an old native TLAS/recording.
+
+| Change | Required action |
+|---|---|
+| Vertex/AABB coordinates or instance transforms change | Update/refit only if creation flags, topology/activity, source/destination size and native rules permit; otherwise Build. |
+| Primitive/geometry/instance counts, index topology, geometry kinds or deleted membership change | Revalidate the exact native build signature; use Build unless update legality is proved. Backing spare alone never authorizes Update. |
+| Logical instance count changes within a prequalified padded bound | Update can reuse builtcount only under the existing active/mask-zero/valid-geometry rules; otherwise Build. A zero logical count still has a valid native construction or skips traversal safely. |
+| Host input storage grows or a BLAS native address/object changes | Refresh prepared descriptors/instance records and invalidate every parent native TLAS binding that embeds the old child. Propagate transitively; bounds unchanged is insufficient. |
+| Required native bytes exceed the current destination | Acquire a replacement from core before publication, build/copy by a legal native operation, then publish its generation/dependencies. Preserve logical handles/ranges. |
+| Logical shrink/deletion | Rebuild when needed, but retain usable capacity by default. No automatic shrink/compaction every frame. Removed members survive through old generation leases/uses. |
+
+Counts/capacities bound inputs and prepared native records; AS storage size is
+queried from the full geometry/layout/count-bound/build-flags signature. It is not
+sizeof(input) or a linear guess from instance count. Native facts include storage
+bytes/alignment/backing class, separate build/update scratch bytes/alignment and
+legal update/copy/compaction modes. Core caches requirements by that complete
+signature. One common bounded growth policy can reserve count headroom to amortize
+reallocation; its padding must remain native-legal and its byte cost is budgeted.
+Do not equate array growth/reserve with reallocating an opaque AS by memcpy.
+
+An eligible in-place update/build waits on every old reader/writer of that native
+storage. Under the normal queue/resource dependency graph it needs no device-wide
+idle or host wait under locks. An eligible out-of-place build may overlap old
+readers when the shared budget/scheduler selects that construction. Preclaim
+allocation/preparation failure preserves the old usable generation and dirty
+versions. An accepted maintenance/build prefix publishes tokens/holds even if a
+later phase fails. Only the matching accepted binding build consumes its covered
+versions; ambiguous native failures use existing quarantine rules. Publish no new
+address/member snapshot without its readiness token. A parent may keep using its
+old child generation until an ordered parent replacement is ready; never retarget
+its embedded reference in flight. Idle recordings holding an old generation must
+be invalidated/rebound before that generation's hold is dropped.
+
+Build/refit scratch is operation workspace, not permanently reserved per BLAS or
+per native binding. A binding stores requirements; core places scratch from the
+same run arena/eager temporary pool as other workspace. Alias it only after all
+build/update users finish; simultaneous builds need disjoint live workspace or
+explicit serialization. Use update-scratch requirements for an Update, build
+requirements for Build, and a proven maximum when one prepared slot serves both.
+Do not retain max(build,update) for every long-lived scene object by default.
+
+Buffer/heap-backed and opaque native AS objects are separate native allocation
+facts, not separate memory policies. Buffer-backed AS uses compatible committed
+storage; an array's sparse virtual reserve is not automatically legal AS backing.
+For opaque/heap-native allocation, core admits/account budgets before creation and
+retains/retire its native allocation ticket. Report known sizes and unknown driver
+overhead separately; do not double-count a heap/region and its placed object.
+Native wrappers create/bind/destroy supplied objects but own no allocator/cache/
+eviction strategy. Residency registrations leave at retirement, not through an
+uncollectable strong-reference/finalizer cycle.
+
+compact!(as) is explicit scheduled maintenance of the same logical BLAS/TLAS.
+It does not change geometry counts, instance IDs, capacity promises or bindings'
+semantics. Core chooses a qualified native compact-copy or equivalent smaller
+rebuild; an already tight representation may remain unchanged. A native size-result
+query, if needed, is tracked work followed by a visible metadata/host checkpoint
+outside locks; it is never submitted during pure compile/requirements/recording.
+Charge old plus destination bytes, workspace and unreclaimed generations at peak.
+Do not free the source first to make a compaction fit. Preserve old storage on
+preparation failure. Publish the replacement with a readiness token, repair parent
+references/descriptors by the common version protocol, and retire the source after
+all old users. A compacted destination is refittable only when its actual flags,
+provenance and destination/scratch sizes satisfy native Update rules; otherwise a
+later edit rebuilds/replaces it. Compaction is not promised to preserve cheap refit.
+No native compact path may silently memcpy an opaque representation.
+
+Pressure does not initiate compaction or a surprise size-download checkpoint.
+Release bounded idle binding/recording caches first. Reconstructible AS bindings
+can be discarded only after active uses/leases end and idle plans are invalidated;
+retain source/version metadata and rebuild before reuse. Native AS is not an array
+HostCopy blob: eviction/restore uses reconstruction or an explicitly qualified
+native serialization scheme. Report old/new overlap, scratch, pinned children and
+all live cached binding views. free!(as) drops its creator hold; graph/member/native
+generation holds keep it usable for already declared work. Last-hold release
+retires native objects, tables and residency after all tokens, not at host return.
+
+Qualify the existing MWE-05 lifecycle profile with growth beyond a native bound,
+in-bound deformation, topology rebuild, shrinking/deletion, one BLAS in two TLASes,
+relocation/compaction while an old trace is pending, failed replacement and a second
+layout binding still dirty. MWE-03 supplies controlled accepted-prefix faults;
+MWE-08/B5 supplies allocation/steady-state memory and frame cost. Check peak and
+post-retirement bytes, not just final object count. This is one core policy for
+Metal/Vulkan/software paths; native legality comes from the actual providers.
+Native size/refit/compaction facts are grounded in the
+[Vulkan AS contract](https://docs.vulkan.org/spec/latest/chapters/accelstructures.html)
+and [Metal AS sizes](https://developer.apple.com/documentation/metal/mtlaccelerationstructuresizes).
+
+### 16.6 Imported allocations and explicit device communication
+
+Import validates native context/device/generation, byte bound and strides, retains
+the allocation owner itself and canonicalizes payload aliases in a weak per-device root
+registry. Stream readiness and later lease/completion edges are tracked. External
+mutation/reallocation outside this handoff is a boundary violation; retaining only
+a mutable vendor header does not protect its old allocation. Imported storage is
+nonrelocatable/non-evictable, cannot grow beyond its bound, and is never pool-freed.
+
+Canonical payload identity and logical header identity are separate. Independent
+foreign arrays/views/reinterprets may cover the same allocation with different
+shapes, offsets, strides or element types. They share payload byte hazards, holds,
+physical ownership and restrictions, not a dimensions cell solely because the
+allocation key matches. Ordinary Mantle views retain their logical parent state;
+independent logical headers keep independent size metadata. Resize effects update
+aliases of that logical root, not all headers that overlap the same bytes. External
+vendor header dimensions are not silently patched. A new foreign import captures
+its supplied header geometry, while sharing canonical byte hazards; reuse the
+existing MantleArray to share its GPU-written logical size across graphs. A withview
+export requiring exact host dimensions takes a coherent metadata/version checkpoint
+outside locks and retains its matching storage lease; zero-copy payload is not a
+zero-synchronization promise. Capacity is not a substitute for those dimensions.
+An arbitrary external callback is conservatively read/write; a qualified closed
+library recipe may state read-only effects. readonly aliases cannot be exposed
+through an unchecked writable callback. Data uses key the canonical
+allocation/byte span; metadata uses key the relevant header/epoch. One core
+frontier/retirement engine handles both; there is no separate import scheduler.
+Element/byte conversions and address spans use checked arithmetic and alignment;
+never treat a capacity counted in one header's T as another header's capacity.
+The captured native allocation/version must back every published view span. A
+readonly or outstanding lease restriction belongs to the aliased payload owner;
+a second imported header cannot bypass it.
+
+Explicit asynchronous transport alone may name roots in different domains. Order
+plan/root lock IDs by (device identity, local ID), and never acquire a second Graph
+lock while holding these locks. Core transport owns source snapshot, retained
+buffers, any host-cut bridge and destination publication. A peer path can avoid the
+host copy; unsupported peers use the shared bridge with visible costs. No implicit
+mixed-device arithmetic or universal zero-copy claim is introduced.
+
+Communication recipes declare communicator participants, input/output/root ranges,
+readiness/completion and collective sequence. Each rank must enqueue matching
+participation; cancellation/failure becomes communicator failure, never a locally
+successful token while peers wait forever. Native qualifications include launch
+ordering and library deadlock restrictions; no unconditional nonblocking promise.
+See [NCCL graph constraints](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/cudagraph.html).
+
+### 16.7 Conditional render reset and image subresources
+
+Condition the whole clear+draw region. The active path resets and redraws, the
+inactive path preserves the old image. A native region candidate or core conditional
+clear-draw candidate implements this. The latter uses Keep loads, replacement color
+writes, Always depth/write and the exact stencil/reset/sample/rectangle rules needed
+for the selected attachment. Gate the clear and following draws by the same GPU
+predicate. Eligibility must prove the clear conversion/format semantics match the
+ordinary clear; unsupported combinations decline before record. Measure tile/bandwidth
+cost instead of claiming all native pass-level work disappears.
+
+Typed image views share root ownership and refine mip/layer/aspect ranges. Public
+mip/layer/range indices are Julia one-based; sample lod=0 is a continuous level
+offset relative to the view's base mip, not a Julia array index. Infer the aspect
+from an unambiguous format rather than defaulting a depth image to ColorAspect.
+Float32 retains the existing depth-only attachment convention (§8); RGBA color
+volume examples must not silently construct a 3-D depth image. Window-sized Image
+construction has the same explicit lifetime as fixed-size Image construction. Native
+requirements validate formats, samples, storage reads/writes/atomics and feedback;
+sampling/storage intrinsics belong in KI, not Mantle-to-each-compiler shims.
+3-D/array/cube/mip paths, storage atomics and feedback have individual qualification
+gates; existing 2-D sampling cannot close them. Unsupported raw semantics reject;
+eligible high-level sampling can choose a core implementation with measured costs.
+
+### 16.8 Indirect streams and modern launch requirements
+
+DrawCommand is a typed semantic command, not user-authored native bytes. Core maps
+counts, first index/vertex, signed base vertex and base instance into native wire
+layouts and checks declared bounds. A GPU producer publishes live command count
+through normal array size metadata. ExecutionSet bounds all selectable programs,
+layouts and reachable resources; generated work cannot hide arbitrary pointers.
+Validate/fuse command checks before native execution where producer safety is not
+proved. Native multidraw, Metal ICB and generated-command candidates share those
+effects, dependency, lifetime and counter semantics.
+
+References: [Vulkan generated commands](https://docs.vulkan.org/features/latest/features/proposals/VK_EXT_device_generated_commands.html),
+[Metal GPU ICB encoding](https://developer.apple.com/documentation/metal/encoding-indirect-command-buffers-on-the-gpu).
+
+Reuse KI matrix/tensor facts. Runtime requirements additionally describe cooperative/
+cluster launch geometry/residency, dynamic shared memory, asynchronous descriptor
+resources and device-launch/region legality. config/compile keys and effect inference
+include these facts. No native API name implies availability and no arbitrary
+workgroup split may invalidate cooperation. F34's native PTX/Vulkan evidence carries
+forward; production integration remains a candidate/qualification gate.
+
+### 16.9 Explicit stochastic state
+
+RNG owns a core counter/seed resource. call!(target,rand!,rng,a) declares reads/
+writes at that target; ordinary rand!(rng,a) is eager. Destination arrays carry no region. Replay and executed loop invocations
+advance it; disabled work does not. Recompile preserves it; seed! schedules explicit
+reset. Private tuning copies state without consuming user randomness. Promise exact
+counter stream behavior only for the qualified algorithm/version/type; floating
+distribution transforms may have their documented cross-device numerical tolerance.
+Shared RNG instances order through their effects; independent streams are explicit.
+A logical random-fill operation reserves its declared counter interval once,
+indexed by logical elements rather than padded threads/queue scheduling. A zero
+or disabled operation consumes no interval. Pure local/counter RNG values inside
+user kernels remain ordinary values; existing Hikari sampling need not be replaced
+by global atomic RNG state. Preserve its baseline numerical contract.
+
+### 16.10 Qualification and scope
+
+Every MR-01–24 resolution maps to an open ledger item and independent acceptance
+case in plan-reconciliation.json. Required cases include slow parallel alias readers,
+same-segment deformation/trace, failure before a pending build, nested GPU size
+publication, candidate-domain growth, deadline-with-live-dependencies, conditional
+shadow reset, imported-alias lifetime, ordinary Group broadcast/library composition,
+RNG replay and actual FEM/particle/LLM programs. Existing consumer evidence remains
+baseline evidence; this specification does not close replacement/native gates.
+
+
+### 16.11 Representation and performance qualification
+
+The architecture's Compile and runtime performance rule applies to declaration,
+compilation, native encoding and replay, measured separately. Array rank/element
+layout, device/compiler configuration and kernel callable/argument ABI justify
+concrete specialization. Graph/node/resource identities, raw dynamic sizes, maximum
+loop iterations and runtime binding indices do not. A selected kernel may use a
+value-specialized variant only when its validity domain/cache bound and measured
+benefit are explicit; misses have a correct generic implementation or trigger
+ordinary supported compilation, never incorrect reuse.
+
+Keep graph topology and region bodies in indexed runtime structures. RegionNode's
+typed recipe/argument payload is not a tuple encoding its child graph. Core owns
+the same traversal over typed payload tables for every device; a function barrier
+may dispatch once to a concrete recipe/native encoder. Do not trade that boundary
+for per-node Julia specialization on topology, giant union inference or Symbol/isa
+switches. Any heterogeneous cold declaration container must stop before hot
+argument packing, numerical loops or unchanged baked submission. Walked encodings
+still use the single core typed command walk; no per-backend interpreter is allowed.
+
+An unchanged baked run consumes already prepared immutable recordings/bindings
+without visiting its internal command nodes. Boundary work can still scale with
+modified inputs, written-root/inbox summaries, native submissions, host cuts,
+present pieces or snapshot transfers. Measure those counts separately; this is
+not an unconditional constant-time promise for a graph with growing external
+outputs or submission boundaries. Avoid
+unnecessary host allocation, scalar download, resource scan, inference, recording
+or tuning on replay. Kernel/device code retains concrete layouts and no dynamic
+host-language dispatch. Native handle refresh follows invalidation edges only.
+
+MWE-08 and the batch benchmark record cold load/first compilation, warm graph
+compilation/recording, method-instance/cache growth, plan/workspace/peak host bytes,
+steady host submission and GPU completed time. Compare equivalent numerical work,
+same precision/layout and enabled capabilities, with warmup and interleaved A/A
+noise. Near-linear frontier storage on chains does not promise a linear general
+DAG: report interval fragmentation, fanout and conservative composite edges too.
+Use actual consumer latency/throughput to settle competing representations; a toy
+microbenchmark alone cannot justify a runtime regression. Search shared caching,
+typed function barriers, bounded variants and structured native regions before
+accepting a compile/runtime tradeoff. If unavoidable, runtime performance wins.
+The fixed catalog and batch schedule in recording-plan.md govern when to collect
+this evidence; the eight specifications and this document are not runtime passes.
+
+
+#### RT regression acceptance
+
+F124–F126 cannot close on expressibility/correctness alone. Compare against fetched
+Mantle 3e9943f / Hikari 407f9b2 / Makie 42e6355fb (or a recorded newer matched
+baseline), on the same actual device/compiler with identical completed work,
+precision, sample counts and alpha/media semantics. An incorrect opaque shortcut
+is never a filtered-render baseline. Source timing comments are not measurements.
+
+The cheap path is a structural requirement before timing:
+- Queries without hit tables allocate/upload/bind no function table or SBT. Query-
+  only/wavefront consumers create no program-layout-specific TLAS binding views.
+- Nothing result attributes occupy no result storage. Do not retain max-sized
+  attributes for every possible group or expand compact Hikari hit records into
+  full surfaces. Candidate context/attribute packing must be eliminated when unused;
+  inspect generated IR/native resource statistics rather than assume inlining.
+- Preserve eligible opaque closest/occlusion complete-result native constructions
+  under the shared selector. Selection/requirements analysis is compile-time work;
+  no device-family tests, table interpretation or host callbacks per ray/replay.
+- Stable scene/program/selector versions reuse bindings/recordings. Group/type
+  changes affect only relevant entry-point code/resources; keep current lobe/cut-set
+  specialization and record method-instance/cache growth explicitly.
+- Native program tables deduplicate identical geometry/instance selection slabs.
+  Do not unconditionally allocate instance-count × geometry-count × ray-type-count
+  records. Dynamic mappings charge actual bounded storage/update traffic and can
+  select a qualified shared query/dispatch construction when native expansion costs
+  more. Native binding-view count/bytes are bounded/accounted by core caches.
+
+Use MWE-05 capability profiles and MWE-08 compile/resource measurements at their
+existing batch boundaries, then actual Hikari/RayMakie B5 gates. Cover opaque
+closest/occlusion, alpha camera/transparent shadow, procedural reports/attributes
+and animated refit/selector updates. Record cold/warm compile and cache footprint,
+GPU registers/private stack/spills where exposed, table/TLAS/scratch bytes, host
+allocation/submission work, steady-state latency and complete frame throughput.
+Do not start a full suite after each edit or replace end-to-end gates with a toy
+kernel score. Costs of newly requested features are reported separately; callers
+using existing semantics must not pay unused generality costs.
+
+Interleave warmed A/B runs with A/A noise controls, using the same inputs/seeds and
+completed GPU work. A repeatable regression outside that measured noise blocks
+closing the affected profile; investigate codegen/packing/selection and improve the
+shared implementation. Do not hide it in an aggregate, lower quality, remove alpha
+checks or restore a parallel backend renderer. If a tradeoff remains, record its
+workload/device impact and alternatives; it is not a no-regression pass. Unavailable
+hardware, unresolved measurements and new unqualified native paths remain open.
+These are acceptance requirements, not proof that the target API has no overhead.
+
+### 16.12 Consumer composition contracts
+
+These boundaries complete the interface requirements for the existing F115–F122
+gates; they do not claim implementation, measured performance or passing consumer
+ports. Domain algorithms/data models stay in their libraries and use one common
+Mantle operation/resource/control layer. api.md owns the entry signatures.
+
+**Operator and sparse composition.** Ordinary mul!/ldiv! recording requires a
+qualified code-owned definition for the operator types, or a domain builder emits
+the equivalent kernels explicitly. Never invoke an arbitrary eager Julia method
+and assume its work was captured. The extension follows the same typed recipe,
+return/effect/shape and shared-candidate protocol as core operations.
+
+A supported sparse composite must state scalar/block shape, one-based logical
+row/column convention, index width, duplicates/coalescing rule, symmetry/triangle
+and diagonal interpretation, sortedness/pattern identity, live entry count and
+root/view mapping. These are layout/semantic facts for shared algorithms and
+candidate eligibility, not native-vendor API choices in consumer code. Existing
+Julia/library composite types may hold MantleArrays; no second device-array family
+or universal sparse format is required. Conversion is an explicit shared recipe
+with real workspace/traffic cost. A native candidate requiring unavailable exact
+host counts cannot silently read GPU lengths back to become eligible.
+
+For AScanner's block COO, values/row/column arrays use the same logical triplet
+count and block indexing convention. Compaction/conversion computes that count
+once; one publishing invocation resizes all three after checked scatter, including
+zero input. Every following consumer depends on all three payload/size writes.
+It must not zip independently changing lengths or call an Integer-only host resize
+on a GPU counter. Index-width overflow, invalid indices and insufficient output
+capacity are checked before invalid memory access. Duplicate/symmetric operations
+must match the declared mathematical operator, including not doubling diagonals.
+
+Symbolic-analysis reuse depends on the declared pattern/shape version; numerical
+factor/preconditioner reuse depends on value/configuration dependencies too. Shared
+resource/derived-work ordering supplies those dependencies; each backend must not
+invent its own cache/invalidation policy. A GPU-written changing pattern does not
+become an exact host-known shape through a cached integer. Matrix-free operators
+need no assembly/conversion merely to fit the graph interface.
+
+**DNN allocation/escape map.** The source-level migration classifications are:
+
+| Existing emitter role | Target ownership/lifetime |
+|---|---|
+| make for nonescaping intermediates, including zero-size outputs | MantleArray(target,...;scratch=true); unused/zero-byte scratch is legal and allocates no native payload. Do not preserve the old zero-size persistent-buffer workaround. |
+| make for escaping output IDs, saved cross-run activations or session results | Persistent output/caller-supplied destination; preserve its identity and hold across plan replacement. |
+| scratch and activationbuffer prepared representations | Explicit scratch with root/version-aware liveness across all consumers; a returned owner-graph handle/view remains legal. |
+| Bound input/output resources | Reuse the exact supplied root/lifetime; do not promote/demote, copy or adapt to Group. Reject an actual scratch escape. |
+| Declared views/tuple projections | Ordinary metadata aliases retaining the classified parent; a view does not turn scratch into persistence. |
+| residentweights/imported arrays | Persistent existing allocation or explicit device import/copy. Inference may opt into readonly/streamed source retention; mutable training weights must remain writable persistent data. |
+| MemoryBank key/value/history/sensory state | Persistent session resources, with GPU live bounds where applicable; never frame scratch. |
+| Noise state | Explicit persistent qualified RNG resource, reset only by an explicit seed/reset operation. |
+
+DNNKernels make/scratch/emitgraph!, activationprep activationbuffer and memory
+MemoryBank/recordmemread are the concrete source seams. Constructor substitution
+must follow these roles, not replace every old resource with persistent arrays or
+infer lifetime by escape guessing at runtime. Keep exporter/model liveness hints
+as semantic input, not a replacement allocator/hazard policy. Emission failure
+cleans up resources/contributions owned by that emitter, never caller-bound roots.
+The existing F116 module-composition/memory/native checks qualify the actual port.
+
+**Simulation control and parameters.** PrintSim's Graph-only launch/recording
+classification must support Group by dispatch; otherwise it can accidentally take
+the immediate convergence-readback branch during construction. Each nested solver
+loop resets its predicate/state at the specified enclosing invocation; CG and line
+search are sibling regions where the algorithm says so, not a fabricated product
+of their bounds. A parameter stored in GPURef is a per-run input only when all
+consumers, including derived setup, support that dependency. Current FEM/coarse
+data are timestep-dependent: a dt change requires affected setup recomputation/
+rebuild or explicit rejection, preserving retained physical state as appropriate.
+No generic scalar update can repair a stale factorization. CPU diagnostics use
+explicit phase/controller host boundaries; do not hide them in a GPU-controlled
+region. Native versus expanded nested solvers require realistic compile bytes,
+slot/workspace memory, stop/predicate overhead and completed-work measurements;
+one native launch or one tiny loop does not establish a fast simulation path.
+
+**Frames, picking and snapshots.** A window capture is an explicitly recorded
+Array output in its presenting graph, after the final window writer and before
+present; it copies that acquired generation while held. Array(win) does not wait
+for an unsubmitted future frame. A requested run that cannot acquire/render/present
+its frame before accepting the copy rejects that request. If the copy was already
+accepted, preserve its token/staging and follow the ordinary prefix/failure contract;
+its pixels describe the rendered image, not proof of scanout/presentation completion. An eligible native copy or shared
+capture construction must satisfy surface usage/format requirements before
+recording. No new backend output scheduler or consumer surface workaround exists.
+
+A renderer captures its color/ID/depth outputs after their matching producers and
+retains the frame's immutable extent, pixel scale, format and plot-ID map alongside
+the requested results. Cache rebuild/rebind cannot attach a new plot map to old
+pixels. Subsequent frame writes follow snapshot reads. Frame-owned outputs and
+frozen metadata must remain held until capture finishes; arbitrary external
+writes are not an atomic multi-array snapshot promise. Image snapshot axes use
+Julia source order and the same coordinate convention as device image access;
+native pitch/channel/format conversions belong to the common copy/layout protocol.
+The Makie adapter owns its documented CPU layout conversion once. A picking ROI
+uses a source view/region copy or a small device extraction kernel into an ordinary
+array, followed by the same recorded Array output; it does not require full-frame
+readback or a new Mantle picking API. Qualify actual WSI resize/retirement separately
+from headless color/ID agreement.
+
+**LLM cache layout.** Bonsai's current kv_page rounds contiguous capacity; that is
+the initial contiguous decode/prefill gate, not evidence of paged attention. A
+logical paged cache belongs to the LLM library: ordinary device arrays hold cache
+pages, block tables, positions and quantization scales, and its target-aware
+builder/qualified attention definition declares those resources. Logical paging
+does not require sparse hardware residency. Native attention candidates must
+support that layout/precision or decline to the common kernel candidate. Explicit
+page-table/scale version ordering and page leases prevent reuse while any old
+reader can access the page; aliases follow the same root/span hazards. GPU-selected
+membership must be covered conservatively by the declared resource set. Record
+any lost concurrency from coarse root spans, page traffic and per-token overhead;
+packed contiguous fixtures cannot close the shuffled-page/continuous-batching
+profile. No Mantle-wide KV-cache class or per-backend cache manager is introduced.
+
+**External AD and saved state.** Differentiate numerical definitions or an external
+AD library's model before emitting forward/backward operation builders. No promise
+is made that differentiating run!, mutable node bookkeeping, native handles or a
+ReadbackFuture differentiates the GPU program. A library's ordinary-function rules
+can emit qualified operation recipes through the same target-aware boundary.
+Forward activations needed by backward in the same run may be explicit scratch;
+values crossing runs/graphs must be persistent or copied into persistent storage.
+Effects/holds preserve the saved version until its backward reader; an optimizer
+or another forward pass must not overwrite it early. Gradient arrays, optimizer
+state and RNG use the normal resource/version model, with no backend AD policy.
+The training gate needs an actual external AD integration and independent gradient
+reference; handwritten backward kernels or inference/optimizer-only runs alone
+are insufficient evidence. This is an extension boundary, not a new public AD API.

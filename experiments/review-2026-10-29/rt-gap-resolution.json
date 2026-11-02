@@ -1,0 +1,61 @@
+{
+  "date": "2026-10-30",
+  "scope": "Target RT design resolution only; no implementation or native hardware tests",
+  "design_status": {
+    "F124": "specified_logical_hit_table_geometry_selection_callback_ABI_and_native_binding_views",
+    "F125": "specified_streaming_report_filter_before_commit_multiple_roots",
+    "F126": "specified_isbits_group_attributes_typed_query_capture_and_native_limit_eligibility"
+  },
+  "implementation_status": "open",
+  "reference_checks": {
+    "rejected_near_root_keeps_far_in_both_report_orders": true,
+    "triangle_replaces_procedural_identity_and_attributes": true,
+    "instance_geometry_raytype_selection_has_no_zero_stride_alias": true,
+    "nonuniform_object_ray_preserves_world_t_parameter": true,
+    "attribute_schema_is_not_limited_to_barycentrics": true,
+    "one_binding_build_cannot_consume_another_binding_dirty_versions": true,
+    "early_accept_terminates_only_after_filter_acceptance": true,
+    "opaque_complete_result_cannot_bypass_required_candidate_work": true
+  },
+  "native_sources": [
+    "https://docs.vulkan.org/spec/latest/chapters/raytracing.html",
+    "https://developer.apple.com/videos/play/wwdc2021/10149/"
+  ],
+  "source_baseline": "Fetched Mantle 3e9943f / Hikari 407f9b2 / Makie 42e6355fb; local source worktrees not changed",
+  "validation_limits": "Scalar reference models prove fixture expectations, not Julia GPU compilation, driver traversal, ABI visibility, performance or native limit support. Metal/Vulkan and software profiles stay open under MWE-05.",
+  "design_rulings": [
+    "One logical table with typed callbacks and instance/geometry/raytype selection.",
+    "Shared streaming reporter filters before commit and can continue beyond a rejected root; optional anyhit mode has an explicit continuation result.",
+    "Per-group isbits candidate attributes and optional normalized query result Q, with checked attribute access and no fabricated miss value.",
+    "Scene TLAS independent of ray-type native layouts; versioned binding views/costs are core-owned.",
+    "Current Hikari query/wavefront path preserved; no consumer backend tests or restoration of deleted pipeline."
+  ],
+  "validation": {
+    "documentation": "Seven-doc consistency and existing nine abstract models pass; local links/754 ledger rows/eight MWE specs unchanged in count.",
+    "julia": "Three pseudocode sketches parse; 73 unqualified example names checked; 11 static routing guards pass on Julia 1.12.7. No Mantle load/GPU execution.",
+    "scalar_models": "Eight exact reference checks; these exercise specification outcomes, not a native implementation.",
+    "whitespace": "git diff --check pass"
+  },
+  "target_sha256": {
+    "docs/api.md": "144deb9490097d8b4739b98aee7e4d4c8e46d2e9c83c8f1b98e2865320a98a1e",
+    "docs/examples.jl": "a79ced5cfb3e46924703b2c6d3c8dea909a17fbdadce318b3f9524b3e4d69ee2",
+    "docs/execution-contracts.md": "c54274da9b0598d9ddfc64d9188e27b2c7fcfd17069ae0af3afded03eca664f3",
+    "docs/internals.jl": "651ad7e493af43fa0de22129bdd6724980654ca64e55dc1a1951c90f71f7c3a7",
+    "docs/recording-plan.md": "744bfcb40f1cce4fe298ec1e61b4bdf5880bb1faef50f746dcf308087db6e8d4",
+    "docs/refactor-ledger.md": "8bc1b32583b7c255d3b2a44d4a58bb34a0fa03c8d126d7e90e3075bc5bf381f6",
+    "docs/resizing-and-raytracing.jl": "55ccdde87e6bf531d5aa22ed967377b123a3ca95abd77f6b6caf1e56fccdd09e"
+  },
+  "performance_status": "unmeasured; no no-regression claim",
+  "performance_acceptance": {
+    "contract": "docs/execution-contracts.md: 16.11 RT regression acceptance",
+    "baseline": "pushed Mantle 3e9943f / Hikari 407f9b2 / Makie 42e6355fb, matched semantics/device/compiler",
+    "structural": [
+      "No table/SBT/program-specific binding views for plain query consumers",
+      "Nothing result storage erased; preserve compact records and unused-context elimination",
+      "Keep eligible opaque complete-result constructions via shared compile-time selection",
+      "Version/cache reuse, relevant stage/type specialization, bounded deduplicated native tables"
+    ],
+    "measurement": "MWE-05/08 existing capability/compile profiles and B5 actual consumers; warmed interleaved A/B plus A/A noise, GPU resources/memory, compilation and completed frame work",
+    "failure_rule": "Repeatable regression outside measured noise blocks the affected profile. Record unresolved tradeoffs and hardware gaps; do not mark no-regression pass."
+  }
+}
