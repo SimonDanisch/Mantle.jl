@@ -509,3 +509,196 @@ Metal-array copy paths. Seventeen checks pass with both compiler versions,
 covering strided views, transpose/permutation, reinterpret/reshape, empty arrays,
 index views and independent device copies. This host-transfer fix does not
 change BSDF storage or shader selection.
+
+## Capacity-bound follow-up (2026-11-02)
+
+On M5 hardware ray tracing, Julia 1.12.7 / GPUCompiler 2.17, 512² pixels,
+eight samples, five warmups and 51 alternating frame triples:
+
+| Material | Retained typed reference | Former shared dispatch | Bounded dispatches |
+| --- | ---: | ---: | ---: |
+| Glass, roughness 0.2 | 48.938 ms | 80.681 ms | 54.675 ms |
+| Layered Principled | 37.647 ms | 55.067 ms | 45.031 ms |
+
+Both image comparisons are bit-identical in this measurement. Frame time drops
+32.2% and 18.2%; the remaining differences from the typed reference are +11.7%
+and +19.6%. This does not eliminate every runtime regression. General fallback
+cases also pay for rejected dispatches: partial transmission 81.766 → 85.171 ms,
+thin wall 76.147 → 77.856 ms, computed transmission 75.206 → 78.302 ms.
+
+A conservative host proof is stored in the unused upper output-width bits of
+the first closure instruction. A single solid Principled node without subsurface
+can use one record for full glass without overlying layers, five for opaque
+layers, or its existing general capacity. The eligible class has three fixed
+kernels, independent of graph arrangement or parameter values. Larger compositions
+and subsurface classes retain their existing single dispatch. No per-pixel
+buffer is added. In-place program copies update the proof and retain recorded
+plans and buffer layouts. Glass and explicitly configured Principled produce
+identical programs. The proven zero/one controls expose dead layer setup to the
+compiler while using the same scattering formulas.
+
+`Hikari/benchmarks/shared_surface/capacity_bounds.jl` records the typed reference,
+former shared dispatch and production dispatches independently, then compares
+images and interleaves timings. Its temporary control method is deleted in
+`finally`; there is no public alternate rendering mode. Raw frame samples and
+experiment records are under `out/metal_methodical_20261102` in the development
+workspace. GPU register/spill explanations are not established by these timings.
+
+Final-source checks: 455 Metal shader/material assertions; 55 new capacity,
+program and update assertions on Metal and Metal with forced bounds checks.
+The latest test adds three assertions comparing the first post-update frame
+with a repeat; all 58 pass on Lavapipe_jll, a fresh Radeon RX 7900 XTX session,
+and the canonical Mac checkout. The Radeon also passed 300
+successive update frames, 30 forced re-recording transitions, and synchronization
+validation with zero messages. These tests compare against the retained typed
+formulas and verify that updates retain the same plans and buffer layouts.
+
+Two first-update anomalies appeared in the heavily edited Radeon session and
+could not be reproduced in the fresh/stress/re-recording/validation checks.
+Their cause is not established; passing subsequent checks is not a synchronization
+fix. Keep the first-frame acceptance test, rather than hiding it with warmups.
+
+A fresh Metal process reuses all 146 kernel lookups with zero cache misses and
+identical image hashes. Glass construction takes 4.903 s and its first render
+34.295 s (17.583 s in Julia JIT accounting); the next Principled scene constructs
+in 0.037 s and renders in 0.087 s. Cache reuse does not make first-render startup
+cheap; substantial host compilation remains.
+
+Profiling also exposed a separate diagnostic bug: unlabeled recorded Metal
+submissions were absent from `Metal.@profile`. Mantle now labels them only while
+profiling. The regression test fails before the fix (zero replay intervals) and
+passes six checks afterwards. It measures complete recorded submissions, not
+individual compute passes inside an indirect command buffer.
+
+Repeated-frame controls are bit-identical for the retained typed reference,
+production dispatches and the full-mask control. The rejected lazy primitive
+lookup produces different pixels between identical renders (five frames,
+256²/eight samples); this is not explained by deterministic Float32 rounding.
+That experiment is not applied. Its native/compiler cause remains unestablished.
+
+### Counted traversal and pass-grouping controls
+
+Acceptance remains incomplete: a subsequent Radeon in-place update check caught
+a repeat-frame mismatch. A capture then found differences in 19 of 36 updates,
+already in spectral `pixel_L`, with all sample counters equal to eight and plans
+retained. Static controls and later update controls passed after temporary
+recompilation; that is not a demonstrated fix. The failing log, images and
+spectral buffers are preserved in `out/metal_methodical_20261102`.
+
+The follow-up measures the bounded implementation above, rather than the former
+eight-record baseline. At 512²/eight samples, five warmups and 31 alternating
+triples on M5 hardware ray tracing:
+
+| Material | Bounded baseline | Scalar normal comparison + one-record traversal |
+| --- | ---: | ---: |
+| Glass | 54.640 ms | 51.153 ms |
+| Layered Principled | 45.232 ms | 44.886 ms |
+| Rough coloured Diffuse | 27.930 ms | 28.043 ms |
+
+All images are bit-identical. Paired bootstrap 95% intervals for the runtime
+ratio are 0.931–0.941, 0.989–0.995 and 0.999–1.015 respectively. The small Diffuse
+change is inconclusive; these measurements do not establish universal parity
+with the retained typed renderer. The source adds constant-index traversal
+only for one-record storage. Larger storage classes keep the counted loop.
+An empty span ignores even a positive backing record; a record without sample
+weight contributes nothing.
+
+The normal comparison matters for correctness: removing the one-record loop
+alone changes rough Diffuse's full-render image on Metal, with maximum component
+error 0.324, despite matching CPU and standalone Metal scattering kernels. It
+also fails before shadow traversal and with software ray tracing. The same
+renderer variants agree on the Radeon. Replacing the generic vector comparison
+in `bump_shadowing` with three scalar comparisons removes the observed failure.
+The exact native compiler defect is not isolated; this is not evidence that
+generic vector equality is incorrect in every kernel. A full-render differential
+regression now exercises Diffuse, Sheen, Glossy and film Glass, with software and
+hardware scene settings, against the retained typed formulas.
+
+Other measured controls were retained as diagnostics:
+
+- Unrolling five records expands the Principled entry from 50,835 to 82,100 LLVM
+  instructions, 3,062 to 5,534 blocks and 105 to 201 allocas. Frame time rises
+  45.397 → 52.404 ms. These counts do not measure hardware registers or spills.
+- Each capacity dispatch currently occupies a separate Mantle pass. Combining
+  all three reduces Glass 55.267 → 53.492 ms, but increases Principled
+  45.834 → 46.918 ms. Combining only the one-record and general dispatches while
+  retaining the five-record pass reduces Glass 55.202 → 54.625 ms, Principled
+  45.591 → 45.095 ms and partial transmission 85.806 → 84.625 ms. Images match;
+  neither grouping experiment changes production pass construction.
+- A 65,536-lane setup/evaluation/sampling kernel takes 0.350 ms for bounded Glass
+  versus 0.333 ms typed, and 0.980 ms for bounded Principled versus 0.539 ms typed.
+  Separate stage compilations permit different dead-code elimination, so their
+  timings cannot be subtracted to derive a renderer breakdown.
+
+The historical MWE measurements above used temporary methods restored in
+`finally`. The corresponding source changes and tests were subsequently applied
+to the canonical checkouts. Following the user's correction,
+the source changes and tests are now in the existing Mac `dev/Hikari` and
+`dev/Mantle` repositories. Validation runs from the project root and verifies
+the actual loaded package paths. The 56 direct/count, 58 capacity/update,
+51 full-render parity and six profiler assertions pass there (run r154).
+The extra Desktop and Mac worktrees have been removed; their history, patches
+and unique compatibility backport are preserved without additional checkouts
+under `out/canonical_repository_reconciliation_20261102`.
+
+Local Radeon and Lavapipe_jll runs each pass the 455 shader/material assertions,
+the 51 composition/one-record full-render assertions and 56 direct/counted-storage
+assertions. Lavapipe also passes all 58 capacity/update assertions. Radeon
+capacity/update results must be read with the failure above; later passing
+checks do not replace it. A CPU comparison of original and scalar normal
+shadowing produces 28,090 identical results, including tilted, flipped,
+signed-zero and NaN inputs.
+
+A subsequent fresh Radeon process, loading the unchanged files rather than
+temporary scattering methods, passes the 58 capacity/update assertions and
+108 further captured frames with zero repeat differences. This narrows the
+failure to conditions not reproduced by that fresh run; its cause remains open.
+
+The Radeon timing control also separates the capacity optimization from the
+remaining shared-storage cost (512²/eight samples, 51 alternating triples):
+
+| Material | Typed reference | Former eight-record dispatch | Current bounded dispatches |
+| --- | ---: | ---: | ---: |
+| Glass | 5.645 ms | 8.936 ms | 6.535 ms |
+| Layered Principled | 4.721 ms | 6.935 ms | 6.892 ms |
+
+The bounded dispatch improves Glass on this device too, but the shared renderer
+still has a substantial difference from the typed reference. It does not meet a
+claim of universal runtime parity.
+
+A separate MWE scans program headers into three count integers before shading,
+allowing absent capacity classes to launch zero workgroups without rebuilding
+plans after parameter edits. Glass changes 6.704 → 6.301 ms and Principled
+7.093 → 6.990 ms, but partial transmission increases 8.764 → 9.278 ms. All three
+images match. The extra classification pass and its dependency remain in every
+bounce, so skipping rejected shader launches is not a universal win. That MWE
+is saved under `out/metal_methodical_capacity_count_mwe_20261102.jl`; it is not
+part of the production renderer.
+
+Canonical-checkout acceptance reruns the 455 shader/material assertions in
+addition to the 171 focused assertions above. All 13 changed Hikari file hashes
+match Desktop; active packages resolve to the existing Mac `dev/` repositories
+with managed GPUCompiler 2.17. The seven linked Mac worktrees, two plain source
+copies and six Desktop worktrees are retired. Five Mac and fourteen Desktop
+validation environments now reference canonical sources; the two obsolete
+GPUCompiler 2.16 environments and their unique backport are archived explicitly.
+
+The canonical-source timing rerun uses the same 512²/eight-sample hardware-ray
+tracing fixture, five warmups and 51 alternating triples. Glass measures
+45.128 / 79.772 / 51.365 ms and layered Principled 36.944 / 54.988 / 44.605 ms
+for typed reference / former shared dispatch / current dispatches. Every image
+is bit-identical, with the expected one / one / three shade signatures. Current
+dispatches improve the former shared path by 35.6% and 18.9%, while remaining
+13.8% and 20.7% slower than the retained typed reference. Raw samples are saved
+in `out/canonical_repository_reconciliation_20261102/metal-canonical-runtime.json`.
+
+The same canonical project also passes all 171 focused assertions with
+`--check-bounds=yes` (r164). That fresh run takes 10m09s, including 140 seconds
+of package-cache rebuilds; the direct-shader test takes 4m44s. These cold costs
+remain distinct from the warmed frame timings above.
+
+The final source audit also found older plain validation snapshots outside Git's
+worktree registry. Those snapshots are archived with verified file hashes and
+their source directories removed: 17 on Desktop and eight on Mac. The archives
+and environment backups remain under `out/canonical_repository_reconciliation_20261102`;
+validation uses the existing `dev/` repositories.

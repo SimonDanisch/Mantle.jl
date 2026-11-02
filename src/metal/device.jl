@@ -401,6 +401,11 @@ function closesubmit!(q::LegacyQueue, s::LegacySubmission)
     # `set_pipeline!` skips a set it believes current: the next launch would run
     # whatever pipeline the recording left.
     s.bq.backend.last_pipeline = nothing
+    # Otherwise the integrated profiler drops an unlabeled recorded submission,
+    # even though it contains the renderer's compute work.
+    if MTL.profile_metadata[] !== nothing
+        Metal.note_operation!(s.bq, (kind = :recorded, name = "Mantle recording"))
+    end
     Metal.note_recorded!(s.bq, 0, nothing)
     # Commit only: `replay!` holds `submission_lock` here and waits for a free
     # in-flight slot after releasing it.
