@@ -105,6 +105,8 @@ end
 # ops take no pointer; any other name is `nothing`, a refusal, not a guess.
 function intrinsic_usage(::VulkanAPI, name::Symbol)
     s = String(name)
+    # Only keeps a parameter alive through LLVM; the emitter drops the call.
+    startswith(s, "_lava_keepparam_") && return NOTOUCH
     op = if startswith(s, "_lava_coopmat_")
         SubString(s, ncodeunits("_lava_coopmat_") + 1)
     elseif startswith(s, "_lava_tensor_")

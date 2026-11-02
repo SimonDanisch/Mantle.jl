@@ -14,12 +14,12 @@ end
 
 # Backends with an inference barrier around their native constructor supply its
 # signature explicitly. The constructor is compiled, never called.
-_precompile_constructor_signatures(::Type{<:Device}) = ()
+precompile_constructor_signatures(::Type{<:Device}) = ()
 
 function _precompile_statements()
     signatures = Any[]
     for device in _precompile_device_types()
-        append!(signatures, _precompile_constructor_signatures(device))
+        append!(signatures, precompile_constructor_signatures(device))
         for phase in (Place, Pipelines, Barriers)
             push!(signatures, Tuple{typeof(run!), phase, Compile{device}})
         end

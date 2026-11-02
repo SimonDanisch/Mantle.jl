@@ -29,7 +29,7 @@ end
     bytes=fill(UInt8(0xa5),allocated+16)
     GC.@preserve bytes begin
         ptr=pointer(bytes)
-        Mantle.pack_args_direct!(InlineExtentOwner(),ptr,UInt64(ptr),[0,8],base,sizes,
+        Mantle.pack_args_direct!(InlineExtentOwner(),nothing,ptr,UInt64(ptr),[0,8],base,sizes,
             (InlineExtentPayload((1f0,2f0,3f0)),7f0))
         @test unsafe_load(Ptr{UInt64}(ptr))==UInt64(ptr)+16
         @test unsafe_load(Ptr{Float32}(ptr+8))==7f0

@@ -619,6 +619,8 @@ const BACKEND_VOCABULARY = (
     :intrinsic_usage,
     # Library callable types declare their own argument accesses.
     :argument_usage,
+    # A native constructor behind an inference barrier states its signature.
+    :precompile_constructor_signatures,
     # Properties required from backend-specific compiled dispatches.
     :callgroup,
     :makeprofiler, :Profiler,
