@@ -162,4 +162,32 @@ end
     @test destroyed(tl, d)
 end
 
+@testset "retiring takes no lock: finalizers do it, from any thread" begin
+    tl = HoldTimeline()
+    ch = HoldChannel(tl)
+    objs = [HeldBuffer() for _ in 1:4000]
+    # Named by no submission, so a reclaim destroys each one at once, while others still arrive.
+    writers = [Threads.@spawn(foreach(o -> Mantle.retire!(ch, o), chunk))
+               for chunk in Iterators.partition(objs, 500)]
+    while !all(istaskdone, writers)
+        Mantle.reclaim!(ch)
+        yield()
+    end
+    foreach(wait, writers)
+    Mantle.reclaim!(ch)
+    @test !Mantle.holdsretired(ch)
+    @test length(tl.freed) == length(objs)
+    @test Set(objectid.(tl.freed)) == Set(objectid.(objs))
+
+    # Oldest first, and what a recording still holds stays queued in that order.
+    empty!(tl.freed)
+    a, b, c = HeldBuffer(), HeldBuffer(), HeldBuffer()
+    r = Mantle.acquire!(ch)
+    Mantle.hold!(ch, b)
+    foreach(o -> Mantle.retire!(ch, o), (a, b, c))
+    Mantle.reclaim!(ch)
+    @test tl.freed == [a, c]
+    @test Mantle.holdsretired(ch)
+end
+
 end  # @testset

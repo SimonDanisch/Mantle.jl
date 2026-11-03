@@ -43,14 +43,12 @@ mutable struct SubmitChannel{Q,R,T,P}
     # Emptied hold vectors returned by unhold!, reused by emptyframe!.
     spare::Vector{Vector{Any}}
     # Any thread may enqueue pending destroys; only the owner stamps and reclaims
-    # retiring entries against this channel's timeline.
-    pending::Vector{Any}
-    # Finalizers can re-enter retire! at allocation safepoints inside this lock, so
-    # a SpinLock would deadlock on same-task re-entry.
-    pendinglock::ReentrantLock
+    # retiring entries against this channel's timeline. Lock-free, because finalizers
+    # enqueue here: a contended lock yields, which a finalizer may not, and the error
+    # that raises loses the destroy.
+    pending::Inbox
     retiring::Vector{Tuple{Any,T}}
-    # Scratch for draining pending requests. Driver destructors and cross-channel
-    # handoff run outside pendinglock.
+    # Scratch for draining pending requests.
     taken::Vector{Any}
     # Single-writer: only this thread may record into or submit from this channel.
     thread::Int
@@ -64,7 +62,7 @@ Base.show(io::IO, ch::SubmitChannel) =
 SubmitChannel{Q,R,T,P}(channel::Q) where {Q,R,T,P} =
     SubmitChannel{Q,R,T,P}(channel, Outstanding{T,P}[], R[],
                            Vector{Any}[], Vector{Any}[],
-                           Any[], ReentrantLock(), Tuple{Any,T}[], Any[],
+                           Inbox(), Tuple{Any,T}[], Any[],
                            Threads.threadid())
 
 """
@@ -273,7 +271,7 @@ Enqueue an explicit destroy request from any thread, including finalizers. The o
 thread later checks recording holds and completion in reclaim! before invoking rawfree.
 """
 function retire!(ch::SubmitChannel, obj)
-    lock(() -> push!(ch.pending, obj), ch.pendinglock)
+    push!(ch.pending, obj)
     return nothing
 end
 
@@ -282,16 +280,15 @@ end
 
 Whether pending or token-waiting destroys make a channel drain useful to automatic trim.
 """
-holdsretired(ch::SubmitChannel) =
-    lock(() -> !isempty(ch.pending), ch.pendinglock) || !isempty(ch.retiring)
+holdsretired(ch::SubmitChannel) = !isempty(ch.pending) || !isempty(ch.retiring)
 holdsretired(ch) = false
 
 """
     reclaim!(ch) -> Int
 
 On the owning thread, defer recording-held objects, hand foreign-channel objects to their
-last channel, and destroy safe objects. Driver calls and cross-channel handoff run outside
-pendinglock. Return the count freed from the completed-token retiring list.
+last channel, and destroy safe objects. Return the count freed from the completed-token
+retiring list.
 """
 function reclaim!(ch::SubmitChannel)
     ownthread(ch)
@@ -301,13 +298,12 @@ function reclaim!(ch::SubmitChannel)
     dev = deviceof(ch)
     if !isempty(ch.pending)
         taken = ch.taken
-        lock(ch.pendinglock)
-        try
-            append!(taken, ch.pending)
-            empty!(ch.pending)
-        finally
-            unlock(ch.pendinglock)
+        node = takeall!(ch.pending)
+        while node !== nothing
+            push!(taken, node.item)
+            node = node.next
         end
+        reverse!(taken)                    # oldest first, as they were retired
         keep = 0
         for obj in taken
             s = stampof(obj)
@@ -327,14 +323,7 @@ function reclaim!(ch::SubmitChannel)
             end
         end
         resize!(taken, keep)
-        if keep > 0
-            lock(ch.pendinglock)
-            try
-                append!(ch.pending, taken)
-            finally
-                unlock(ch.pendinglock)
-            end
-        end
+        foreach(obj -> push!(ch.pending, obj), taken)
         empty!(taken)
     end
     isempty(ch.retiring) && return 0
