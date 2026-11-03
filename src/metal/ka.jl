@@ -9,6 +9,8 @@ syncbackend(::MetalDevice) = MetalAPI()
 # for the access walker to read; their symbol names are unique.
 function intrinsic_usage(::MetalAPI, name::Symbol)
     s = String(name)
+    # Subgroup shuffles and reductions move values and take no pointer.
+    startswith(s, "air.simd_") && return NOTOUCH
     startswith(s, "air.simdgroup_matrix_8x8_load.") && return READ
     startswith(s, "air.simdgroup_matrix_8x8_store.") && return WRITE
     # Tensor descriptors retain operand dependencies; matmul consumes and writes them.
