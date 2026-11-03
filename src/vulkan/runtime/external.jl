@@ -45,6 +45,9 @@ function VulkanExternalImage(ctx::LavaDevice, width::Integer, height::Integer;
     return VulkanExternalImage(image, memory, Int(width), Int(height), Int(req.size), false, ctx)
 end
 
+ExternalImage(d::LavaDevice, width::Integer, height::Integer; kw...) =
+    VulkanExternalImage(d, width, height; kw...)
+
 """
     memoryfd(img::VulkanExternalImage) -> Int
 
