@@ -230,5 +230,11 @@ abstract type HWTLAS{Tri} <: Raycore.AbstractAccel end
 
 An image whose memory is shared with another process or API. The handle type is
 the backend's: an fd or Windows handle on Vulkan, an `IOSurface` on Metal.
+
+    ExternalImage(device, width, height; kw...) -> ExternalImage
+
+One for `device`, from the backend that can make it.
 """
 abstract type ExternalImage end
+ExternalImage(d::Device, ::Integer, ::Integer; kw...) =
+    throw(ArgumentError("$(typeof(d)) cannot share an image with another API"))

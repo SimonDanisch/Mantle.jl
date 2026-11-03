@@ -621,6 +621,8 @@ const BACKEND_VOCABULARY = (
     :argument_usage,
     # A native constructor behind an inference barrier states its signature.
     :precompile_constructor_signatures,
+    # An image shared with another API; core refuses, a backend that can makes one.
+    :ExternalImage,
     # Properties required from backend-specific compiled dispatches.
     :callgroup,
     :makeprofiler, :Profiler,
