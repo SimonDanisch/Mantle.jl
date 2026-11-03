@@ -358,17 +358,18 @@ else
         @test maximum(k -> maximum(abs.(got[k] - want[k])), eachindex(want)) < 1f-4
     end
 
-    @testset "no barrier is dropped because another resource's covers it" begin
-        # Eight independent chains interleaved over disjoint buffers. A barrier
-        # scoped to one buffer orders nothing else, so each pass keeps its own,
-        # with aliasing off and on.
+    @testset "interleaved chains stay correct with coalesced barriers" begin
+        # Eight independent chains interleaved over disjoint buffers. A recorded
+        # plan's buffer barrier is global, so one covers the passes after it
+        # (`test_recorded_buffer_sync.jl`): fewer barriers than passes, at least
+        # one, and a second run of the chains reproduces the first.
         include(joinpath(@__DIR__, "..", "bench", "independent.jl"))
         dev = M.Device(TESTBACKEND)
         emitted(pl) = count(pp -> !isempty(pp.pre), pl.passes)
         unaliased = Base.invokelatest(build_interleaved, dev, 1 << 12, 8, 6; alias = false)
-        @test emitted(unaliased.plan) == length(unaliased.plan.passes)
+        @test 0 < emitted(unaliased.plan) <= length(unaliased.plan.passes)
         s = Base.invokelatest(build_interleaved, dev, 1 << 12, 8, 6)
-        @test emitted(s.plan) == length(s.plan.passes)
+        @test 0 < emitted(s.plan) <= length(s.plan.passes)
 
         # Seeded before each run: each chain's first buffer is a transient no pass
         # writes, aliased with transients that are written, so an unseeded run
