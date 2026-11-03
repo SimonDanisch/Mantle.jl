@@ -35,6 +35,8 @@ using KernelAbstractions
 # the rest of the branch, so a `using` inside it cannot be what binds the name.
 using Atomix
 const M = Mantle
+# The barriers of the per-resource walk, which a plan that cannot be recorded runs on.
+perresource(g; kw...) = M.compile!(M.Compile(g; kw...))
 # The backend this run is for. `runtests.jl` runs this file once per available
 # backend (`Mantle.eachbackend()`); a bare `include` from the REPL gets the
 # default one. Nothing below names a backend, which is the point: these testsets
@@ -455,9 +457,9 @@ else
         #
         # `range` hands the slice its own resource id, so the existing
         # per-resource walk answers this without knowing anything about ranges.
-        # The count is not the test — each pass still has a real loop-carried WAW
-        # against the previous frame, so both spellings emit two transitions. What
-        # differs is *whose*: one resource means the second waits on the first.
+        # Per resource, each pass has a real loop-carried WAW against the previous
+        # frame, and two resources mean neither waits on the other. A recording's
+        # head barrier covers that WAW, which leaves only a real overlap inside it.
         dev = M.Device(TESTBACKEND)
         n = 256
         build(ranged) = begin
@@ -467,7 +469,7 @@ else
             hi = ranged ? M.slice(g, b, 129:256) : b
             M.dispatch!(g, fill_span!, (lo, Int32(0), 1f0), 128; name = "lower")
             M.dispatch!(g, fill_span!, (hi, Int32(128), 2f0), 128; name = "upper")
-            (; b, plan = M.record!(M.Plan(g)))
+            (; g, b, plan = M.record!(M.Plan(g)))
         end
         # The update pass every plan with a declared buffer has is excluded — it
         # touches the same resources the compute passes do, so it changes no
@@ -482,7 +484,8 @@ else
         @test length(touched(whole.plan)) == 1      # one resource: ordered, needlessly
 
         sliced = build(true)
-        @test length(touched(sliced.plan)) == 2     # two: independent
+        @test isempty(touched(sliced.plan))         # no overlap: nothing to wait on
+        @test length(touched(perresource(sliced.g))) == 2 # two: independent
 
         # And it still computes the right thing, which is the point of not
         # ordering them: both halves land.
@@ -543,12 +546,15 @@ else
                     name = "mid")
         M.dispatch!(gp, fill_span!, (M.slice(gp, bp, 201:256), Int32(200), 8f0), 56;
                     name = "tail")
-        pp = M.Plan(gp)
-        segs(name) = Set(t.resource for p in pp.passes if p.pass.name == name
-                         for t in p.pre)
+        segs(pl, name) = Set(t.resource for p in pl.passes if p.pass.name == name
+                             for t in p.pre)
         # `mid` overlaps `low`, so it waits; `tail` overlaps neither and does not.
-        @test !isempty(segs("mid"))
-        lowseg, midseg, tailseg = segs("low"), segs("mid"), segs("tail")
+        pp = M.Plan(gp)
+        @test !isempty(segs(pp, "mid"))
+        @test isempty(segs(pp, "low"))
+        @test isempty(segs(pp, "tail"))
+        walked = perresource(gp)
+        lowseg, midseg, tailseg = segs(walked, "low"), segs(walked, "mid"), segs(walked, "tail")
         @test !isempty(intersect(lowseg, midseg))    # they share the 64:128 segment
         @test isempty(intersect(lowseg, tailseg))    # and share nothing with the tail
 
@@ -635,7 +641,7 @@ else
         emitted(pl) = Set((pp.pass.name, t.resource, t.from, t.to, Set(t.waits))
                           for pp in pl.passes for t in pp.pre)
 
-        got = emitted(s.plan)
+        got = emitted(perresource(s.g; alias = false))
         # A missing entry is a race; an extra one serialises for nothing.
         @test issubset(required, got)
         @test issubset(got, required)
@@ -676,21 +682,25 @@ else
         # atomic partition itself rather than reading it off the compiler. Both
         # sides are keyed by `(parent, span)`, so agreeing on ids is not what
         # makes them agree.
-        spurious = 0; missing_total = 0; required_total = 0
+        spurious = 0; missing_total = 0; required_total = 0; uncovered = 0
         for sl in (0.0, 0.5), s in seeds
             u = usage_graph(dev, MersenneTwister(s),
                             [M.Buffer(dev, fill(Float32(i), 256)) for i in 1:nbufs],
                             npasses; slicing = sl)
-            oracle = local_hazards(u.g, u.plan)
-            got = normalized(u.g, u.plan)
+            walked = perresource(u.g; alias = false)
+            oracle = local_hazards(u.g, walked)
+            got = normalized(u.g, walked)
             required_total += length(oracle)
             missing_total += length(setdiff(oracle, got))
             spurious += length(setdiff(got, oracle))
+            uncovered += length(uncovered_hazards(u.g, u.plan))
         end
         # A missing entry is a race; an extra one serialises for nothing.
         @test missing_total == 0
         @test spurious == 0
         @test required_total > 0
+        # A recording has fewer barriers, and each hazard is still ordered.
+        @test uncovered == 0
     end
 
     @testset "derived barriers agree with the backend on random DAGs" begin
@@ -761,10 +771,12 @@ else
         # alternating draw/blt over the same transients — is deliberately *not*
         # asserted by sequence. RPS expects the second round of draws hoisted
         # (12,14..22 then 13,15..23); we keep declaration order, and measured,
-        # the two cost exactly the same: 24 barriers, 36 transitions, 6144 peak,
-        # for their order and ours alike. Grouping independent work paid when a
-        # barrier stopped everything; per-resource barriers already scope to what
-        # each pass touches, so the choice is between equals.
+        # the two cost exactly the same per resource: 24 barriers, 36 transitions,
+        # 6144 peak, for their order and ours alike. Grouping independent work paid
+        # when a barrier stopped everything; per-resource barriers already scope to
+        # what each pass touches, so the choice is between equals. A recording's
+        # global barriers keep the same barrier count, and a grouped order merges
+        # more of the hazards inside them: 14 entries for their order, 19 for ours.
         #
         # Which is what their own harness says to do about it — `unorderedEqual`,
         # for graphs where several orders are legal. So: assert the schedule is a
@@ -788,10 +800,12 @@ else
             M.Plan(g; policy = M.Overlap())
         end
         forced, ours = program_order(true), program_order(false)
-        cost(pl) = (count(pp -> !isempty(pp.pre), pl.passes),
-                    sum(length(pp.pre) for pp in pl.passes),
-                    M.peakbytes(pl))
-        @test cost(ours) == cost(forced)
+        barriers(pl) = count(pp -> !isempty(pp.pre), pl.passes)
+        cost(pl) = (barriers(pl), sum(length(pp.pre) for pp in pl.passes))
+        @test cost(perresource(ours.graph; policy = M.Overlap())) ==
+              cost(perresource(forced.graph; policy = M.Overlap()))
+        @test barriers(ours) == barriers(forced)
+        @test M.peakbytes(ours) == M.peakbytes(forced)
 
         # A linear extension of the DAG: a pass declared earlier that shares a
         # written resource has to still come first. Rebuilt from the usages here,

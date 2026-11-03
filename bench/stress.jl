@@ -142,3 +142,34 @@ function local_hazards(g, plan)
     end
     req
 end
+
+overlapping_spans(a, b) = a === nothing || b === nothing || !isempty(intersect(a, b))
+
+"""
+The `local_hazards` of a recorded `plan` that nothing orders.
+
+A recording's barriers are global, so one with the hazard's stages orders it from
+any pass after the last access. A hazard is covered when that barrier exists, when
+the piece has no earlier access in the recording, whose head barrier orders it
+against the previous run, or when the earlier access is the update pass, which
+is submitted in front of that head barrier.
+"""
+function uncovered_hazards(g, plan)
+    passes = plan.passes
+    index = Dict(pp.pass.name => i for (i, pp) in enumerate(passes))
+    return filter(collect(local_hazards(g, plan))) do (name, key, _, to, waits)
+        target = index[name]
+        (pid, span) = key
+        source = findlast(1:(target - 1)) do j
+            any(passes[j].pass.usages) do (id, _)
+                (other, s) = normalid(g, id)
+                other == pid && overlapping_spans(s, span)
+            end
+        end
+        source === nothing && return false
+        passes[source].pass.kind === :update && return false
+        return !any(((source + 1):target)) do q
+            any(t -> t.to == to && issubset(waits, Set(t.waits)), passes[q].pre)
+        end
+    end
+end
