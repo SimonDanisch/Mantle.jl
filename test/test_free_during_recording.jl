@@ -145,9 +145,12 @@ end
         Mantle.run!(plan)
         small = KA.zeros(TESTBACKEND, Float32, n)
         KA.synchronize(TESTBACKEND)
-        short = spinsfor(100)
         early = Int[]
         for k in 0:40
+            # Measured for each `k`: clocks rise during this loop, and a count measured
+            # at idle clocks then finishes inside the pause below, where handing the
+            # region back is right.
+            short = spinsfor(100)
             a = Mantle.Buffer(dev, fill(5f0, n))
             out = Mantle.Buffer(dev, zeros(Float32, n))
             r = Mantle.region(a.store)
