@@ -49,7 +49,11 @@ include("record.jl")
 # retires every device (`retireall!`).
 function Mantle.initbackend!(::MetalAPI)
     register_backend!(; name = :metal, priority = 90) do
-        Metal.functional() ? Device(MetalAPI()) : nothing
+        # `functional` answers false while a package image is built, because Metal.jl's
+        # `__init__` stops early there. A workload has the device all the same, and
+        # without it every runner's workload was skipped and its first call compiled.
+        building = ccall(:jl_generating_output, Cint, ()) != 0
+        (building ? !isempty(Metal.devices()) : Metal.functional()) ? Device(MetalAPI()) : nothing
     end
     return nothing
 end
