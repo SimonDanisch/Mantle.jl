@@ -1282,10 +1282,12 @@ function remap!(pl::Plan, kind, region)
         pl.parts[i] == kind || continue
         materialize!(pl.graph.dev, t, memoryof(region), offset(region) + pl.offsets[i])
     end
-    # `bake` resolved dispatch arguments over the old region. Unless the backend
-    # patches them (`patchable`), mark the plan so `refit!` recompiles before the
-    # next submit; recompiling here would re-enter placement mid-growth.
-    patchable(pl.graph.dev) || (pl.replaced = true)
+    # `bake` resolved dispatch arguments over the old region. Only a recording's
+    # are patched (`notify_move!`), so a plan walked every run, which has none, reads
+    # the old block just as it does on a backend that cannot patch. Mark those so
+    # `refit!` recompiles before the next submit; recompiling here would re-enter
+    # placement mid-growth.
+    (patchable(pl.graph.dev) && pl.recording !== nothing) || (pl.replaced = true)
     return pl
 end
 
