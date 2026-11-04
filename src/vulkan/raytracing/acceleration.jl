@@ -187,14 +187,45 @@ refittable(as::Union{LavaBLAS,LavaTLAS}) = as.update_scratch !== nothing
 refitinput(as::Union{LavaBLAS,LavaTLAS}) = first(as.preserves)
 deviceof(as::Union{LavaBLAS,LavaTLAS}) = KA.get_backend(as.storage)
 
-"""Refit `as` in place (MODE_UPDATE_KHR) from its inputs, which the caller rewrote."""
+"""Refit `as` in place from its inputs, which the caller rewrote."""
 function refitnative!(ctx::VulkanAccelBuildContext, as::Union{LavaBLAS,LavaTLAS})
     holdbuild!(ctx, as)
     asbuildbarrier!(ctx)
+    recordrefit!(ctx, as, as.geom)
+    return as
+end
+
+recordrefit!(ctx, as, ::GeometryType) = updateinplace!(ctx, as)
+recordrefit!(ctx, as, ::AABBsGeometry) =
+    boxupdateworks(deviceof(as)) ? updateinplace!(ctx, as) : rebuildinplace!(ctx, as)
+
+updateinplace!(ctx, as) =
     build_as_on_gpu(ctx, as.accel, buildscratch!(ctx, as.update_scratch), as.geom;
                     as_type = astype(as.geom), build_flags = buildflags(true),
                     primitive_count = as.count, mode = UInt32(1), src_as = as.accel)
-    return as
+
+function rebuildinplace!(ctx, as)
+    type, flags = astype(as.geom), buildflags(true)
+    sizes = query_as_build_sizes(as_device(ctx), as.geom; as_type = type, build_flags = flags,
+                                 max_primitive_count = as.count)
+    build_as_on_gpu(ctx, as.accel, buildscratch!(ctx, sizes.build_scratch_size), as.geom;
+                    as_type = type, build_flags = flags, primitive_count = as.count)
+end
+
+"""
+    boxupdateworks(dev) -> Bool
+
+Whether `MODE_UPDATE_KHR` keeps a procedural structure's boxes. RADV on Mesa 26.0.8 does not:
+updating with the same boxes loses the first, and after a move all of them are found nowhere,
+while a build from the same buffer is right (Radeon 8060S). Mesa 26.2.5 on the same chip is
+right, and 26.1 is unmeasured: a rebuild is correct either way, only slower.
+"""
+function boxupdateworks(dev::LavaDevice)
+    d = VK.get_physical_device_properties_2(dev.physical_device, VK.PhysicalDeviceDriverProperties).next
+    d.driver_id == VK.DRIVER_ID_MESA_RADV || return true
+    m = match(r"Mesa (\d+)\.(\d+)", String(filter(!=('\0'), collect(d.driver_info))))
+    m === nothing && return true
+    return VersionNumber(parse(Int, m[1]), parse(Int, m[2])) >= v"26.2"
 end
 
 # No geometry flags: whether a hit is opaque is its instance's (`instancerecord`).

@@ -73,6 +73,12 @@ end
     @test counts(start, centres, r, accel) == Int32[1, 1, 1]
     @test counts(moved, centres, r, accel) == Int32[0, 0, 0]
 
+    # A refit that changes nothing changes nothing: RADV's update lost the first box.
+    Raycore.refit!(blas, boxes)
+    Raycore.refit!(tlas)
+    accel = Adapt.adapt(TESTBACKEND, tlas)
+    @test counts(start, centres, r, accel) == Int32[1, 1, 1]
+
     # Moved by a kernel, boxes written again by a kernel, refit from that buffer.
     shift_x!(TESTBACKEND, 64)(centres, 2.5f0; ndrange = length(start))
     centred_boxes!(TESTBACKEND, 64)(boxes, centres, r; ndrange = length(start))

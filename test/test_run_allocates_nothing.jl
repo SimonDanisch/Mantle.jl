@@ -38,6 +38,17 @@ function _allocfree_plan(dev, n; budget)
     return pl, a
 end
 
+@testset "what counts as the run's allocation" begin
+    frame(func, file) = (; func, file)
+    stack(frames...) = (; stacktrace = collect(frames))
+    run = frame(:waitfor!, "/x/Mantle/src/graph/kalaunch.jl")
+    @test byrun(stack(frame(:jl_gc_alloc_, "gc-stock.c"), run))
+    # Under a wait, but not by the run: the scheduler looking up a method, and a libuv callback.
+    @test !byrun(stack(frame(:ml_matches, "gf.c"), frame(:ijl_task_get_next, "scheduler.c"), run))
+    @test !byrun(stack(frame(:cb, "x.jl"), frame(:ijl_process_events, "jl_uv.c"), run))
+    @test !byrun(stack(frame(:jl_gc_alloc_, "gc-stock.c"), frame(:f, "/x/test/spinwork.jl")))
+end
+
 @testset "run! of a recorded plan allocates nothing" begin
     dev = Mantle.Device(TESTBACKEND)
     # `budget = Inf` is recorded whole and never measures; the device's budget

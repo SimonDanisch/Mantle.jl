@@ -49,7 +49,9 @@ The event loop is the line between the run and everything else that happens whil
 waits. A wait yields, and the scheduler's `process_events` runs whatever libuv has
 pending on the waiting task's stack — a bt session's timer callback looks up its
 `cfunction` there, 32 + 24 + 24 bytes under the run's own `poll_completed`. Those
-callbacks belong to whoever registered them.
+callbacks belong to whoever registered them. So does the scheduler choosing the next task:
+late in a long process a method lookup there misses its cache once, 732 bytes under a
+`wait` on a Radeon 8060S, and the run had no part in it.
 
 GPUToolbox is among the packages because a wait that outlasts its poll runs on one of
 GPUToolbox's worker threads, and what GPUToolbox allocates there has no other package's
@@ -63,6 +65,6 @@ function byrun(a)
     return false
 end
 
-const EVENT_LOOP = (:uv_run, :ijl_process_events, :process_events)
+const EVENT_LOOP = (:uv_run, :ijl_process_events, :process_events, :ijl_task_get_next)
 
 const RUN_PACKAGES = r"/(Mantle|Metal|Lava|ObjectiveC|KernelAbstractions|KernelInterface|GPUArrays|Vulkan|GPUToolbox)/([^/]+/)?(src|lib)/"
