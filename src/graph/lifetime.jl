@@ -48,7 +48,9 @@ mutable struct SubmitChannel{Q,R,T,P}
     # that raises loses the destroy.
     pending::Inbox
     retiring::Vector{Tuple{Any,T}}
-    # Scratch for draining pending requests.
+    # Taken off `pending` and still held by a recording, oldest first. Only this thread
+    # touches it. They wait here because going back on `pending` allocates a node every
+    # time, and a plan can hold a retired buffer for many runs.
     taken::Vector{Any}
     # Single-writer: only this thread may record into or submit from this channel.
     thread::Int
@@ -280,7 +282,7 @@ end
 
 Whether pending or token-waiting destroys make a channel drain useful to automatic trim.
 """
-holdsretired(ch::SubmitChannel) = !isempty(ch.pending) || !isempty(ch.retiring)
+holdsretired(ch::SubmitChannel) = !isempty(ch.pending) || !isempty(ch.taken) || !isempty(ch.retiring)
 holdsretired(ch) = false
 
 """
@@ -294,38 +296,35 @@ function reclaim!(ch::SubmitChannel)
     ownthread(ch)
     # Nothing to destroy is the common case, and it costs one `isempty` each:
     # `deviceof` is asked only when there is something to ask it about.
-    (isempty(ch.pending) && isempty(ch.retiring)) && return 0
+    (isempty(ch.pending) && isempty(ch.taken) && isempty(ch.retiring)) && return 0
     dev = deviceof(ch)
-    if !isempty(ch.pending)
-        taken = ch.taken
-        node = takeall!(ch.pending)
-        while node !== nothing
-            push!(taken, node.item)
-            node = node.next
-        end
-        reverse!(taken)                    # oldest first, as they were retired
-        keep = 0
-        for obj in taken
-            s = stampof(obj)
-            if s !== nothing && (@atomic s.holders) > 0
-                # Held by an unsubmitted recording, which has no token yet: retry later.
-                keep += 1
-                taken[keep] = obj
-                continue
-            end
-            c = s === nothing ? nothing : s.channel
-            if c === nothing
-                rawfree(dev, obj)          # nothing ever named it
-            elseif c === ch
-                push!(ch.retiring, (obj, s.token))
-            else
-                retire!(c::SubmitChannel, obj)
-            end
-        end
-        resize!(taken, keep)
-        foreach(obj -> push!(ch.pending, obj), taken)
-        empty!(taken)
+    taken = ch.taken
+    waiting = length(taken)
+    node = takeall!(ch.pending)
+    while node !== nothing
+        push!(taken, node.item)
+        node = node.next
     end
+    reverse!(taken, waiting + 1, length(taken))   # oldest first, as they were retired
+    keep = 0
+    for obj in taken
+        s = stampof(obj)
+        if s !== nothing && (@atomic s.holders) > 0
+            # Held by an unsubmitted recording, which has no token yet: retry later.
+            keep += 1
+            taken[keep] = obj
+            continue
+        end
+        c = s === nothing ? nothing : s.channel
+        if c === nothing
+            rawfree(dev, obj)              # nothing ever named it
+        elseif c === ch
+            push!(ch.retiring, (obj, s.token))
+        else
+            retire!(c::SubmitChannel, obj)
+        end
+    end
+    resize!(taken, keep)
     isempty(ch.retiring) && return 0
     freed = keep = 0
     for (obj, tok) in ch.retiring

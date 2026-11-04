@@ -190,4 +190,34 @@ end
     @test Mantle.holdsretired(ch)
 end
 
+# In a function: a global read would box its way into the count.
+function reclaimbytes(ch, n)
+    Mantle.reclaim!(ch)
+    return [(@allocated Mantle.reclaim!(ch)) for _ in 1:n]
+end
+
+@testset "a retired buffer a recording still holds waits without allocating" begin
+    tl = HoldTimeline()
+    ch = HoldChannel(tl)
+    held = [HeldBuffer() for _ in 1:4]
+    Mantle.acquire!(ch)
+    foreach(b -> Mantle.hold!(ch, b), held)
+    foreach(b -> Mantle.retire!(ch, b), held)
+    # A plan holds its buffers across many runs, and every run reclaims.
+    @test all(iszero, reclaimbytes(ch, 5))
+    @test isempty(tl.freed)
+    @test Mantle.holdsretired(ch)
+
+    # What arrives meanwhile queues behind what was waiting, and all of it still goes.
+    late = HeldBuffer()
+    Mantle.hold!(ch, late)
+    Mantle.retire!(ch, late)
+    Mantle.reclaim!(ch)
+    @test ch.taken == [held; late]
+    Mantle.dropholds!(ch)
+    Mantle.reclaim!(ch)
+    @test tl.freed == [held; late]
+    @test !Mantle.holdsretired(ch)
+end
+
 end  # @testset
