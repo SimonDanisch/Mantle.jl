@@ -947,7 +947,7 @@ phase that needs it resolved.
 | F13 | fixed decisions 1–14 and native measurement gates | per phase | doing | plan Fixed decisions and remaining measurements; execution-contracts.md §§3–13; choices fixed, qualification remains |
 | F14 | per-frame draw-order changes use sort! and flat pass-list rewrite | before phase 7 | doing | plan Graphics/RayMakie; O(pieces), finite RM-06 gate; measure actual frame cost |
 | F16 | typed RT groups, core SBT layout, procedural geometry, stencil/MSAA/blend | before phase 6 | doing | execution-contracts.md §§7/8; historical Hikari closest-hit evidence superseded by pushed query/wavefront refactor; future programmable hit-group profile remains separate; HK-10/TL-43/PIECE-24 await applicable qualification |
-| F17 | bugs the survey found, to triage into the bug list: Metal `npipelines` counts draws; a resource-valued draw count has no Metal method; `trace!` has no Metal compile path; Vulkan walked plans rewrite argument memory while a frame may be in flight; the Vulkan pipeline cache key holds only whether a descriptor layout exists and misses `tess_eval`; Vulkan `vsync` lost on resize; a hand-recorded window frame may lose its contents | phase 0 | open | |
+| F17 | bugs the survey found, to triage into the bug list: Metal `npipelines` counts draws; a resource-valued draw count has no Metal method; `trace!` has no Metal compile path; the Vulkan pipeline cache key holds only whether a descriptor layout exists and misses `tess_eval`; Vulkan `vsync` lost on resize; a hand-recorded window frame may lose its contents | phase 0 | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|

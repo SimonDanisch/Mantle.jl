@@ -514,7 +514,7 @@ function makeargmemory(dev, passes)
     store, address, ptr = mem
     # Built once: the offsets never move, and a view per record would allocate.
     indirect = Any[indirectslot(dev, store, indbase + (k - 1) * INDIRECT_STRIDE) for k in 1:nind]
-    return ArgMemory(store, address, ptr, Ref(UInt64(0)), indirect)
+    return ArgMemory(store, address, ptr, Ref(UInt64(0)), indirect, indbase)
 end
 
 """

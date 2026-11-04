@@ -603,10 +603,11 @@ end
 """
     packdraw!(e, d::CompiledDraw)
 
-Pack a draw's arguments into the plan's slot: once at `record!` for a recorded
-plan, every run for an unrecorded one. `drawargs` reads a cell's current
-contents, so a `rebind!` reaches the next run. A plan holding a cell is not
-`recordable`, so `record!` refuses it before this point.
+Pack a draw's arguments into its slot of the emitter's argument memory: the plan's,
+once at `record!`, for a recorded plan; the run's own ([`runargs`](@ref)), every run,
+for an unrecorded one. `drawargs` reads a cell's current contents, so a `rebind!`
+reaches the next run. A plan holding a cell is not `recordable`, so `record!` refuses
+it before this point.
 """
 function packdraw!(e::Emitter, d::CompiledDraw)
     am = e.args
@@ -900,7 +901,32 @@ function openrun(dev::LavaDevice, pl::Plan)
             "run!: the frame's image was not acquired; `beforeframe!` acquires it before " *
             "the plan is refit, and `execute!` records against that image"))
     end
-    return Emitter(openoneshot(dev.default_bq), pl.args)
+    owner = openoneshot(dev.default_bq)
+    args = try
+        runargs(owner, pl.args, pl.recording)
+    catch
+        abandonrun!(dev, Emitter(owner, nothing))
+        rethrow()
+    end
+    return Emitter(owner, args)
+end
+
+"""
+    runargs(oneshot, argmemory, recording) -> ArgMemory
+
+Where a run's commands find their arguments. In front of a recording, the plan's
+memory: that run only stores, and the recording's arguments were packed at `record!`.
+
+A walked run packs every argument again, and frames in flight are reading. So it packs
+into memory of its own, returned with the one-shot once its commands have run. Packing
+into the plan's memory showed those frames whatever a pack passes through, and
+`pack_arg!` zeroes an inlined struct first: a shader read a device array with a null
+pointer, as a read at null plus an index, and the device was lost.
+"""
+runargs(::OneShot, am::ArgMemory, ::Recording) = am
+function runargs(owner::OneShot, am::ArgMemory, ::Nothing)
+    a = get_arg_buffer(owner, am.packedbytes)
+    return ArgMemory(a.region, a.address, a.mapped_ptr, am.token, am.indirect, am.packedbytes)
 end
 
 """
@@ -1044,10 +1070,11 @@ argsite(e::Emitter) = patchsite(e.owner, e.args.store, e.args.ptr)
 """
     packdispatch!(e, d::LavaDispatch, it) -> tlas
 
-Write one dispatch's arguments into the plan's argument memory and return the
+Write one dispatch's arguments into the emitter's argument memory and return the
 TLAS they name, if any. Done once at `record!`: the command buffer holds the
 address of these bytes, so their values are fixed for the plan's life; a value
-that changes is a [`GPURef`](@ref), packed as its address.
+that changes is a [`GPURef`](@ref), packed as its address. A walked run does this
+every time, in memory of its own ([`runargs`](@ref)).
 """
 function packdispatch!(e::Emitter, d::LavaDispatch, it)
     am = e.args

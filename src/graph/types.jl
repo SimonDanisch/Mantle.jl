@@ -318,9 +318,11 @@ Argument memory owned by the plan: every draw's and dispatch's arguments, laid o
 once at compile, then one 256-byte indirect command per device-sized dispatch.
 Written once at `record!` and never again, so one copy suffices and no ring is
 needed. A value that changes between runs is a [`GPURef`](@ref): its address is
-stored here and an `Update` command writes its value. `store` is a
-[`Unified`](@ref) region from the device pool; `token` covers the last run, 0
-before the first; `indirect[k]` is dispatch `k`'s view.
+stored here and an `Update` command writes its value. A plan walked every run packs
+its arguments again each time, so a backend whose earlier runs can still be reading
+gives each such run a copy of its own (`packedbytes` long) and leaves these bytes
+alone. `store` is a [`Unified`](@ref) region from the device pool; `token` covers
+the last run, 0 before the first; `indirect[k]` is dispatch `k`'s view.
 """
 mutable struct ArgMemory{S}
     store::S
@@ -331,6 +333,7 @@ mutable struct ArgMemory{S}
     # 0 = never run (the first timeline signal is 1).
     token::Base.RefValue{UInt64}
     indirect::Vector{Any}       # [k]: dispatch k's indirect command
+    packedbytes::Int            # the argument blocks, which the indirect commands follow
 end
 
 # Use these, not `am.token` on a `Union{Nothing,ArgMemory}`: a method specialises

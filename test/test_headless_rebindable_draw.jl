@@ -34,6 +34,17 @@ const HR_PIPE = Mantle.Rasterizer(; vertex = Mantle.VertexShader(hr_vertex),
                                     cull = Mantle.NoCull(),
                                     depth = Mantle.DepthOff())
 
+function hr_plan(dev, cell; W = 16, H = 16)
+    g = Mantle.Graph(dev)
+    img = Mantle.Transient.Image(g, BGRA{N0f8}, (W, H))
+    Mantle.render!(g, "draw", img => Mantle.Clear((1f0, 0f0, 0f0, 1f0))) do p
+        Mantle.draw!(p, HR_PIPE, cell; frag_args = Mantle.drawargs(cell))
+    end
+    out = Mantle.Transient.Buffer(g, BGRA{N0f8}, W * H)
+    Mantle.copy!(g, "read", out, img)
+    return Mantle.Plan(g), out
+end
+
 @testset "a headless plan with a rebindable draw runs unrecorded" begin
     be = Mantle.defaultbackend()
     if !Mantle.supports_graphics(be)
@@ -42,16 +53,8 @@ const HR_PIPE = Mantle.Rasterizer(; vertex = Mantle.VertexShader(hr_vertex),
         return
     end
     dev = Mantle.todevice(be)
-    W, H = 16, 16
     cell = Mantle.DrawBinding(dev, (1f0,), 3)
-    g = Mantle.Graph(dev)
-    img = Mantle.Transient.Image(g, BGRA{N0f8}, (W, H))
-    Mantle.render!(g, "draw", img => Mantle.Clear((1f0, 0f0, 0f0, 1f0))) do p
-        Mantle.draw!(p, HR_PIPE, cell; frag_args = Mantle.drawargs(cell))
-    end
-    out = Mantle.Transient.Buffer(g, BGRA{N0f8}, W * H)
-    Mantle.copy!(g, "read", out, img)
-    plan = Mantle.Plan(g)
+    plan, out = hr_plan(dev, cell)
     @test !Mantle.recordable(plan)
     @test !Mantle.ordered_entry(Mantle.Compile(plan))
     pixels() = unique(Array(Mantle.storage(out)))
@@ -67,5 +70,30 @@ const HR_PIPE = Mantle.Rasterizer(; vertex = Mantle.VertexShader(hr_vertex),
     Mantle.rebind!(cell, dev, (1f0,), 0)
     Mantle.run!(plan)
     @test pixels() == [BGRA{N0f8}(1, 0, 0, 1)]
+    Mantle.free!(plan)
+end
+
+@testset "a walked run leaves the plan's argument memory alone" begin
+    # Frames in flight read that memory. Packing into it put zeros where a device array
+    # was for a moment, so a shader read through a null pointer: about one suite in three
+    # lost the device on a Radeon 8060S, always at null plus an index.
+    be = Mantle.defaultbackend()
+    if !Mantle.supports_graphics(be)
+        @info "no graphics pipeline on this backend; skipping"
+        @test_skip false
+        return
+    end
+    dev = Mantle.todevice(be)
+    plan, out = hr_plan(dev, Mantle.DrawBinding(dev, (1f0,), 3))
+    # Only a plan with no recording: a recording reads these bytes, and this overwrites them.
+    @test plan.recording === nothing
+    am = plan.args
+    @test am.packedbytes > 0
+    for i in 0:(am.packedbytes - 1)
+        unsafe_store!(am.ptr + i, 0xab)
+    end
+    Mantle.run!(plan)
+    @test unique(Array(Mantle.storage(out))) == [BGRA{N0f8}(0, 1, 0, 1)]
+    @test all(i -> unsafe_load(am.ptr + i) == 0xab, 0:(am.packedbytes - 1))
     Mantle.free!(plan)
 end
