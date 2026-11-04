@@ -692,13 +692,14 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
         if nbytes > MAX_UPLOAD_STAGING_BYTES
             copied = 0
             while copied < nbytes
-                count = min(Int(nbytes) - copied, MAX_UPLOAD_STAGING_BYTES)
+                at = copied    # the closure must not capture `copied`, which would box it
+                count = min(Int(nbytes) - at, MAX_UPLOAD_STAGING_BYTES)
                 token = oneshot!(bq; tag = :upload) do e
                     r = scratch!(e.owner, count, Readback())
                     mb = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
-                    unsafe_copyto!(mb.mapped_ptr + Mantle.offset(r), host_ptr + copied, count)
+                    unsafe_copyto!(mb.mapped_ptr + Mantle.offset(r), host_ptr + at, count)
                     cmd_copy_buffer!(e, mb, managed, count;
-                        src_off = pool_offset(mb) + Mantle.offset(r), dst_off = buf_offset + copied)
+                        src_off = pool_offset(mb) + Mantle.offset(r), dst_off = buf_offset + at)
                 end
                 # Sweep, not only wait: that returns this chunk's staging region
                 # before the next chunk acquires one.

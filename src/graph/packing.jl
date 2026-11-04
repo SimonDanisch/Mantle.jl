@@ -170,7 +170,7 @@ host address `at` inside the site, for `notify_move!`. A no-op for types without
 pointers and for `site === nothing`.
 """
 @inline function notepacked!(s::PatchSite, ::Type{T}, at::Ptr{UInt8}) where {T}
-    fields = devicepointeroffsets(T)
+    fields = devicepointeroffsets(T)::Tuple{Vararg{Int}}
     isempty(fields) && return nothing
     for f in fields
         notepointer!(s, at + f)

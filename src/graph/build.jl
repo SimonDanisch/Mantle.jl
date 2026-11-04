@@ -28,6 +28,15 @@ function dispatch!(g::Graph, kernel, @nospecialize(args::Tuple), ndrange;
 end
 
 """
+    kernelname(kernel) -> String
+
+`string(kernel)` behind a dynamic call. These messages are on the path of every dispatch, and
+printing a `Function` directly ties that path to `print(::IO, ::Function)`, which packages
+extend: loading Observables dropped every specialization of `dispatch!` from package images.
+"""
+kernelname(@nospecialize(kernel)) = Base.invokelatest(string, kernel)::String
+
+"""
     refusenothing(kernel, args, touches) -> touches
 
 Throw if `touches` marks no argument as touched. That means the access walk missed
@@ -37,7 +46,7 @@ store would silently remove a barrier.
 function refusenothing(@nospecialize(kernel), args::Tuple, touches)
     any(touched, touches) && return touches
     throw(ArgumentError(
-        "dispatch!: `$kernel` is declared to touch none of its $(length(args)) " *
+        "dispatch!: `$(kernelname(kernel))` is declared to touch none of its $(length(args)) " *
         "arguments, which cannot be right for a kernel worth launching. Either " *
         "it reads or writes something the access walk cannot see -- an intrinsic " *
         "with no `intrinsic_usage`, most likely -- or the dispatch has no reason " *
@@ -55,7 +64,7 @@ function refuseempty(@nospecialize(kernel), ndrange)
     ndrange isa DeviceRange && return nothing
     n = ndrange isa Tuple ? prod(ndrange) : ndrange
     n isa Integer && n <= 0 && throw(ArgumentError(
-        "dispatch!: `$kernel` was given an ndrange of $ndrange, which is empty. " *
+        "dispatch!: `$(kernelname(kernel))` was given an ndrange of $ndrange, which is empty. " *
         "A result with no elements needs no pass, so skip the dispatch where " *
         "the shape is decided. A count only the device knows is a `DeviceRange`."))
     return nothing

@@ -133,7 +133,7 @@ the device refuses macro-free kernels.
 """
 function kikernel(f, dev, args)
     kisupported(dev, f) || error(
-        "Mantle: `dispatch!` was given `$f`, which is a macro-free kernel, and " *
+        "Mantle: `dispatch!` was given `$(kernelname(f))`, which is a macro-free kernel, and " *
         "$(typeof(dev)) implements no `KI.kernel_function`. The backend answers " *
         "`KernelAbstractions` and not `KernelInterface`, so it can run an " *
         "`@kernel` but cannot compile a plain function.")

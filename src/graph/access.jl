@@ -671,8 +671,8 @@ function stmttaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
         # their unique symbol is declared through `intrinsic_usage`.
         rawname = stmt.args[1]
         name = rawname isa QuoteNode ? rawname.value : rawname
-        namestr = name isa Symbol ? String(name) :
-                  name isa String ? name : string(name)
+        namestr = (name isa Symbol ? String(name) :
+                   name isa String ? name : string(name))::String
         m = match(r"([A-Za-z_][A-Za-z0-9_.$]*)$", namestr)
         if m !== nothing
             usage = intrinsic_usage(Symbol(m.captures[1]))
@@ -924,7 +924,7 @@ anything else is refused. One without tainted operands touches nothing.
 """
 function llvmcalltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
                         rest, args::Vector{Any})
-    src = llvmsource(rest[1], ir)
+    src = llvmsource(rest[1], ir)::Union{Nothing,String}
     tainted = [a for a in rest if !isempty(operandtaint(ir, st, a))]
     isempty(tainted) && return Taint()
     # LLVM.jl spells `LLVMPtr` casts and arithmetic as tiny `llvmcall` modules
