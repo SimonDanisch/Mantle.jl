@@ -923,7 +923,7 @@ into the plan's memory showed those frames whatever a pack passes through, and
 `pack_arg!` zeroes an inlined struct first: a shader read a device array with a null
 pointer, as a read at null plus an index, and the device was lost.
 """
-runargs(::OneShot, am::ArgMemory, ::Recording) = am
+runargs(::OneShot, am::ArgMemory, recording) = am
 function runargs(owner::OneShot, am::ArgMemory, ::Nothing)
     a = get_arg_buffer(owner, am.packedbytes)
     return ArgMemory(a.region, a.address, a.mapped_ptr, am.token, am.indirect, am.packedbytes)
