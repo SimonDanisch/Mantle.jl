@@ -87,8 +87,8 @@ end
     plan, out = hr_plan(dev, Mantle.DrawBinding(dev, (1f0,), 3))
     # Only a plan with no recording: a recording reads these bytes, and this overwrites them.
     @test plan.recording === nothing
+    # None at all where a backend binds a draw's arguments directly, as Metal does.
     am = plan.args
-    @test am.packedbytes > 0
     for i in 0:(am.packedbytes - 1)
         unsafe_store!(am.ptr + i, 0xab)
     end
