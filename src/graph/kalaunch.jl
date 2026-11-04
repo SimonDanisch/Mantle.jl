@@ -575,6 +575,7 @@ run's own submission. A failure after the acquire hands the image back
 (`abandonframe!`).
 """
 function run!(pl::Plan)
+    isempty(pl.passes) && return nothing
     checklive(pl, pl.slabs, length(pl.graph.transients))
     reclaim!(pool(pl.graph.dev), pl.graph.dev)
     try
@@ -868,6 +869,7 @@ from [`partitionranges`](@ref).
 """
 function record!(pl::Plan)
     pl.recording === nothing || return pl
+    isempty(pl.passes) && return pl    # nothing to record, and `run!` submits nothing
     recordable(pl) || throw(ArgumentError(
         isempty(pl.graph.surfaces) ?
         "record!: this plan holds a rebindable draw binding. A recording packs a " *

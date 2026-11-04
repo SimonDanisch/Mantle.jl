@@ -65,3 +65,4 @@ end
 # read as "nothing compiled".
 kernelcompiles(::MetalDevice) = Metal.compile_stats()
 resetkernelcompiles!(::MetalDevice) = (Metal.reset_compile_stats!(); nothing)
+kerneloverlays(::MetalDevice) = Metal.method_table

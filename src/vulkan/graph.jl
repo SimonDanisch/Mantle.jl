@@ -101,6 +101,7 @@ supportspredicate(d::LavaDevice) = d.conditional_rendering_available
 # The kernel cache is Lava's; forwarded so callers need not name Lava.
 kernelcompiles(::LavaDevice) = compile_stats()
 resetkernelcompiles!(::LavaDevice) = reset_compile_stats!()
+kerneloverlays(::LavaDevice) = Lava.lava_method_table
 bufferusage(::LavaDevice, ::Type{T}) where {T} = extrausage(T)
 
 # Vulkan index buffers need `INDEX_BUFFER_BIT` at allocation; core's default, a
@@ -842,8 +843,10 @@ devicearray(d::LavaDevice, data::AbstractArray) = LavaArray(data; bq = d.default
 
 
 # The plan's timestamp profiler; core's `Plan` also accepts `nothing`.
+# No passes, nothing to time: a query pool of no queries is invalid, and RADV answered
+# it with an out-of-memory error.
 makeprofiler(dev::LavaDevice, passes, profile::Bool) =
-    profile ? Profiler(dev, passes) : nothing
+    profile && !isempty(passes) ? Profiler(dev, passes) : nothing
 # Asked once per plan: with `timestampPeriod = 0` there are no usable
 # timestamps and building a profiler would throw.
 timestamps(dev::LavaDevice) =

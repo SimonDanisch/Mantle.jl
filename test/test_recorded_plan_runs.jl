@@ -71,6 +71,15 @@ end
     end
 end
 
+@testset "a graph with no passes is a plan that does nothing" begin
+    dev = M.Device(TESTBACKEND)
+    for profile in (false, true)
+        plan = M.record!(M.Plan(M.Graph(dev); profile))
+        @test M.run!(plan) === nothing
+        M.free!(plan)
+    end
+end
+
 @testset "a two-pass graph with a transient between them" begin
     # Passes declared, the phases run, `Place` aliases the transient into an
     # arena, and the run computes what the graph says. None of that is a
@@ -425,5 +434,20 @@ end
         @test err isa ArgumentError
         @test occursin("gated pass", err.msg)
         @test occursin("gated-gemm", err.msg)
+    end
+end
+
+# Julia accepts a kernel's edge to an overlay at image load only if nothing overlaps the
+# overlay; otherwise it looks the call up in the host's table, which does not have it, and
+# drops the kernel. That kernel then compiles in every session, and the object cache hides it.
+@testset "no kernel overlay overlaps another" begin
+    table = M.kerneloverlays(M.Device(TESTBACKEND))
+    if table === nothing
+        @test_skip table !== nothing
+    else
+        overlapping = filter(m -> iszero((@atomic m.dispatch_status) & Base.StaticData.METHOD_SIG_LATEST_ONLY),
+                             Base.MethodList(table).ms)
+        @test isempty(overlapping)
+        isempty(overlapping) || @error "overlays that overlap" overlapping
     end
 end

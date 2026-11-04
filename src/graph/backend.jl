@@ -216,6 +216,13 @@ kernelcompiles(::Device) = (; hits = 0, misses = 0)
 resetkernelcompiles!(::Device) = nothing
 
 """
+    kerneloverlays(device) -> Union{Core.MethodTable,Nothing}
+
+The table of methods a kernel sees in place of the host's, if the device's compiler has one.
+"""
+kerneloverlays(::Device) = nothing
+
+"""
     librarygemm(device, out, A, B, bias, epilogue) -> callable or nothing
 
 Return a callable taking (out, A, B, bias) for the entire fused expression, or nothing
@@ -647,7 +654,7 @@ const BACKEND_VOCABULARY = (
     :native_attention_dispatch!,
     # Array layout for core's GEMM, and split-k scratch for immediate calls.
     :gemmstrides, :splitscratch,
-    :kernelcompiles, :resetkernelcompiles!,
+    :kernelcompiles, :resetkernelcompiles!, :kerneloverlays,
     :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,
     # Submit one baked piece, or give back one never submitted; core owns the
     # partition (`RecordingParts`).
