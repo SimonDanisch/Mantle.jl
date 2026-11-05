@@ -1098,7 +1098,8 @@ end
 Emit the launch: directly for a host-side ndrange, indirectly for a
 [`DeviceRange`](@ref) from the workgroup counts the pass's fused prepare
 (`emitprepares!`) wrote. The graph orders the count's writer before this
-dispatch through its `indirectcount!` `Indirect` read.
+prepare through its shader-storage count read. The prepare's output has its
+own compute-to-indirect dependency (`emitpreparebarrier!`).
 """
 emitlaunch!(e::Emitter, ::Any, lp, argaddr, it, tlas, ::Nothing, name) =
     emit_dispatch!(e, lp.pipeline, argaddr, it.block_dims, tlas, name)

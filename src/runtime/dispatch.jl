@@ -107,12 +107,19 @@ end
 """dispatch!(pass, kernel, args, ndrange; group=nothing)
 
 Append a kernel launch to the pass and register any DeviceRange count as an
-Indirect read. group selects workgroup shape; use a suitable 2D shape for images."""
+shader storage read. The prepare kernel reads the count and writes the actual
+indirect command. group selects workgroup shape; use a suitable 2D shape for images."""
 function dispatch!(p, kernel, args, ndrange; group = nothing)
     refuserefs(args)
     n = countresource(ndrange)
-    n === nothing || indirectcount!(p, n)
+    n === nothing || dispatchcount!(p, n)
     push!(dispatches(passof(p)), Dispatch(kernel, args, ndrange, group))
+end
+
+function dispatchcount!(p, n)
+    push!(passof(p).usages, resourceid(graphof(p), n) => Storage{BufferKind,ReadOnly})
+    touch!(graphof(p), n)
+    return n
 end
 
 """dispatch!(graph, call, args; name=nothing)

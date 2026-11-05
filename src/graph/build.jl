@@ -22,7 +22,7 @@ function dispatch!(g::Graph, kernel, @nospecialize(args::Tuple), ndrange;
     declare!(h, args, refusenothing(kernel, args,
                  argument_usage(g.dev, kernel, args, ndrange, group)))
     n = countresource(ndrange)
-    n === nothing || indirectcount!(h, n)
+    n === nothing || dispatchcount!(h, n)
     push!(dispatches(p), Dispatch(kernel, args, ndrange, group))
     return p
 end
