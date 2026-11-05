@@ -16,6 +16,10 @@ end
 # signature explicitly. The constructor is compiled, never called.
 precompile_constructor_signatures(::Type{<:Device}) = ()
 
+# Optional device-free kernel ABI descriptions for consumer precompile workloads.
+# The backend owns its array wrappers, iteration context and interpreter.
+_kernel_precompile_abi(::Type{<:Device}, group::Int) = nothing
+
 function _precompile_statements()
     signatures = Any[]
     for device in _precompile_device_types()

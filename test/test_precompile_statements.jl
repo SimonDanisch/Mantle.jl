@@ -18,4 +18,5 @@ end
     @test total > 0
     @test ok == total
     @test MantlePrecompileDeviceProbe.constructions[] == 0
+    @test Mantle._kernel_precompile_abi(MantlePrecompileDeviceProbe.Device, 32) === nothing
 end
