@@ -138,6 +138,17 @@ end
         # The pause after the plan is what makes it deterministic: the plan's own
         # submission is done in well under a millisecond, and asked straight after
         # `run!` the reclaim usually came before that signal too.
+        #
+        # Handed back EARLY means while the launch still ran, and `synchronize` is what
+        # says it ran: it has to wait for it. No duration can say so. A launch can end
+        # inside the pause at raised clocks, and the first round's host work, compiled
+        # here, took 56 ms against a 50 ms launch on a 7900 XTX: it had finished, and
+        # handing the region back was right.
+        function handedbackearly(r)
+            live = islive(r)
+            waited = @elapsed KA.synchronize(TESTBACKEND)
+            return !live && waited > 0.005
+        end
         g = Mantle.Graph(dev)
         tmp = Mantle.Buffer(dev, zeros(Float32, n))
         Mantle.dispatch!(g, bump!, (tmp,), n; name = "bump")
@@ -163,11 +174,23 @@ end
             sleep(0.02)
             Mantle.reclaim!(sp, dev)
             Mantle.reclaim!(sp, dev)
-            islive(r) || push!(early, k)
-            KA.synchronize(TESTBACKEND)
+            handedbackearly(r) && push!(early, k)
             reclaimidle!(dev)
         end
         @test isempty(early)
+
+        # …and that question can answer yes: with a region already gone and the slow launch
+        # running, asked straight away so that no clock can end it first.
+        a = Mantle.Buffer(dev, fill(5f0, n))
+        out = Mantle.Buffer(dev, zeros(Float32, n))
+        gone = Mantle.Buffer(dev, zeros(Float32, n))
+        KA.synchronize(TESTBACKEND)
+        r = Mantle.region(gone.store)
+        Mantle.free!(gone)
+        reclaimidle!(dev)
+        spinread!(TESTBACKEND, 64)(Mantle.storage(out), Mantle.storage(a), spinsfor(200); ndrange = n)
+        @test handedbackearly(r)
+        reclaimidle!(dev)
     end
 
     @testset "nothing in flight names it: released at the first reclaim" begin
