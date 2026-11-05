@@ -42,6 +42,7 @@ GPUArrays = {url = "https://github.com/SimonDanisch/GPUArrays.jl", rev = "61e30c
 Raycore = {url = "https://github.com/JuliaGeometry/Raycore.jl", rev = "sd/with-texture"}
 
 [compat]
+GLFW = "4"
 # KernelInterface needs the local matrix-vocabulary branch until registered;
 # develop KernelAbstractions/lib/KernelInterface and Lava locally.
 GPUCompiler = "1, 2"

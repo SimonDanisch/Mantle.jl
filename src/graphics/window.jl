@@ -38,7 +38,11 @@ content scale, converts: a scaled X11 desktop reports a content scale and still 
 one pixel per point, macOS draws two.
 """
 function platformwindow(width::Integer, height::Integer, title::AbstractString)
-    GLFW.Init()
+    GLFW.Init() || error("Mantle: GLFW could not initialize. Use offscreen rendering when no display is available.")
+    GLFW.GetPlatform() == GLFW.PLATFORM_NULL && error(
+        "Mantle cannot open a visible window on GLFW's NULL platform. " *
+            "Use offscreen rendering, or select an available display platform with JULIA_GLFW_PLATFORM."
+    )
     GLFW.WindowHint(GLFW.CLIENT_API, GLFW.NO_API)
     GLFW.WindowHint(GLFW.RESIZABLE, true)
     handle = GLFW.CreateWindow(Int(width), Int(height), String(title))
