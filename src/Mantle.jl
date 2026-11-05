@@ -52,6 +52,7 @@ const KI = KernelInterface
 
 import Serialization
 import Mmap
+using FileWatching: Pidfile
 import PrecompileTools
 using PrecompileTools: @setup_workload, @compile_workload
 export @setup_workload, @compile_workload

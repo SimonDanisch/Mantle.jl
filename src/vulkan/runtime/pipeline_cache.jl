@@ -95,29 +95,43 @@ end
 
 """
 Write `ctx.pipeline_cache` to its disk path through a temp file and rename, so
-no process reads a partial blob. No-op on a lost device.
+no process reads a partial blob. Merge the latest file while holding a process
+lock: an older device or Julia session must not erase another writer's compiles.
+No-op on a lost device.
 """
 function save_pipeline_cache!(ctx)
     ctx.device_lost && return nothing
     isdefined(ctx, :pipeline_cache) || return nothing
+    return save_pipeline_cache!(ctx, lava_pipeline_cache_path(ctx.device_name, ctx.driver_version))
+end
+
+function save_pipeline_cache!(ctx, path::String)
+    ctx.device_lost && return nothing
+    isdefined(ctx, :pipeline_cache) || return nothing
     try
-        # `ptr` is Libc.malloc'd by VK.jl; ours to `Libc.free`.
-        size, ptr = unwrap(
-            VK.get_pipeline_cache_data(ctx.device, ctx.pipeline_cache))
-        try
-            size == 0 && return nothing
-            bytes = unsafe_wrap(Array, Ptr{UInt8}(ptr), Int(size); own=false)
-            path = lava_pipeline_cache_path(ctx.device_name, ctx.driver_version)
-            mkpath(dirname(path))
-            tmppath, io = mktemp(dirname(path); cleanup=false)
+        mkpath(dirname(path))
+        Pidfile.mkpidlock(path * ".pid"; stale_age = 120) do
+            # Merge into a separate cache, so saving never mutates the cache
+            # another thread may currently use for pipeline creation.
+            merged = create_lava_pipeline_cache(ctx.device, path, ctx.physical_device)
             try
-                write(io, bytes)
+                unwrap(VK.merge_pipeline_caches(ctx.device, merged, [ctx.pipeline_cache]))
+                # `ptr` is Libc.malloc'd by VK.jl; ours to `Libc.free`.
+                size, ptr = unwrap(VK.get_pipeline_cache_data(ctx.device, merged))
+                try
+                    size == 0 && return nothing
+                    bytes = unsafe_wrap(Array, Ptr{UInt8}(ptr), Int(size); own=false)
+                    mktemp(dirname(path)) do tmppath, io
+                        write(io, bytes)
+                        close(io)
+                        mv(tmppath, path; force=true)
+                    end
+                finally
+                    Libc.free(ptr)
+                end
             finally
-                close(io)
+                finalize(merged)
             end
-            mv(tmppath, path; force=true)
-        finally
-            Libc.free(ptr)
         end
     catch ex
         ex isa Union{SystemError, Base.IOError} || rethrow()
