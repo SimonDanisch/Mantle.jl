@@ -309,6 +309,26 @@ driver reports no executable.
 """
 pipeline_exec_stats(ctx::LavaDevice, linked::LavaLinkedKernel) = pipeline_exec_stats(ctx, linked.pipeline)
 
+function pipeline_resource_summary(raw)
+    registers = nothing
+    scratch = nothing
+    for s in raw
+        name, value = lowercase(s.name), s.value
+        value isa Int || continue
+        if !occursin("spill", name) && !occursin("pre-sched", name)
+            if occursin("vgpr", name)
+                registers = value
+            elseif registers === nothing && occursin("register", name)
+                registers = value
+            end
+        end
+        # A spilled-register count is not a byte size. RADV reports both,
+        # with the spill counts preceding its actual "Scratch size".
+        scratch === nothing && occursin("scratch", name) && (scratch = value)
+    end
+    return (; registers, scratch_bytes=scratch)
+end
+
 # The KA launch path keeps only `LaunchPlan.pipeline`, hence this method.
 function pipeline_exec_stats(ctx::LavaDevice, pipeline::LavaComputePipeline)
     ctx.pipeline_exec_props_available || return nothing
@@ -323,8 +343,6 @@ function pipeline_exec_stats(ctx::LavaDevice, pipeline::LavaComputePipeline)
     stats_info = VK.PipelineExecutableInfoKHR(pipe, UInt32(0))
     stats = VK.unwrap(VK.get_pipeline_executable_statistics_khr(ctx.device, stats_info))
     raw = NamedTuple[]
-    registers = nothing
-    scratch = nothing
     for s in stats
         name = String(s.name)
         # NVIDIA 595.80 returns 64-bit values in the upper 32 bits with
@@ -348,20 +366,8 @@ function pipeline_exec_stats(ctx::LavaDevice, pipeline::LavaComputePipeline)
             nothing
         end
         push!(raw, (; name, description=String(s.description), value=v))
-        lname = lowercase(name)
-        # Statistic names are driver-defined: NVIDIA "Register Count", RADV
-        # "VGPRs". Every spelling is tried on every driver; VGPRs win where both
-        # appear, since they bound occupancy on AMD.
-        if occursin("vgpr", lname) && !occursin("spill", lname) && !occursin("pre-sched", lname) && v isa Int
-            registers = v                                  # authoritative, overwrite
-        elseif registers === nothing && occursin("register", lname) && v isa Int
-            registers = v
-        end
-        if scratch === nothing && (occursin("scratch", lname) || occursin("spill", lname)) && v isa Int
-            scratch = v
-        end
     end
-    return (; registers, scratch_bytes=scratch, raw_stats=raw)
+    return (; pipeline_resource_summary(raw)..., raw_stats=raw)
 end
 
 """
