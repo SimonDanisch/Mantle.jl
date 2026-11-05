@@ -170,4 +170,46 @@ end
     @test Mantle.readonlyargs(graph, [Mantle.WRITE, Mantle.NOTOUCH], (a, b), adapted) === adapted
 end
 
+@testset "read-only arguments distinguish disjoint pooled byte ranges" begin
+    dev = M.Device(TESTBACKEND)
+    owner = M.Buffer(dev, Float32.(1:32))
+    try
+        parent = M.storage(owner)
+        dst, src = view(parent, 1:16), view(parent, 17:32)
+        @test M.bufferof(dst) === M.bufferof(src)
+        @test !Base.mightalias(dst, src)
+        adapt = M.LavaAdaptor(nothing)
+        for graph in (nothing, M.Graph(dev))
+            wrapped(raw, touches) = M.readonlyargs(graph, touches, raw, M.devargs(adapt, raw))
+            # Adjacent ranges may be readonly even when their allocation owner
+            # is shared. Reinterpretation compares bytes, not element indices.
+            for read in (src, reinterpret(UInt32, src), reinterpret(UInt8, src))
+                actual = wrapped((dst, read), [M.WRITE, M.READ])
+                @test isconst(typeof(actual[2]))
+                @test !(actual[1] isa Lava.Const)
+            end
+            for read in (dst, view(parent, 16:31),
+                         view(reinterpret(UInt8, parent), 64:67))
+                @test !(wrapped((dst, read), [M.WRITE, M.READ])[2] isa Lava.Const)
+            end
+            empty = view(parent, 1:0)
+            @test isconst(typeof(wrapped((dst, empty), [M.WRITE, M.READ])[2]))
+            @test isconst(typeof(wrapped((empty, dst), [M.WRITE, M.READ])[2]))
+            # A later write and an alias buried in an aggregate still block it.
+            @test isconst(typeof(wrapped((src, dst), [M.READ, M.WRITE])[1]))
+            actual = wrapped(((source = src, alias = dst), dst), [M.READ, M.WRITE])
+            @test !(actual[1].source isa Lava.Const)
+            @test !(actual[1].alias isa Lava.Const)
+        end
+        KI.@launch dev ndrange=16 ro_add_one!(dst, src)
+        @test Array(dst) == Float32.(18:33)
+        g = M.Graph(dev)
+        M.dispatch!(g, ro_add_one!, (dst, src), 16)
+        M.runonce!(g)
+        @test Array(dst) == Float32.(18:33)
+    finally
+        M.free!(owner)
+    end
+end
+
 end # LavaDevice
