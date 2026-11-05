@@ -592,6 +592,12 @@ struct Barriers <: Phase end
 join_pass_storage(::Type,::Type)=nothing
 join_pass_storage(::Type{Storage{K,A}},::Type{Storage{K,B}}) where {K,A,B} =
     Storage{K,Access{reads(A)||reads(B),writes(A)||writes(B)}}
+join_pass_storage(::Type{Unordered{Storage{K,A}}},::Type{Storage{K,B}}) where {K,A,B} =
+    join_pass_storage(Storage{K,A},Storage{K,B})
+join_pass_storage(::Type{Storage{K,A}},::Type{Unordered{Storage{K,B}}}) where {K,A,B} =
+    join_pass_storage(Storage{K,A},Storage{K,B})
+join_pass_storage(::Type{Unordered{Storage{K,A}}},::Type{Unordered{Storage{K,B}}}) where {K,A,B} =
+    Unordered{join_pass_storage(Storage{K,A},Storage{K,B})}
 
 function barrier_pass_usages(p,segments_of)
     out=Pair{Int,Type}[]

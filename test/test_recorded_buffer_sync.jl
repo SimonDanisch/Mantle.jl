@@ -1,5 +1,6 @@
 using Test
 import Mantle
+import Atomix
 
 function replay_policy_scale!(out,x,n::Int32,scale::Float32)
     i=Int32(Mantle.KI.get_global_id().x)
@@ -45,12 +46,64 @@ function replay_native_words!(words,n::Int32)
     nothing
 end
 
+function replay_atomic_alias!(counter, inputs, enabled, n::Int32)
+    i=Int32(Mantle.KI.get_global_id().x)
+    if i<=n && enabled[1]!=0
+        # The ordinary read is disjoint from the atomically written element,
+        # but aliases its buffer. Both accesses belong to the same pass.
+        delta=@inbounds inputs[1][2]+Int32(1)
+        Atomix.@atomic :monotonic counter[1]+=delta
+    end
+    nothing
+end
+function replay_mark_count!(out,counter,n::Int32)
+    i=Int32(Mantle.KI.get_global_id().x)
+    i<=n && i<=counter[1] && (@inbounds out[i]=Int32(1))
+    nothing
+end
+replay_atomic_alias_reverse!(inputs,counter,enabled,n::Int32) =
+    replay_atomic_alias!(counter,inputs,enabled,n)
+
 function test_recorded_buffer_sync(dev)
     M=Mantle
     @testset "Automatic recorded buffer synchronization" begin
         @test M.buffer_head_ordered(dev) == M.global_buffer_barriers(M.syncbackend(dev))
         @test !M.buffer_head_ordered(nothing)
         @test M.buffer_head_ordered(dev)
+        for reverse in (false,true)
+        let n=4096,counter=M.Buffer(dev,Int32[0,0]),out=M.Buffer(dev,zeros(Int32,4096)),
+            enabled=M.GPURef(dev,Int32(0)),p=nothing
+            try
+                g=M.Graph(dev)
+                M.dispatch!(g,M.fill_kernel!,(counter,Int32(0)),2;group=1,name="reset_counter")
+                M.dispatch!(g,M.fill_kernel!,(out,Int32(0)),n;group=256,name="reset_output")
+                kernel=reverse ? replay_atomic_alias_reverse! : replay_atomic_alias!
+                args=reverse ? ((counter,),counter,enabled,Int32(n)) : (counter,(counter,),enabled,Int32(n))
+                producer=M.dispatch!(g,kernel,args,n;
+                    group=256,name="atomic_alias")
+                M.repeat!(g,1;while_nonzero=counter) do _
+                    M.dispatch!(g,replay_mark_count!,(out,counter,Int32(n)),M.DeviceRange(counter;max=n);
+                        group=256,name="read_atomic_count")
+                end
+                p=M.record!(M.Plan(g;budget=Inf))
+                cid=M.resourceid(g,counter)
+                merged=M.barrier_pass_usages(producer,id->(id,))
+                @test (cid=>M.Storage{M.BufferKind,M.ReadWrite}) in merged
+                consumer=only(filter(pp->pp.pass.name=="read_atomic_count",p.passes))
+                @test !((cid=>M.Indirect) in consumer.pass.usages)
+                @test !isempty(consumer.pre)
+                for value in Int32[0,1,0,1]
+                    enabled[]=value
+                    M.run!(p);M.waitidle(dev)
+                    @test Array(counter)==Int32[value*n,0]
+                    @test all(==(value),Array(out))
+                end
+            finally
+                p===nothing||M.free!(p)
+                foreach(M.free!,(counter,out,enabled))
+            end
+        end
+        end
         let n=1024,x=M.KA.allocate(dev,Float32,1024),out=M.Buffer(dev,Float32,1024),p=nothing
             try
                 fill!(x,1f0);words=reinterpret(UInt32,x)
