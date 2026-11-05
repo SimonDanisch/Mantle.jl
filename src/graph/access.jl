@@ -671,6 +671,16 @@ function stmttaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
         # their unique symbol is declared through `intrinsic_usage`.
         rawname = stmt.args[1]
         name = rawname isa QuoteNode ? rawname.value : rawname
+        if name === :jl_value_ptr
+            # Julia lowers pointer_from_objref to this address conversion.
+            # It accesses no payload bytes, but later loads/stores through the
+            # pointer still alias the object, including mutable static arrays.
+            for a in @view stmt.args[6:end]
+                union!(out, operandtaint(ir, st, a))
+            end
+            push!(st.addresses, i)
+            return out
+        end
         namestr = (name isa Symbol ? String(name) :
                    name isa String ? name : string(name))::String
         m = match(r"([A-Za-z_][A-Za-z0-9_.$]*)$", namestr)

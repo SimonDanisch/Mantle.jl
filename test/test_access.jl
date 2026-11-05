@@ -197,3 +197,27 @@ end
     @test M.accessof(nothing, access_read_root!, (Ptr{Float32}, Ptr{Float32})) ==
           [M.NOTOUCH, M.WRITE, M.READ]
 end
+
+# pointer_from_objref returns an object's data address; it neither reads nor
+# writes that data. The pointer's later uses must still reach the original
+# argument. Local mutable static arrays use the same jl_value_ptr lowering.
+mutable struct AccessInlineBuffer
+    data::NTuple{4,Float32}
+end
+access_object_address(b::AccessInlineBuffer) = pointer_from_objref(b)
+access_object_read(b::AccessInlineBuffer) = unsafe_load(Ptr{Float32}(pointer_from_objref(b)))
+function access_object_write!(b::AccessInlineBuffer)
+    unsafe_store!(Ptr{Float32}(pointer_from_objref(b)), 2f0)
+    nothing
+end
+function access_unknown_foreign!(p::Ptr{Float32})
+    ccall(:not_a_declared_device_intrinsic, Cvoid, (Ptr{Float32},), p)
+    nothing
+end
+
+@testset "object-data addresses preserve provenance without accessing memory" begin
+    @test M.accessof(nothing, access_object_address, (AccessInlineBuffer,)) == [M.NOTOUCH,M.NOTOUCH]
+    @test M.accessof(nothing, access_object_read, (AccessInlineBuffer,)) == [M.NOTOUCH,M.READ]
+    @test M.accessof(nothing, access_object_write!, (AccessInlineBuffer,)) == [M.NOTOUCH,M.WRITE]
+    @test_throws M.UnanalysableAccess M.accessof(nothing, access_unknown_foreign!, (Ptr{Float32},))
+end

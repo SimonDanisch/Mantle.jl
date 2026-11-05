@@ -29,6 +29,54 @@ import KernelInterface as KI
 const M = Mantle
 include(joinpath(@__DIR__, "testbackend.jl"))
 
+using StaticArrays: MVector
+@noinline function acc_object_scratch_value(data::MVector{4,Float32}, index)
+    GC.@preserve data unsafe_load(Ptr{Float32}(pointer_from_objref(data)), index)
+end
+function acc_object_scratch!(dst, src)
+    i = KI.get_global_id().x
+    i > length(dst) && return nothing
+    x = @inbounds src[i]
+    data = MVector{4,Float32}(x, x + 1f0, x + 2f0, x + 3f0)
+    j = (i - 1) % 4 + 1
+    @inbounds dst[i] = acc_object_scratch_value(data, j)
+    return nothing
+end
+
+struct AccScratchWrapper
+    data::MVector{4,Float32}
+end
+@noinline function acc_wrapped_scratch_value(wrapper::AccScratchWrapper, index)
+    data = wrapper.data
+    GC.@preserve data unsafe_load(Ptr{Float32}(pointer_from_objref(data)), index)
+end
+function acc_wrapped_scratch!(dst, src)
+    i = KI.get_global_id().x
+    i > length(dst) && return nothing
+    x = @inbounds src[i]
+    data = MVector{4,Float32}(x, x + 1f0, x + 2f0, x + 3f0)
+    j = (i - 1) % 4 + 1
+    @inbounds dst[i] = acc_wrapped_scratch_value(AccScratchWrapper(data), j)
+    return nothing
+end
+
+@testset "local object-data pointers preserve dispatch accesses" begin
+    dev = M.Device(TESTBACKEND)
+    dst = M.devicearray(dev, zeros(Float32, 64))
+    src = M.devicearray(dev, Float32.(1:64))
+    try
+        for kernel in (acc_object_scratch!, acc_wrapped_scratch!)
+            @test M.argument_usage(dev, kernel, (dst, src), 64, nothing) == [M.WRITE,M.READ]
+            KI.@launch dev ndrange=64 kernel(dst, src)
+            M.waitidle(dev)
+            @test Array(dst) == Float32[i + (i - 1) % 4 for i in 1:64]
+        end
+    finally
+        M.unsafe_free!(dst)
+        M.unsafe_free!(src)
+    end
+end
+
 @kernel function acc_mixed!(dst, @Const(src), @Const(unused), scale::Float32)
     i = @index(Global)
     @inbounds dst[i] = src[i] * scale
