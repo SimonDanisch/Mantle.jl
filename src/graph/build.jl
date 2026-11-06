@@ -161,6 +161,11 @@ resourceleaves!(acc, g, @nospecialize(x)) = resourceleaves!(acc, g, x, Base.IdSe
 # add a storage read the vertex fetch does not do.
 resourceleaves!(acc, g, ::Attr, seen::Base.IdSet{Any}, depth::Int) = acc
 
+# A device is never one of an argument's resources. Arguments can reach it (an
+# acceleration structure's `backend`), and its queue holds retired storage until
+# the GPU is done with it: buffers no dispatch reads, some of them already freed.
+resourceleaves!(acc, g, ::Device, seen::Base.IdSet{Any}, depth::Int) = acc
+
 # Device objects reach their pool and device, so the walk needs both a cycle
 # guard (`seen`) and a depth limit.
 const LEAFDEPTH = 16
