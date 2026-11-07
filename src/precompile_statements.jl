@@ -1,5 +1,5 @@
 # Infer backend types without constructing a device or probing hardware.
-function _precompile_device_types()
+function precompile_device_types()
     result = DataType[]
     for method in methods(makedevice)
         signature = Base.unwrap_unionall(method.sig)
@@ -18,11 +18,11 @@ precompile_constructor_signatures(::Type{<:Device}) = ()
 
 # Optional device-free kernel ABI descriptions for consumer precompile workloads.
 # The backend owns its array wrappers, iteration context and interpreter.
-_kernel_precompile_abi(::Type{<:Device}, group::Int) = nothing
+kernel_precompile_abi(::Type{<:Device}, group::Int) = nothing
 
-function _precompile_statements()
+function precompile_statements()
     signatures = Any[]
-    for device in _precompile_device_types()
+    for device in precompile_device_types()
         append!(signatures, precompile_constructor_signatures(device))
         for phase in (Place, Pipelines, Barriers)
             push!(signatures, Tuple{typeof(run!), phase, Compile{device}})
@@ -33,6 +33,6 @@ end
 
 PrecompileTools.@setup_workload begin
     PrecompileTools.@compile_workload begin
-        _precompile_statements()
+        precompile_statements()
     end
 end

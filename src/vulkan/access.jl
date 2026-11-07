@@ -10,18 +10,18 @@ argtype(dev::LavaDevice, @nospecialize(y)) =
 
 accesscache(dev::LavaDevice) = dev.caches.accesses::AccessCache
 
-_precompile_array_type(::Type{T}, N::Int) where {T} = LavaDeviceArray{T,N}
-_precompile_readonly_type(::Type{T}, N::Int) where {T} = Lava.Const{T,N}
+precompile_array_type(::Type{T}, N::Int) where {T} = LavaDeviceArray{T,N}
+precompile_readonly_type(::Type{T}, N::Int) where {T} = Lava.Const{T,N}
 
-function _kernel_precompile_abi(::Type{LavaDevice}, group::Int)
+function kernel_precompile_abi(::Type{LavaDevice}, group::Int)
     CI = CartesianIndices{1,Tuple{Base.OneTo{Int}}}
     NI = KA.NDIteration
     iteration = NI.NDRange{1,NI.DynamicSize,NI.StaticSize{(group,)},CI,Nothing,Nothing}
     context = KA.CompilerMetadata{NI.DynamicSize,NI.DynamicCheck,Nothing,CI,iteration,Nothing,Nothing}
-    return (; array = _precompile_array_type, readonly = _precompile_readonly_type, context)
+    return (; array = precompile_array_type, readonly = precompile_readonly_type, context)
 end
 
-_precompile_kernelinterpreter(::Type{LavaDevice}, kernel, tt, group::Int) =
+precompile_kernelinterpreter(::Type{LavaDevice}, kernel, tt, group::Int) =
     Lava.kernelinterpreter(kernel, tt; workgroup_size = (group,1,1))
 
 devicebuffertype(::LavaDevice, ::Type{T}, N::Int) where {T} = LavaDeviceArray{T,N}

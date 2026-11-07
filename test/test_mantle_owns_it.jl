@@ -185,6 +185,7 @@ const PURE_BOOKKEEPING_ALLOWED = Set{Tuple{Symbol,String}}([
     (:bind_textures, "src/metal/graphics.jl"),      # packs native texture and sampler objects
     (:intrinsic_usage, "src/metal/ka.jl"),          # AIR intrinsic names are the backend compiler's
     (:intrinsic_usage, "src/vulkan/access.jl"),     # Lava intrinsic names are the backend compiler's
+    (:kernel_precompile_abi, "src/vulkan/access.jl"), # Lava's device array and iteration types, no device
     (:emitbarriers!, "src/metal/record.jl"),        # sets an indirect command's barrier bit
     (:emitloophead!, "src/metal/record.jl"),        # the same, at an iteration's head
     (:target_view, "src/metal/window.jl"),          # the drawable's texture

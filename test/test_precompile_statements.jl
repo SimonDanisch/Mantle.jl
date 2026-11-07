@@ -12,11 +12,11 @@ end
 end
 
 @testset "host precompilation constructs no devices" begin
-    @test MantlePrecompileDeviceProbe.Device in Mantle._precompile_device_types()
+    @test MantlePrecompileDeviceProbe.Device in Mantle.precompile_device_types()
     @test MantlePrecompileDeviceProbe.constructions[] == 0
-    ok, total = Mantle._precompile_statements()
+    ok, total = Mantle.precompile_statements()
     @test total > 0
     @test ok == total
     @test MantlePrecompileDeviceProbe.constructions[] == 0
-    @test Mantle._kernel_precompile_abi(MantlePrecompileDeviceProbe.Device, 32) === nothing
+    @test Mantle.kernel_precompile_abi(MantlePrecompileDeviceProbe.Device, 32) === nothing
 end

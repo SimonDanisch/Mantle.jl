@@ -638,8 +638,9 @@ const BACKEND_VOCABULARY = (
     :intrinsic_usage,
     # Library callable types declare their own argument accesses.
     :argument_usage,
-    # A native constructor behind an inference barrier states its signature.
-    :precompile_constructor_signatures,
+    # A native constructor behind an inference barrier states its signature, and a
+    # backend describes its kernel ABI for consumers' device-free precompile workloads.
+    :precompile_constructor_signatures, :kernel_precompile_abi,
     # An image shared with another API; core refuses, a backend that can makes one.
     :ExternalImage,
     # Properties required from backend-specific compiled dispatches.
