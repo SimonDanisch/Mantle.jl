@@ -98,14 +98,20 @@ end
     M.dispatch!(g, dr_mark!, (dst,
                                   n),
                     M.DeviceRange(n; max = 64), name = "mark")
-    # Declared, not hoped for: the second pass reads `n` as `Indirect`, which is
-    # the edge that orders it after the pass that wrote it. Without it the
-    # dispatch would size itself off whatever the buffer held last frame.
-    marks = only(filter(p -> any(u -> last(u) === M.Indirect, p.usages), g.passes))
-    @test marks !== nothing
-
     M.run!(M.record!(M.Plan(g)))
     @test count(==(1.0f0), Array(M.storage(dst))) == 64
+
+    # Declared, not hoped for: a dispatch over `DeviceRange(n)` reads `n` as shader
+    # storage, since its pass's fused prepare reads the count to write the
+    # indirect command, and that read is the edge that orders it after the pass
+    # that wrote `n`. Without it the dispatch would size itself off whatever the
+    # buffer held last frame. Asked of a kernel that does not take `n` itself, so
+    # only the range can have declared it. (It was an `Indirect` read until the
+    # prepare took over the count, 2026-11-05.)
+    g2 = M.Graph(dev)
+    M.dispatch!(g2, dr_mark_unguarded!, (M.Buffer(dev, zeros(Float32, 64)),),
+                M.DeviceRange(n; max = 64); name = "mark")
+    @test (M.resourceid(g2, n) => M.Storage{M.BufferKind, M.ReadOnly}) in only(g2.passes).usages
 end
 
 @testset "the tail is whole workgroups, and the guard is the kernel's job" begin
