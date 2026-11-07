@@ -46,6 +46,13 @@ function readonlyregion(x::LavaArray)
     start = UInt128(base) + offset
     return ReadonlyRegion(bufferof(x), start, start + sizeof(x), true)
 end
+# A slice of a native array's owner (`nativeslice`), in bytes from the owner's start.
+function readonlyregion(r::BufferRange)
+    isdevicearray(r.parent) || return ReadonlyRegion(bufferof(r), 0, 0, false)
+    base, _ = GPUArrays.memory_location(r.parent)
+    start = UInt128(base) + first(r.range) - 1
+    return ReadonlyRegion(bufferof(r), start, start + length(r.range), true)
+end
 readonlyoverlap(a::ReadonlyRegion, b::ReadonlyRegion) = a.bounded && b.bounded ?
     a.first < a.past && b.first < b.past && a.first < b.past && b.first < a.past :
     a.owner === b.owner

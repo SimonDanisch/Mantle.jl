@@ -94,6 +94,10 @@ end
 
 isdevicearray(::LavaArray) = true
 resource_identity(a::LavaArray)=a.buf.rc
+# `offset` is in bytes of the buffer `buf` names: a pool block for every
+# `Mantle.storage` view, so the arrays of one block are told apart by it. An
+# empty array covers no bytes.
+bytespan(a::LavaArray{T}) where {T} = (a.offset + 1):(a.offset + length(a) * sizeof(T))
 
 # Draw stages are compiled as wrappers (`resolve_shader_pair`) that add the
 # varyings and outputs, so accesses are inferred on the wrapper; the user

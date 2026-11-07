@@ -171,7 +171,7 @@ resourceleaves!(acc, g, ::Device, seen::Base.IdSet{Any}, depth::Int) = acc
 const LEAFDEPTH = 16
 
 function resourceleaves!(acc, g, @nospecialize(x), seen::Base.IdSet{Any}, depth::Int)
-    isdevicearray(x) && return (push!(acc, x); acc)
+    isdevicearray(x) && return (push!(acc, nativeslice(g, x)); acc)
     depth > LEAFDEPTH && return acc
     T = typeof(x)
     carries(T) || return acc
@@ -197,6 +197,39 @@ argument). Backends answer like [`kerneltouches`](@ref), from what they compile.
 """
 function vertextouches end
 function fragmenttouches end
+
+"""
+    bytespan(x) -> UnitRange{Int} or nothing
+
+The bytes of its storage owner (the buffer [`resource_identity`](@ref) names) a
+backend array covers, counted from 1, or `nothing` when the backend cannot say.
+"""
+bytespan(@nospecialize(x)) = nothing
+
+"""
+    nativeslice(graph, x) -> resource
+
+A backend array as the bytes of its owner it covers ([`bytespan`](@ref)), interned
+per `(owner, bytes)`, so arrays carved from one pool block are ordered only where
+they overlap. Named by the whole owner, a read of one queue's counter and an
+append to another's were a hazard, and every pass of Hikari's bounce loop waited
+for the one before it. An array whose bytes the backend cannot report stands for
+its whole owner.
+"""
+# Without a graph (an eager launch's read-only check) there is nothing to intern
+# in, and that check asks for the owner anyway.
+nativeslice(::Nothing, @nospecialize(x)) = x
+
+"""The id a usage of `x` is declared under: a backend array's bytes ([`nativeslice`](@ref)), any other resource itself."""
+usageid(g::Graph, @nospecialize(x)) = resourceid(g, nativeslice(g, x))
+function nativeslice(g::Graph, @nospecialize(x))
+    r = bytespan(x)
+    r === nothing && return x
+    pid = resourceid(g, x)
+    return get!(g.views, (pid, r)) do
+        BufferRange(x, r)
+    end
+end
 
 """
     isdevicearray(x) -> Bool
@@ -730,7 +763,7 @@ A vertex attribute binding of `r`, declared as a `Vertices` usage of the pass.
 This is the only way a resource becomes a vertex binding.
 """
 function Attribute(p::PassHandle, r)
-    push!(p.pass.usages, resourceid(p.graph, r) => Vertices)
+    push!(p.pass.usages, usageid(p.graph, r) => Vertices)
     Attr{eltype(r),typeof(r)}(r, Int32(stride(r)))
 end
 
@@ -748,7 +781,7 @@ drawover(p::PassHandle, n::Buffer{DrawIndirectCommand}) = indirectcount!(p, n)
 drawover(p::PassHandle, n::TransientBuffer{DrawIndirectCommand}) = indirectcount!(p, n)
 
 function indirectcount!(p::PassHandle, n)
-    push!(p.pass.usages, resourceid(p.graph, n) => Indirect)
+    push!(p.pass.usages, usageid(p.graph, n) => Indirect)
     touch!(p.graph, n)
     Commands(n)
 end
@@ -804,7 +837,8 @@ resourcekind(::BufferRange) = BufferKind()
 Elements `range` of `x` as a resource of its own, interned per
 `(resource, range)` in the graph. Kernels still receive the whole buffer; the
 slice only scopes barriers, so passes over disjoint slices are not ordered.
-For native backend arrays, tracking remains at whole-allocation granularity.
+A native backend array is sliced in bytes of its owner, as [`nativeslice`](@ref)
+names it, or stands for its whole owner when its bytes are unknown.
 """
 function slice(g::Graph, x, range::UnitRange{Int})
     # Not `length(storage(x))`: a transient has no storage until placement.
@@ -812,9 +846,17 @@ function slice(g::Graph, x, range::UnitRange{Int})
     (first(range) >= 1 && last(range) <= n) || throw(ArgumentError(
         "slice(): range $range is outside the buffer's 1:$n."))
     # Native arrays may reinterpret one allocation with different element
-    # widths/offsets. Track the whole owner until native byte-range views are
-    # represented explicitly; element ranges from different dtypes cannot mix.
-    isdevicearray(x) && return BufferRange(x,range)
+    # widths and offsets, so their slices are bytes of the owner: element ranges
+    # of different element types cannot be compared.
+    if isdevicearray(x)
+        span = bytespan(x)
+        span === nothing && return x
+        w = sizeof(eltype(x))
+        bytes = (first(span) + (first(range) - 1) * w):(first(span) + last(range) * w - 1)
+        return get!(g.views, (resourceid(g, x), bytes)) do
+            BufferRange(x, bytes)
+        end
+    end
     pid = resourceid(g, x)
     get!(g.views, (pid, range)) do
         BufferRange(x, range)
@@ -903,8 +945,8 @@ function copy!(g::Graph, name::AbstractString, dst, src; region = nothing)
     p.dst = dst
     push!(g.passes, p)
     touch!(g, src); touch!(g, dst)
-    push!(p.usages, resourceid(g, src) => CopySrc)
-    push!(p.usages, resourceid(g, dst) => CopyDst)
+    push!(p.usages, usageid(g, src) => CopySrc)
+    push!(p.usages, usageid(g, dst) => CopyDst)
     p
 end
 

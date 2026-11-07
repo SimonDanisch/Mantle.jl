@@ -50,6 +50,9 @@ Mantle.devicebuffertype(::MetalDevice, ::Type{T}, N::Int) where {T} =
 
 Mantle.isdevicearray(::Metal.MtlArray) = true
 Mantle.resource_identity(a::Metal.MtlArray)=a.data.rc
+# `offset` is in bytes of the `MTLBuffer` `data` names, a pool block for every
+# `deviceview`, as for Vulkan's `LavaArray`. An empty array covers no bytes.
+Mantle.bytespan(a::Metal.MtlArray{T}) where {T} = (a.offset + 1):(a.offset + length(a) * sizeof(T))
 
 # Include derived-array offsets when choosing aligned wide loads.
 Mantle.basealignment(a::Metal.MtlArray) =

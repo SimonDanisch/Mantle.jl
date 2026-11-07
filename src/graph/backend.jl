@@ -681,7 +681,7 @@ const BACKEND_VOCABULARY = (
     :readback_window, :target_extent, :target_format, :target_image, :target_view,
     # Core infers accesses; backends supply adapted argument types, interpreters
     # and stage-wrapper signatures.
-    :argtype, :devicebuffertype, :isdevicearray, :resource_identity, :accesscache, :kerneltouches,
+    :argtype, :devicebuffertype, :isdevicearray, :resource_identity, :bytespan, :accesscache, :kerneltouches,
     :kernelinterpreter, :kakernelaccesssignature,
     :vertextouches, :fragmenttouches,
     # ray tracing: the native structures under core's builds (`raytracing/api.jl`) and its

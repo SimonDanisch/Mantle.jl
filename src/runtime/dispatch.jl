@@ -117,7 +117,7 @@ function dispatch!(p, kernel, args, ndrange; group = nothing)
 end
 
 function dispatchcount!(p, n)
-    push!(passof(p).usages, resourceid(graphof(p), n) => Storage{BufferKind,ReadOnly})
+    push!(passof(p).usages, usageid(graphof(p), n) => Storage{BufferKind,ReadOnly})
     touch!(graphof(p), n)
     return n
 end
@@ -142,7 +142,7 @@ iscall(d::Dispatch) = d.ndrange === nothing
 Register an Indirect read and touch the count resource. Its command-processor
 stage/access differs from an ordinary shader storage read."""
 function indirectcount!(p, n)
-    push!(passof(p).usages, resourceid(graphof(p), n) => Indirect)
+    push!(passof(p).usages, usageid(graphof(p), n) => Indirect)
     touch!(graphof(p), n)
     return n
 end
