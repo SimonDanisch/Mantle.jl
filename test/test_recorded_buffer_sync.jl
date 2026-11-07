@@ -63,6 +63,11 @@ function replay_mark_count!(out,counter,n::Int32)
 end
 replay_atomic_alias_reverse!(inputs,counter,enabled,n::Int32) =
     replay_atomic_alias!(counter,inputs,enabled,n)
+function replay_count_append!(appended,count)
+    i=Int32(Mantle.KI.get_global_id().x)
+    i<=count[1] && Atomix.@atomic :monotonic appended[1]+=Int32(1)
+    nothing
+end
 
 function test_recorded_buffer_sync(dev)
     M=Mantle
@@ -153,6 +158,30 @@ function test_recorded_buffer_sync(dev)
                 M.waitidle(dev);@test all(==(820f0),Array(out))
             finally
                 foreach(M.free!,reverse(plans));foreach(M.free!,reverse(owned))
+            end
+        end
+        # Arrays carved from one pool block are told apart by the bytes they
+        # cover. Named by the whole block, a read of one queue's counter and an
+        # append to another's were a hazard, so every pass of Hikari's bounce
+        # loop waited for the one before it. Passes that order nothing between
+        # them form one run, and share one prepare.
+        let owned=Any[],p=nothing,n=256
+            try
+                count=M.Buffer(dev,Int32[n]);appended=M.Buffer(dev,Int32[0]);push!(owned,count,appended)
+                cs,as=M.storage(count),M.storage(appended)
+                @test M.resource_identity(cs)===M.resource_identity(as)   # one block, else this asks nothing
+                g=M.Graph(dev)
+                for k in 1:3
+                    M.dispatch!(g,replay_count_append!,(as,cs),M.DeviceRange(cs;max=n);group=64,name="append$k")
+                end
+                p=M.record!(M.Plan(g;budget=Inf))
+                at(k)=findfirst(pp->pp.pass.name=="append$k",p.passes)
+                @test isempty(p.passes[at(2)].pre) && isempty(p.passes[at(3)].pre)
+                @test M.runend(p,at(1),length(p.passes))==at(3)
+                M.run!(p);M.waitidle(dev)
+                @test Array(appended)==Int32[3n]
+            finally
+                p===nothing||M.free!(p);foreach(M.free!,reverse(owned))
             end
         end
         # A barrier for A also orders B's earlier write because Vulkan emits

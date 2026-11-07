@@ -405,23 +405,24 @@ indirectindex(::Launch) = 0
 # place the barrier after it (`emitpreparebarrier!`).
 
 """
-    emitprepares!(emitter, plan, passplan)
+    emitprepares!(emitter, plan, passplans)
 
 One fused prepare kernel writing the indirect command of every device-sized
-dispatch and trace in the pass, then one barrier, so the dispatches are not
-serialised by a prepare each. The pass's `repeat!` gate is folded in: a
-discarded iteration writes zero groups, which makes `repeat!` portable to
-backends that cannot discard recorded work. `emitpass!` emits it before the
-predicate scope so it also runs for discarded iterations.
+dispatch and trace in the passes (a run, see [`runend`](@ref)), then one
+barrier, so the dispatches are not serialised by a prepare each. The passes'
+`repeat!` gate, one for the run, is folded in: a discarded iteration writes zero
+groups, which makes `repeat!` portable to backends that cannot discard recorded
+work. Emitted before the predicate scopes so it also runs for discarded
+iterations.
 """
-function emitprepares!(e, pl::Plan, pp::PassPlan)
-    pp.indirect || return nothing
+function emitprepares!(e, pl::Plan, pps)
+    any(pp -> pp.indirect, pps) || return nothing
     am = pl.args
     inds = Any[]
     counts = Any[]
     ats = Int32[]
     wss = UInt32[]
-    for d in pp.dispatches
+    for pp in pps, d in pp.dispatches
         k = indirectindex(d)
         k == 0 && continue
         push!(inds, indirectof(am, k))
@@ -433,7 +434,7 @@ function emitprepares!(e, pl::Plan, pp::PassPlan)
     n == 0 && return nothing
     emitkernel!(e, multi_prepare_indirect_kernel,
                 ntuple(i -> inds[i], n), ntuple(i -> counts[i], n), ntuple(i -> ats[i], n),
-                ntuple(i -> wss[i], n), gateof(pp.pass.predicate);
+                ntuple(i -> wss[i], n), gateof(first(pps).pass.predicate);
                 ndrange = 1, workgroup_size = (1, 1, 1))
     emitpreparebarrier!(e)
     return nothing
@@ -800,17 +801,66 @@ Emit the passes in `range`, with profiler timestamps around each when stamped.
 [`recordparts!`](@ref) uses it to emit one slice per recorded piece.
 """
 function emitpasses!(e, pl::Plan, range; stores::Bool = true)
-    # Two loops so an unprofiled run pays no per-pass branch.
-    if !pl.stamped
-        for i in range
-            emitpass!(e, pl, pl.passes[i]; stores)
+    i = first(range)
+    while i <= last(range)
+        j = runend(pl, i, last(range))
+        if j == i
+            pl.stamped ? profiled!(() -> emitpass!(e, pl, pl.passes[i]; stores), pl, e, i) :
+                         emitpass!(e, pl, pl.passes[i]; stores)
+        else
+            emitrun!(e, pl, i:j)
         end
-    else
-        for i in range
-            profiled!(pl, e, i) do
-                emitpass!(e, pl, pl.passes[i]; stores)
+        i = j + 1
+    end
+    return nothing
+end
+
+"""
+    runend(plan, i, stop) -> j
+
+The last pass of the run that starts at pass `i`: compute passes, under one
+`repeat!` gate, none of which after the first needs a barrier or a layout
+change. Nothing in the run orders its passes, so they share one fused prepare
+([`emitprepares!`](@ref)) and their dispatches may overlap. A prepare per pass
+put a barrier between every two of them, each waiting for all the work before
+it: Hikari's shading kernels of a bounce ran one after the other, and the empty
+ones cost what a full drain does (RayDemo crown: 2.24 s to 1.28 s on an RTX 4000
+Ada, 2.49 s to 0.98 s on a 7900 XTX).
+"""
+function runend(pl::Plan, i::Int, stop::Int)
+    head = pl.passes[i]
+    head.pass.kind === :compute || return i
+    j = i
+    while j < stop
+        nx = pl.passes[j + 1]
+        (nx.pass.kind === :compute && isempty(nx.pre) && isempty(nx.images) &&
+         nx.pass.predicate == head.pass.predicate) || break
+        j += 1
+    end
+    return j
+end
+
+"""
+    emitrun!(emitter, plan, run)
+
+The passes of a run ([`runend`](@ref)): the first one's barriers, one prepare for
+all of them, then each one's work in its predicate scope. Profiled per pass, the
+prepare in the first one's window.
+"""
+function emitrun!(e, pl::Plan, run::UnitRange{Int})
+    pps = view(pl.passes, run)
+    for (k, i) in enumerate(run)
+        pp = pl.passes[i]
+        body = function ()
+            if k == 1
+                emitbarriers!(e, pp)
+                emitprepares!(e, pl, pps)
+            end
+            withpredicate(e, workpredicate(e, pp)) do
+                emitwork!(e, pl, pp)
             end
         end
+        pl.stamped ? profiled!(body, pl, e, i) : body()
     end
     return nothing
 end
@@ -829,7 +879,7 @@ function emitpass!(e, pl, pp::PassPlan; stores::Bool = true)
     # Before the predicate scope, so a discarded iteration still writes zero
     # groups or rays. Vulkan conditional rendering does not cover trace-rays, so
     # a trace would otherwise run with an unwritten ray count.
-    p.kind === :compute && emitprepares!(e, pl, pp)
+    p.kind === :compute && emitprepares!(e, pl, (pp,))
     # Barriers stay outside the scope, so a discarded iteration still orders
     # its neighbours.
     withpredicate(e, workpredicate(e, pp)) do
