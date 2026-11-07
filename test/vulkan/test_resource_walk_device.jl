@@ -20,7 +20,8 @@ end
     x = Mantle.devicearray(dev, zeros(Float32, 16))
     g = Mantle.Graph(dev)
     leaves = walked(g, ArgumentWithDevice(x, dev))
-    @test length(leaves) == 1 && only(leaves) === x
+    # One leaf, the array: the bytes of its owner it covers.
+    @test length(leaves) == 1 && only(leaves) === Mantle.nativeslice(g, x)
     if Mantle.supports_hwtlas(TESTBACKEND)
         mesh = GeometryBasics.Mesh(Point3f[(0, 0, 0), (1, 0, 0), (0, 1, 0)], GLTriangleFace[(1, 2, 3)])
         records = Mantle.instancerecords([Mat4f(I)], UInt32[1], UInt8(0xff))

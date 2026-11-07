@@ -13,7 +13,7 @@ function free_names(path::AbstractString)
     used, bound = Set{Symbol}(), Set{Symbol}()
     bind(ex) = ex isa Symbol ? push!(bound, ex) :
                ex isa Expr && ex.head in (:(::), :(=), :tuple, :(...)) ?
-               foreach(bind, ex.args[1:1]) : nothing
+               foreach(bind, first(ex.args, 1)) : nothing   # `function () … end` binds nothing
     # A signature BINDS its parameters. Without this the extractor reported
     # three whole syntactic classes as free references to backend names:
     # `Item(id, live, size)`'s positional `id` (the backend has ObjectiveC's),

@@ -270,14 +270,15 @@ end
     qb = M.devicearray(dev, zeros(Float32, n))
     q = AccPair(qa, qb)
     p2 = M.dispatch!(g, acc_struct!, (q, src), n; name = "struct")
-    @test M.resourceid(g, qa) in first.(p2.usages)
-    @test M.resourceid(g, qb) in first.(p2.usages)
+    # A device array is declared by the bytes of its owner it covers (`usageid`).
+    @test M.usageid(g, qa) in first.(p2.usages)
+    @test M.usageid(g, qb) in first.(p2.usages)
     # And `src` is only read, which is the half that the widening hid: with the
     # container's write coming from a throw path, everything in the pass looked
     # read+write.
     byid2 = Dict(id => U for (id, U) in p2.usages)
     @test byid2[M.resourceid(g, src)] === Storage{BufferKind, ReadOnly}
-    @test byid2[M.resourceid(g, qa)] === Storage{BufferKind, WriteOnly}
+    @test byid2[M.usageid(g, qa)] === Storage{BufferKind, WriteOnly}
 
     # A slice is an argument, and it is the slice the pass is recorded touching.
     sl = M.slice(g, dst, 1:32)
