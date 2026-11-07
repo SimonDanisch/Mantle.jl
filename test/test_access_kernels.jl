@@ -23,7 +23,7 @@
 # of the analysis (see `accessof`). The half that is a question about types and
 # not about a device is `test/test_access.jl`. This file was
 # `test/vulkan/test_access.jl`.
-using Test, Mantle, KernelAbstractions
+using Test, Mantle, KernelAbstractions, StructArrays
 import Atomix, Adapt
 import KernelInterface as KI
 const M = Mantle
@@ -130,6 +130,65 @@ Adapt.@adapt_structure AccQueue
     @inbounds q.items[slot] = v
 end
 
+# The same append with the payload store in a callee the inliner left standing.
+# Where it stops is the backend's cost model: StructArrays' `setindex!` hands the
+# slot to `foreachfield_gen` inside a closure, and Metal's array store costs
+# enough that the call stays, so on the M5 every Hikari queue append came back
+# ordered and every shade pass of a bounce waited for the one before it.
+@noinline function acc_store_at!(items, v, slot)
+    @inbounds items[slot] = v
+    return nothing
+end
+@noinline function acc_apply!(f, items, v)
+    f(items, v)
+    return nothing
+end
+
+@kernel function acc_append_outlined!(q::AccQueue, @Const(src))
+    i = @index(Global)
+    v = @inbounds src[i]
+    slot = Atomix.@atomic :monotonic q.size[1] += Int32(1)
+    acc_store_at!(q.items, v, slot)
+end
+
+@kernel function acc_append_captured!(q::AccQueue, @Const(src))
+    i = @index(Global)
+    v = @inbounds src[i]
+    slot = Atomix.@atomic :monotonic q.size[1] += Int32(1)
+    acc_apply!((items, x) -> (@inbounds items[slot] = x), q.items, v)
+end
+
+# Ordered: the callee stores at the invocation's own index, which nothing claimed.
+@kernel function acc_store_unclaimed!(q::AccQueue, @Const(src))
+    i = @index(Global)
+    v = @inbounds src[i]
+    Atomix.@atomic :monotonic q.size[1] += Int32(1)
+    acc_store_at!(q.items, v, i)
+end
+
+# Ordered: a slot claimed from `p`'s counter says nothing about `q`'s payload.
+@kernel function acc_store_foreign!(q::AccQueue, p::AccQueue, @Const(src))
+    i = @index(Global)
+    v = @inbounds src[i]
+    slot = Atomix.@atomic :monotonic p.size[1] += Int32(1)
+    acc_store_at!(q.items, v, slot)
+end
+
+struct AccRecord
+    a::Float32
+    b::Int32
+end
+
+# A record written whole at a claimed slot: Hikari's queue shape with a
+# struct-of-arrays payload, and with a plain array of records, whose element store
+# Metal spells as an `llvmcall` storing an aggregate type.
+@kernel function acc_append_record!(q::AccQueue, @Const(src))
+    i = @index(Global)
+    v = @inbounds src[i]
+    slot = Atomix.@atomic :monotonic q.size[1] += Int32(1)
+    @inbounds q.items[slot] = AccRecord(v, Int32(i))
+end
+
 # The higher-order shape: the kernel takes the real kernel and a tail of
 # arguments, and splats them. Every stage of Hikari's integrator is this.
 @kernel function acc_map!(f, n::Int32, args...)
@@ -180,6 +239,38 @@ end
     # can be handed the same one.
     q = AccQueue(M.devicearray(dev, Float32, n), M.devicearray(dev, Int32, 1))
     @test touches(dev, acc_append!, (q, src), n) == ["RW~", "R-"]
+
+    # A claimed slot stays claimed into a callee: passed as an argument, or
+    # captured by a closure the callee calls.
+    @test touches(dev, acc_append_outlined!, (q, src), n) == ["RW~", "R-"]
+    @test touches(dev, acc_append_captured!, (q, src), n) == ["RW~", "R-"]
+    soa = AccQueue(StructArray{AccRecord}((M.devicearray(dev, Float32, n),
+                                           M.devicearray(dev, Int32, n))),
+                   M.devicearray(dev, Int32, 1))
+    @test touches(dev, acc_append_record!, (soa, src), n) == ["RW~", "R-"]
+    records = AccQueue(M.devicearray(dev, AccRecord, n), M.devicearray(dev, Int32, 1))
+    @test touches(dev, acc_append_record!, (records, src), n) == ["RW~", "R-"]
+
+    # And only a claim on the store's own target counts.
+    @test touches(dev, acc_store_unclaimed!, (q, src), n) == ["RW", "R-"]
+    p = AccQueue(M.devicearray(dev, Float32, n), M.devicearray(dev, Int32, 1))
+    @test touches(dev, acc_store_foreign!, (q, p, src), n) == ["-W", "RW~", "R-"]
+end
+
+@testset "inferred access: the value an llvmcall stores" begin
+    # The stored type comes first and may hold spaces; the value follows it.
+    @test M.storedvalue("""
+        %3 = getelementptr inbounds { [1 x [3 x float]], float }, ptr addrspace(1) %0, i64 %2
+        store { [1 x [3 x float]], float } %1, ptr addrspace(1) %3, align 4, !tbaa !0
+        ret void""") == "%1"
+    @test M.storedvalue("store [2 x i32] %1, ptr addrspace(1) %3, align 4") == "%1"
+    @test M.storedvalue("store <4 x float> %1, ptr %3, align 16") == "%1"
+    @test M.storedvalue("store i32 %1, ptr addrspace(1) %3, align 4") == "%1"
+    @test M.storedvalue("store atomic i32 %1, ptr %0 monotonic, align 4") == "%1"
+    @test M.storedvalue("store ptr addrspace(1) %1, ptr %0, align 8") == "%1"
+    @test M.storedvalue("store float 0.0, ptr %0, align 4") == "0.0"
+    @test M.storedvalue("ret void") === nothing
+    @test M.storedvalue("store i32 %1, ptr %0\nstore i32 %1, ptr %2") === nothing
 end
 
 @testset "inferred access: a vararg tail is not one argument" begin

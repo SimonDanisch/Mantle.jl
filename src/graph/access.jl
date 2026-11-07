@@ -8,12 +8,18 @@
 What one dispatch does to one argument. `atomic` is a property of the writes: a
 resource whose every write is an atomic read-modify-write is `Unordered`, so passes
 sharing it need no barrier between them.
+
+`via` is nonzero only in the summary of a callee: bit `n - 1` set means some write
+lands at an index derived from the callee's parameter `n`, so `atomic` holds only if
+the caller passes a slot claimed on this argument there ([`callertouch`](@ref)).
 """
 struct Touch
     read::Bool
     write::Bool
     atomic::Bool     # every write so far was an atomic read-modify-write
+    via::UInt64
 end
+Touch(read::Bool, write::Bool, atomic::Bool) = Touch(read, write, atomic, UInt64(0))
 
 const NOTOUCH  = Touch(false, false, true)
 """
@@ -27,7 +33,11 @@ const ATOMIC   = Touch(true, true, true)
 """Read and written, not atomic. An access the walk cannot see throws instead."""
 const OPAQUE   = Touch(true, true, false)
 
-Base.:|(a::Touch, b::Touch) = Touch(a.read | b.read, a.write | b.write, a.atomic & b.atomic)
+# An ordered write makes the conditions moot, so they are dropped with it.
+function Base.:|(a::Touch, b::Touch)
+    atomic = a.atomic & b.atomic
+    return Touch(a.read | b.read, a.write | b.write, atomic, atomic ? a.via | b.via : UInt64(0))
+end
 touched(t::Touch) = t.read | t.write
 
 """
@@ -393,7 +403,9 @@ function accessof(interp, @nospecialize(f), @nospecialize(argtypes);
     touches === nothing && throw(UnanalysableAccess(sig, Int[],
         "a signature it cannot infer: either no single method applies, or every " *
         "path through it throws", sig))
-    return touches
+    # The cached summary keeps its conditions for later callers; a dispatch's
+    # arguments come from the host, where nothing claimed a slot.
+    return map(settle, touches)
 end
 
 """
@@ -487,7 +499,8 @@ a slot claimed from one queue says nothing about another.
 function disjoint(claim::Taint, target::Taint)
     isempty(claim) && return false
     for c in claim, t in target
-        (c >> ELEMBITS) == (t >> ELEMBITS) && return true
+        # A parameter marker (`-n`) is no claim yet; `callertouch` decides it.
+        c >= 0 && (c >> ELEMBITS) == (t >> ELEMBITS) && return true
     end
     return false
 end
@@ -499,7 +512,8 @@ because a back edge lets a later definition reach an earlier use.
 function walkir(w::Walk, ir, am::ArgMap, depth::Int)
     touches = fill(NOTOUCH, am.nsig)
     nstmt = length(ir.stmts)
-    st = State([Taint() for _ in 1:nstmt], [Taint() for _ in 1:nstmt], BitSet())
+    st = State([Taint() for _ in 1:nstmt], [Taint() for _ in 1:nstmt], BitSet(),
+               paramclaims(ir, am))
 
     changed = true
     rounds = 0
@@ -529,6 +543,33 @@ struct State
     claims::Vector{Taint}
     # SSA values that are device addresses, whatever their type (see `pointerlike`).
     addresses::BitSet
+    # Per IR argument: `-n` for a parameter that may be a claimed slot, which
+    # only the caller knows ([`paramclaims`](@ref)).
+    argclaims::Vector{Taint}
+end
+
+"""
+The claim each IR argument starts with. A parameter that cannot reach memory (an
+index, a tuple or closure holding one) may be a slot the caller claimed; it carries
+the marker `-n` until a store resolves it into a conditional [`Touch`](@ref). The
+collapsed vararg tail and positions past 64 start empty, which is ordered.
+"""
+function paramclaims(ir, am::ArgMap)
+    return [(n <= 64 && (am.tail == 0 || n < am.tail) &&
+             !carries(widen(ir.argtypes[n]))) ? Taint((-n,)) : Taint()
+            for n in eachindex(ir.argtypes)]
+end
+
+"""Whether `T` is a concrete type with exactly one field, so its field is its whole value."""
+onefield(@nospecialize(T)) = T isa DataType && isconcretetype(T) && fieldcount(T) == 1
+
+"""The parameters a claim set waits on, as `Touch.via` bits."""
+function parambits(claim::Taint)
+    bits = UInt64(0)
+    for c in claim
+        c < 0 && (bits |= UInt64(1) << (-c - 1))
+    end
+    return bits
 end
 
 """
@@ -543,11 +584,50 @@ function operandtaint(ir, st::State, @nospecialize(x))
 end
 
 """The claim an operand carries: empty unless its value came from an atomic
-read-modify-write, in which case it is the taint of what that atomic was on."""
+read-modify-write, in which case it is the taint of what that atomic was on, or
+from a parameter that may hold such a slot (`-n`, see [`paramclaims`](@ref))."""
 function operandclaim(st::State, @nospecialize(x))
     x isa Core.SSAValue && return st.claims[x.id]
+    x isa Core.Argument && return st.argclaims[x.n]
     return Taint()
 end
+
+"""
+What a store at an index carrying `claim` does to `target`: unordered when the slot
+was claimed on `target`'s own argument, conditional on the parameters it came from
+in a callee (the caller decides, [`callertouch`](@ref)), else an ordinary write.
+"""
+function slottouch(claim::Taint, target::Taint)
+    disjoint(claim, target) && return ATOMIC
+    via = parambits(claim)
+    return via == 0 ? WRITE : Touch(false, true, true, via)
+end
+
+"""
+A callee's `t` for the operand whose taint is `target`, with its condition decided
+by the claims the call's operands carry: every parameter in `t.via` must hold a slot
+claimed on `target`, or be a parameter of the caller that may (the condition moves
+up a level). Anything else is ordered.
+"""
+function callertouch(st::State, t::Touch, callargs, target::Taint)
+    (t.atomic && t.via != 0) || return t
+    via = UInt64(0)
+    bits = t.via
+    while bits != 0
+        p = trailing_zeros(bits) + 1
+        bits &= bits - 1
+        p <= length(callargs) || return Touch(t.read, t.write, false)
+        claim = operandclaim(st, callargs[p])
+        disjoint(claim, target) && continue
+        up = parambits(claim)
+        up == 0 && return Touch(t.read, t.write, false)
+        via |= up
+    end
+    return Touch(t.read, t.write, true, via)
+end
+
+"""A summary's touches for a caller that holds no claims: every condition is ordered."""
+settle(t::Touch) = t.via == 0 ? t : Touch(t.read, t.write, false)
 
 """
 Whether a pure computation works on a device address. `carries(UInt64)` is false,
@@ -665,6 +745,9 @@ function stmttaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
         for a in fields
             union!(out, operandtaint(ir, st, a))
         end
+        # The other half of `getfield`'s rule: a one-field object holds its claim.
+        head === :new && length(fields) == 1 && onefield(tt) &&
+            union!(st.claims[i], operandclaim(st, only(fields)))
         return keptaddress!(st, i, ir, fields, tt) ? out : Taint()
     elseif head === :foreigncall
         # Linked device functions arrive as `ccall("extern name", llvmcall, ...)`;
@@ -745,7 +828,7 @@ function invoketaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
                     "which means the signature and the IR disagree about arity",
                     stmt)
         else
-            record!(touches, am, at, inner[j])
+            record!(touches, am, at, callertouch(st, inner[j], callargs, at))
         end
         union!(out, at)
     end
@@ -801,6 +884,10 @@ function calltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
         # The one place an element index is worth keeping: `Core.getfield(_5, 3)`
         # is how the expanded splat reaches the third vararg argument.
         t = fieldtaint(am, operandtaint(ir, st, rest[1]), rest[2])
+        # A claimed slot wrapped alone (`(slot,)`, a closure capturing only it)
+        # comes back out claimed. With more fields the claim cannot say which.
+        onefield(operandtype(ir, rest[1])) &&
+            union!(st.claims[i], operandclaim(st, rest[1]))
         return keptaddress!(st, i, ir, rest, tt) ? t : Taint()
     elseif name in PURE_OPS || iscoreintrinsic(f)
         # A claimed index stays claimed through the arithmetic that makes it an offset.
@@ -869,7 +956,7 @@ Only the pointer and index decide; the stored value says nothing about where it 
 function storetouch(ir, st::State, rest, target::Taint)
     claim = operandclaim(st, rest[1])
     length(rest) >= 3 && union!(claim, operandclaim(st, rest[3]))
-    return disjoint(claim, target) ? ATOMIC : WRITE
+    return slottouch(claim, target)
 end
 
 """
@@ -972,7 +1059,34 @@ function llvmcalltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
     return Taint()
 end
 
-const STORED_VALUE = r"(?m)^\s*store\s+(?:atomic\s+)?(?:volatile\s+)?(?:<[^>]*>|\S+)\s+([^,\s]+)\s*,"
+const STORE_LINE = r"(?m)^\s*store\s+(?:atomic\s+)?(?:volatile\s+)?(.*)$"
+
+"""
+The value operand of an `llvmcall` module's only `store`, or `nothing` when there is
+not exactly one. The stored type comes first and may hold spaces: an aggregate
+(`{ [1 x [3 x float]], float }`, `[4 x i32]`, `<4 x float>`) is read to its closing
+bracket, and a pointer type may carry `addrspace(n)`. Metal stores a whole struct
+element this way; a regex for one-token types missed every one of them.
+"""
+function storedvalue(src::AbstractString)
+    lines = collect(eachmatch(STORE_LINE, src))
+    length(lines) == 1 || return nothing
+    s = only(lines).captures[1]
+    depth = 0
+    i = firstindex(s)
+    while i <= lastindex(s)
+        c = s[i]
+        c in ('{', '[', '<', '(') && (depth += 1)
+        c in ('}', ']', '>', ')') && (depth -= 1)
+        depth == 0 && isspace(c) && break
+        i = nextind(s, i)
+    end
+    rest = lstrip(SubString(s, i))
+    m = match(r"^addrspace\(\d+\)\s*", rest)
+    m === nothing || (rest = SubString(rest, ncodeunits(m.match) + 1))
+    v = match(r"^([^,\s]+)\s*,", rest)
+    return v === nothing ? nothing : String(v.captures[1])
+end
 
 """
 A store spelled as an `llvmcall` (LLVM.jl's `LLVMPtr` store, how a Metal array
@@ -981,9 +1095,8 @@ comes from every operand except the stored value; a module whose store cannot be
 matched to one parameter is ordered.
 """
 function llvmstoretouch(st::State, src::String, rest, target::Taint)
-    stores = collect(eachmatch(STORED_VALUE, src))
-    length(stores) == 1 || return WRITE
-    value = only(stores).captures[1]
+    value = storedvalue(src)
+    value === nothing && return WRITE
     # `rest` is the `llvmcall`'s: the module, the return type, the argument types,
     # then the operands, whose parameters are `%0`, `%1`, ...
     ops = @view rest[4:end]
@@ -997,7 +1110,7 @@ function llvmstoretouch(st::State, src::String, rest, target::Taint)
     for k in eachindex(ops)
         k == stored || union!(claim, operandclaim(st, ops[k]))
     end
-    return disjoint(claim, target) ? ATOMIC : WRITE
+    return slottouch(claim, target)
 end
 
 """
