@@ -590,6 +590,13 @@ function run!(pl::Plan)
         # Re-record on the owning thread what a move or refit invalidated.
         pl.stale && (pl.stale = false; record!(pl))
         execute!(pl.graph.dev, pl)
+        # A plan still measuring runs one pass per submission, and the next run
+        # reads its timestamps when it starts, without waiting. Runs submitted
+        # back to back found them still in flight: killeroo-gold's sample plan was
+        # cut per pass for the 32 samples of its first render and part of the
+        # second (1.05 s against 0.79). Waiting for the measuring run lets the
+        # next one find them and be cut by measured costs.
+        pl.stamped && measuring(pl) && waitfor!(pl)
     catch err
         failreadbacks!(pl, err)
         abandonframe!(pl.graph.dev, pl)

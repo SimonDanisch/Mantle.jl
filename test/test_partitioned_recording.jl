@@ -125,6 +125,21 @@ end
     end
     Mantle.free!(pl)
 
+    # Runs back to back, with nothing read between them: the first run measures
+    # every pass, so the second is cut by measured costs. The second read the
+    # timestamps of the first while it was still in flight, found none, and a
+    # plan stayed cut per pass for a whole render.
+    pl = tendoublings(0.1)
+    Mantle.record!(pl)
+    fill!(a, 1f0)
+    Mantle.run!(pl)
+    Mantle.run!(pl)
+    timed && @test !any(isnan, pl.passcost)
+    @test !(pl.recording isa Mantle.RecordingParts)
+    @test !pl.stamped
+    @test all(==(1024f0 * 1024f0), Array(a))
+    Mantle.free!(pl)
+
     # `budget = Inf` never cuts, measured or not.
     pl = tendoublings(Inf)
     Mantle.record!(pl)
