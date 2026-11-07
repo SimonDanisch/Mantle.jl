@@ -645,7 +645,11 @@ Wait as `w` says for `bq`'s timeline without holding the thread
 """
 function timelinewait(bq::SubmitChannel{<:VulkanQueue}, w::TimelineWait)
     r = hostwait(blockon, w -> query_timeline(bq) >= w.value, w)
-    return r === nothing ? VK.vk.VK_SUCCESS : something(r)
+    r === nothing && return VK.vk.VK_SUCCESS
+    # `hostwait` may also return `Some{Any}`: tested apart, or `something` joins
+    # both into one boxed value and a wait that reached the worker allocated.
+    r isa Some{VK.vk.VkResult} && return something(r)
+    return something(r)::VK.vk.VkResult
 end
 
 """
