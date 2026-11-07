@@ -255,6 +255,15 @@ end
     end
 end
 
+# The prepare of a discarded iteration writes zero groups, so a pass whose
+# dispatches it sizes needs no predicate scope of its own. An emitter that pays
+# for each scope leaves it out (`scopesprepared`): Vulkan's conditional-rendering
+# scope per pass cost Hikari's 24-iteration bounce loop 7 ms of an 85 ms sample
+# on NVIDIA. A host-sized pass keeps its scope on every emitter, and so does a
+# sized one on an emitter that keeps scopes (Metal's are segments).
+struct ScopeFreeEmitter end
+Mantle.scopesprepared(::ScopeFreeEmitter) = false
+
 @testset "repeat!: a device-sized body is discarded on every device" begin
     dev = Mantle.Device(TESTBACKEND)
     n, maxiters = 64, 8
@@ -270,11 +279,22 @@ end
                          name = "step")
     end
     pl = Mantle.record!(Mantle.Plan(g))
+    step = only(pp for pp in pl.passes if pp.pass.name == "step")
+    @test step.pass.predicate !== nothing
+    @test Mantle.workpredicate(ScopeFreeEmitter(), step) === nothing
+    @test Mantle.workpredicate(nothing, step) === step.pass.predicate
     Mantle.run!(pl)
     Mantle.waitfor!(pl)
     # Three iterations of `2x + 1` from 0 give 7; all eight would give 255.
     @test all(==(Int32(7)), Array(Mantle.storage(x)))
     Mantle.free!(pl)
+
+    if Mantle.supportspredicate(dev)
+        fixed = Base.invokelatest(_repeatplan, dev, x, count, src, maxiters, n)
+        step = only(pp for pp in fixed.passes if pp.pass.name == "step")
+        @test Mantle.workpredicate(ScopeFreeEmitter(), step) === step.pass.predicate
+        Mantle.free!(fixed)
+    end
 
     # A gated pass with a host-sized dispatch cannot be discarded by the fold:
     # refused at build on a device that cannot discard it either.

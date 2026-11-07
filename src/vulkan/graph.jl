@@ -707,6 +707,10 @@ Run `f` in a conditional-rendering scope, so the pass's work is discarded unless
 predicate `i` is nonzero. Begin and end must be in one command buffer, which an
 emitter guarantees; a scope split across submissions hangs the GPU.
 """
+# One conditional-rendering scope per pass, each costing NVIDIA about 4.5 us: in
+# Hikari's bounce loop (24 iterations of 68 such passes) 7 ms of an 85 ms sample.
+scopesprepared(::Emitter) = false
+
 function withpredicate(f, e::Emitter, (pred, i)::Tuple{Any,Int})
     # Without the extension the prepare writes zero groups instead, and
     # `repeat!` refuses gated fixed-size work at build.

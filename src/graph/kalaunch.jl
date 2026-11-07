@@ -832,10 +832,25 @@ function emitpass!(e, pl, pp::PassPlan; stores::Bool = true)
     p.kind === :compute && emitprepares!(e, pl, pp)
     # Barriers stay outside the scope, so a discarded iteration still orders
     # its neighbours.
-    withpredicate(e, p.predicate) do
+    withpredicate(e, workpredicate(e, pp)) do
         emitwork!(e, pl, pp)
     end
     return nothing
+end
+
+"""
+    workpredicate(emitter, passplan) -> predicate or nothing
+
+The predicate scope a pass's work runs in: none when the fused prepare sizes
+every dispatch and the emitter does not want the scope anyway
+([`scopesprepared`](@ref)).
+"""
+function workpredicate(e, pp::PassPlan)
+    p = pp.pass
+    scopesprepared(e) && return p.predicate
+    p.kind === :compute && !isempty(pp.dispatches) &&
+        all(d -> indirectindex(d) != 0, pp.dispatches) && return nothing
+    return p.predicate
 end
 
 """The pass's own commands: dispatches, a copy, or a render pass with its draws."""

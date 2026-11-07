@@ -88,6 +88,18 @@ Run f with device work discarded when the predicate is zero. `nothing` is uncond
 withpredicate(f, e, ::Nothing) = f()
 
 """
+    scopesprepared(emitter) -> Bool
+
+Whether a pass whose every dispatch the fused prepare sizes still runs in its
+predicate scope ([`workpredicate`](@ref)). It needs none, since the prepare of a
+discarded iteration writes zero groups; an emitter leaves it out where a scope
+costs something of its own. Metal's scopes are segments that run until the
+predicate changes, so leaving one would put the next pass's prepare inside the
+gated segment before it.
+"""
+scopesprepared(e) = true
+
+"""
     emitupdate!(emitter, plan, passplan)
 
 Apply this run's pending host stores. A reusable recording must not capture their values.
@@ -642,7 +654,7 @@ const BACKEND_VOCABULARY = (
     :retire!, :blocksize, :copy_target!, :gpupasstime!, :passbegin!, :passend!,
     # the walk's primitives
     :openrecording, :closerecording!, :emithead!, :emitloophead!, :emitbarriers!,
-    :withpredicate,
+    :withpredicate, :scopesprepared,
     :emitupdate!, :emitdispatch!, :emitcopy!, :emitreadback!, :nativebuffercopy, :readbackbinding, :samereadback,
     :beginrender!, :drawcompiled!, :endrender!,
     :readstamps,
