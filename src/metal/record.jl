@@ -304,9 +304,18 @@ end
 buffer, under the entry name `entry`. Refuses a kernel with device-side logging,
 whose launch path allocates a log buffer per launch; a recorded plan has no
 per-launch path, so run the plan without recording it to use the log.
+
+Every callee is inlined (`always_inline`), as Mantle's render stages are. Apple's
+compiler intermittently gets a call wrong in a large kernel: in Hikari's general
+closure shading kernel the out-of-line normal transform of the hit triangle (a
+closure taking the 48-byte instance matrix by reference, its result through
+`sret`) left whole 32-lane groups with an empty BSDF, a different set on every
+launch of the same kernel on the same data. The same call in a small kernel is
+right, and inlined it is right; nothing in the LLVM handed over is undefined.
 """
 function recordedkernel(f, adapted::Tuple, entry::String)
-    kernel = Metal.mtlfunction(f, Tuple{map(Core.Typeof, adapted)...}; name = entry, indirect = true)
+    kernel = Metal.mtlfunction(f, Tuple{map(Core.Typeof, adapted)...}; name = entry, indirect = true,
+                               always_inline = true)
     kernel.loggingEnabled && throw(ArgumentError(
         "record!: kernel $(entry) was compiled with device-side logging, whose " *
         "launch path allocates a log buffer per launch. A recorded plan has no " *
@@ -786,7 +795,7 @@ later `patchwriter!`.
 """
 function auxcommand!(e::MetalRecorder, f, adapted::Tuple, name::String;
                      groups::Integer = 1, threads::Integer = 1, pack::Bool = true)
-    kernel = Metal.mtlfunction(f, Tuple{map(Core.Typeof, adapted)...}; name, indirect = true)
+    kernel = recordedkernel(f, adapted, name)
     state = recorded_state(e.dev, kernel)
     args, nbytes = recorded_args((state, f, adapted...), e.auxcursor)
     e.auxcursor += Mantle.argalign(nbytes)

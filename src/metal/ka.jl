@@ -49,7 +49,10 @@ Mantle.devicebuffertype(::MetalDevice, ::Type{T}, N::Int) where {T} =
     Metal.MtlDeviceArray{T,N,Metal.AS.Device}
 
 Mantle.isdevicearray(::Metal.MtlArray) = true
-Mantle.resource_identity(a::Metal.MtlArray)=a.data.rc
+# The `MTLBuffer`'s use record, one per buffer (`managedbuffer`) and shared by all
+# its views; `data` itself is a reference count `deviceslice` makes per view, which
+# named every array carved from one pool block a resource of its own.
+Mantle.resource_identity(a::Metal.MtlArray) = a.data[]
 # `offset` is in bytes of the `MTLBuffer` `data` names, a pool block for every
 # `deviceview`, as for Vulkan's `LavaArray`. An empty array covers no bytes.
 Mantle.bytespan(a::Metal.MtlArray{T}) where {T} = (a.offset + 1):(a.offset + length(a) * sizeof(T))
@@ -204,9 +207,10 @@ end
 Mantle.accesscache(d::MetalDevice) = d.accesses
 
 """Infer against Metal's compiler overlay, where device intrinsics have their
-shader bodies rather than host error stubs."""
+shader bodies rather than host error stubs, inlining as `recordedkernel` compiles:
+the access walk reads the code that runs."""
 function metalinterpreter(@nospecialize(f), @nospecialize(tt))
-    config = Metal.compiler_config(Metal.device())
+    config = Metal.compiler_config(Metal.device(); always_inline = true)
     source = GPUCompiler.methodinstance(Core.Typeof(f), tt)
     return GPUCompiler.get_interpreter(GPUCompiler.CompilerJob(source, config))
 end
