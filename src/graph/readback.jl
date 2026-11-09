@@ -36,13 +36,14 @@ storage(r::GraphReadback) = storage(r.buffer)
 
 readbackdims(src) = size(src)
 readbackdims(src::Buffer{<:Any,1}) = (length(src),)
+readbackdims(::GPURef) = (1,)
 
 readbackgraph(t::TransientBuffer) = t.graph
 readbackgraph(t::ResourceView) = readbackgraph(t.parent)
 readbackgraph(t) = nothing
 readbackdevice(t::TransientBuffer) = t.graph.dev
 readbackdevice(t::ResourceView) = readbackdevice(t.parent)
-readbackdevice(t::Buffer) = t.dev
+readbackdevice(t::Union{Buffer,GPURef}) = t.dev
 readbackdevice(t) = Device(KA.get_backend(t))
 
 """
@@ -66,6 +67,7 @@ introduce host backpressure between runs, but never extra GPU submissions.
 Outputs have fixed shapes. Declare them outside `repeat!`, after the loop.
 Replays reject a changed source shape; multiple snapshots of the same source
 can be fetched individually, but requesting that ambiguous source again throws.
+A `GPURef` produces a one-element vector.
 `Readback()` without an array remains the allocator's readback memory kind.
 """
 function Readback(t::Union{TransientBuffer,ResourceView})
@@ -75,7 +77,7 @@ function Readback(t::Union{TransientBuffer,ResourceView})
 end
 
 function Readback(g::Graph, src)
-    src isa Union{TransientBuffer,ResourceView,Buffer} || isdevicearray(src) ||
+    src isa Union{TransientBuffer,ResourceView,Buffer,GPURef} || isdevicearray(src) ||
         throw(ArgumentError("Readback: expected a dense graph or device array"))
     if src isa Union{TransientBuffer,ResourceView}
         root = src isa ResourceView ? src.parent : src

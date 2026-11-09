@@ -217,3 +217,49 @@ end
     @test_throws ArgumentError fetch(holder[])
     Mantle.free!(k)
 end
+
+@testset "GPURef readbacks include pending stores without fetch submissions" begin
+    dev = Mantle.Device(TESTBACKEND)
+    for T in testeltypes(Float32, Float64, Int32)
+        graph = Mantle.Graph(dev)
+        cell = Mantle.GPURef(dev, zero(T))
+        first = Mantle.Readback(graph, cell)
+        plan = Mantle.record!(Mantle.Plan(graph; budget=Inf))
+        try
+            recording = plan.recording
+            for (frame,value) in enumerate((T(3), T(-2), T(5)))
+                cell[] = value
+                result = frame == 1 ? first : Mantle.Readback(graph, cell)
+                submissions = Mantle.submissions(dev)
+                Mantle.run!(plan)
+                @test fetch(result) == T[value]
+                @test Mantle.submissions(dev) == submissions + 1
+                @test plan.recording === recording
+            end
+        finally
+            Mantle.free!(plan)
+            Mantle.free!(cell)
+        end
+    end
+end
+
+@kernel function rb_count!(cell, n)
+    i = @index(Global, Linear)
+    i == 1 && (@inbounds cell[1] = n + Int32(1))
+end
+
+@testset "a GPURef a kernel wrote reads back after it" begin
+    dev = Mantle.Device(TESTBACKEND)
+    graph = Mantle.Graph(dev)
+    cell = Mantle.GPURef(dev, Int32(0))
+    Mantle.dispatch!(graph, rb_count!, (cell, Int32(36)), 1)
+    result = Mantle.Readback(graph, cell)
+    plan = Mantle.record!(Mantle.Plan(graph; budget=Inf))
+    try
+        Mantle.run!(plan)
+        @test fetch(result) == Int32[37]
+    finally
+        Mantle.free!(plan)
+        Mantle.free!(cell)
+    end
+end
