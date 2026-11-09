@@ -216,3 +216,24 @@ end
         Mantle.free!(size)
     end
 end
+
+@testset "A long unrolled loop is split at the device's submission limit" begin
+    dev = Mantle.Device(TESTBACKEND)
+    out = Mantle.Buffer(dev, zeros(Int32, 2))
+    count = Mantle.GPURef(dev, Int32(411))
+    graph = Mantle.Graph(dev)
+    Mantle.dispatch!(graph, Mantle.fill_kernel!, (out, Int32(0)), 2)
+    Mantle.repeat!(graph, 411, count) do _
+        Mantle.dispatch!(graph, nested_mark!, (out,), 1)
+    end
+    plan = Mantle.record!(Mantle.Plan(graph; budget = Inf))
+    try
+        Mantle.run!(plan); Mantle.waitfor!(plan)
+        @test Array(out)[1] == Int32(100 * 411)
+        @test maximum(length, plan.recording.batches) <= Mantle.submitlimit(dev)
+    finally
+        Mantle.free!(plan)
+        Mantle.free!(out)
+        Mantle.free!(count)
+    end
+end

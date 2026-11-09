@@ -857,6 +857,14 @@ makeprofiler(dev::LavaDevice, passes, profile::Bool) =
 timestamps(dev::LavaDevice) =
     VK.get_physical_device_properties(dev.physical_device).limits.timestamp_period > 0
 
+# RADV splits a submission's command buffers into chunks of 192, its own preamble
+# buffers included. The Radeon 8060S hung on every replay of a 411-buffer submission
+# with under 2 ms of measured work and no validation error; 128 leaves the margin.
+function submitlimit(dev::LavaDevice)
+    d = VK.get_physical_device_properties_2(dev.physical_device, VK.PhysicalDeviceDriverProperties).next
+    return d.driver_id == VK.DRIVER_ID_MESA_RADV ? 128 : typemax(Int)
+end
+
 batchqueue(d::LavaDevice) = d.default_bq
 
 

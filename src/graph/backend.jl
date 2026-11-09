@@ -484,6 +484,14 @@ avoid watchdog timeouts and long display stalls; Plan(g; budget) can override it
 """
 submissionbudget(::Device) = 0.1
 
+"""
+    submitlimit(device) -> Int
+
+The most recorded pieces (command buffers) one submission may hold, whatever their
+cost. Core starts a new submission past it; the default has no limit.
+"""
+submitlimit(::Device) = typemax(Int)
+
 """Host-only profiler: no query pool, NaN GPU period/time. Host cost includes recording,
 binding, submission and waits; it is not GPU execution time."""
 hostprofiler(passes) =
@@ -648,7 +656,7 @@ const BACKEND_VOCABULARY = (
     :makeprofiler, :Profiler,
     # Whether passes can be timed, so recordings can be cut by the budget
     # (`partitionranges`); and the budget.
-    :timestamps, :submissionbudget,
+    :timestamps, :submissionbudget, :submitlimit,
     # Also read from backend-specific compiled dispatches.
     :argsize, :indirectindex,
     # Core defines a default for each; a backend overrides it.

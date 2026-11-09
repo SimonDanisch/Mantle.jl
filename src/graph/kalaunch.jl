@@ -1021,8 +1021,8 @@ end
     submissionbatches(plan, ranges, parts) -> batches
 
 The pieces in submission order (a loop body's repeated per iteration), grouped
-into submissions while their measured cost fits the budget. An unmeasured piece
-is submitted alone. At a finite budget each iteration of a gated loop starts a
+into submissions while their measured cost fits the budget and their count
+`submitlimit`. An unmeasured piece is submitted alone. At a finite budget each iteration of a gated loop starts a
 new submission, because its timestamps describe only the last, possibly
 discarded, iteration. Nested loops expand their pieces recursively.
 """
@@ -1044,11 +1044,13 @@ function submissionbatches(pl::Plan, ranges, parts::Vector{R}) where {R}
     end
     previous = 0
     t = Inf
+    limit = submitlimit(pl.graph.dev)
     for k in order
         c = cost(k)
         iteration_boundary = isfinite(pl.budget) && k <= previous &&
             any(loop -> withinloop(loopof(ranges[k]), loop), keys(gatedloops))
-        if iteration_boundary || isempty(batches) || t + c > pl.budget
+        if iteration_boundary || isempty(batches) || t + c > pl.budget ||
+                length(batches[end]) >= limit
             push!(batches, R[])
             t = 0.0
         end
