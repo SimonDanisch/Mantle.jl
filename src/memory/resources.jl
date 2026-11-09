@@ -216,6 +216,8 @@ outlives its resources.
 Base.length(b::Buffer) = b.len
 Base.isempty(b::Buffer) = iszero(length(b))
 Base.size(b::Buffer) = size(b.store)
+# A vector's store keeps its capacity after a shrink; its shape is its length.
+Base.size(b::Buffer{T,1}) where {T} = (b.len,)
 # Per-dimension `size`, `1` past the rank as Base does.
 Base.size(b::Buffer, d::Integer) = d <= ndims(b) ? size(b)[d] : 1
 Base.ndims(::Buffer{T,N}) where {T,N} = N
@@ -405,18 +407,32 @@ end
 """
     resize!(b::Buffer{T,1}, n) -> b
 
-Grow to `n` elements, keeping the contents; shrinking only lowers `len`. The old
-region is retired, not released, because the device copy out of it is recorded
-but may not have run. `notify_move!` patches recorded plans with the new address
-in their next run, so they survive the resize without re-recording.
+Set the length to `n`, keeping the contents up to the old length. Within the
+capacity only the length changes, and queued stores past `n` are dropped. Past
+it, the old region is retired, not released, because the device copy out of it
+is recorded but may not have run. `notify_move!` patches recorded plans with the
+new address in their next run, so they survive the resize without re-recording.
 """
 function Base.resize!(b::Buffer{T,1}, n::Integer) where {T}
     n = Int(n)
-    n <= b.capacity && (b.len = min(b.len, n); return b)
+    n >= 0 || throw(ArgumentError("buffer length must be nonnegative, got $n"))
+    if n <= b.capacity
+        lock(b.pendinglock) do
+            filter!(((rng, _),) -> first(rng) <= n, b.pending)
+            for (i, (rng, data)) in pairs(b.pending)
+                last(rng) <= n && continue
+                # A store holds the caller's vector: trim a copy, never the vector.
+                b.pending[i] = (first(rng):n, data[1:(n - first(rng) + 1)])
+            end
+            @atomic :release b.dirty = !isempty(b.pending)
+            b.len = n
+        end
+        return b
+    end
     fresh = persistentarray(b.dev, T, (n,))
     b.len > 0 && devicecopy!(b.dev, fresh, b.store, b.len)
     old = b.store
-    b.store, b.capacity = fresh, n
+    b.store, b.capacity, b.len = fresh, n, n
     retire!(pool(b.dev), b.dev, region(old))
     notify_move!(pool(b.dev), deviceaddress(b.dev, region(old)),
                  deviceaddress(b.dev, region(fresh)), length(old.region))

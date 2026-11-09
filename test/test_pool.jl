@@ -216,8 +216,8 @@ end
     # past capacity: a fresh region, the contents carried over, the previous one back
     before = M.offset(M.region(b.store))
     resize!(b, 32)
-    @test M.capacity(b) == 32
-    @test Array(b) == Float32[1, 2, 3, 4, 5, 6]     # devicecopy! ran before release!
+    @test M.capacity(b) == 32 && length(b) == 32
+    @test Array(b)[1:6] == Float32[1, 2, 3, 4, 5, 6] # devicecopy! ran before release!
     @test M.offset(M.region(b.store)) != before
 end
 
