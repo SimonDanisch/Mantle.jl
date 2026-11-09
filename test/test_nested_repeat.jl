@@ -142,3 +142,77 @@ if Mantle.supportspredicate(Mantle.Device(TESTBACKEND))
     end
 end
 end
+
+function nested_final_index!(out, index)
+    KI.get_global_id().x == 1 || return nothing
+    @inbounds out[2] = index[1]
+    return nothing
+end
+
+@testset "Closed gates preserve terminal indices and reopen on replay" begin
+    dev = Mantle.Device(TESTBACKEND)
+    out = Mantle.Buffer(dev, zeros(Int32, 2))
+    count = Mantle.GPURef(dev, Int32(0))
+    graph = Mantle.Graph(dev)
+    Mantle.dispatch!(graph, Mantle.fill_kernel!, (out, Int32(0)), 2)
+    terminal = Ref{Any}()
+    Mantle.repeat!(graph, 8, count) do index
+        terminal[] = index
+        Mantle.dispatch!(graph, nested_mark!, (out,), 1)
+    end
+    Mantle.dispatch!(graph, nested_final_index!, (out, terminal[]), 1)
+    plan = Mantle.record!(Mantle.Plan(graph))
+    try
+        # The first run measures the passes and the next records the plan again,
+        # cut by those costs; every later replay keeps that recording.
+        foreach(_ -> (Mantle.run!(plan); Mantle.waitfor!(plan)), 1:2)
+        recording = plan.recording
+        for n in (5, 0, 2, 20, 0)
+            count[] = Int32(n)
+            Mantle.run!(plan); Mantle.waitfor!(plan)
+            @test Array(out) == Int32[100clamp(n, 0, 8), 9]
+            @test plan.recording === recording
+        end
+    finally
+        Mantle.free!(plan)
+        Mantle.free!(out)
+        Mantle.free!(count)
+    end
+end
+
+function nested_sized_add!(out, count)
+    i = Int(KI.get_global_id().x)
+    @inbounds i <= count[1] && (out[i] += Int32(1))
+    return nothing
+end
+
+@testset "Gated device ranges discard stale indirect work on replay" begin
+    dev = Mantle.Device(TESTBACKEND)
+    out = Mantle.Buffer(dev, zeros(Int32, 4))
+    count = Mantle.GPURef(dev, Int32(0))
+    size = Mantle.GPURef(dev, Int32(4))
+    graph = Mantle.Graph(dev)
+    Mantle.dispatch!(graph, Mantle.fill_kernel!, (out, Int32(0)), 4)
+    Mantle.repeat!(graph, 8, count) do _
+        Mantle.dispatch!(graph, nested_sized_add!, (out, size), Mantle.DeviceRange(size))
+    end
+    plan = Mantle.record!(Mantle.Plan(graph))
+    try
+        # The first run measures the passes and the next records the plan again,
+        # cut by those costs; every later replay keeps that recording.
+        foreach(_ -> (Mantle.run!(plan); Mantle.waitfor!(plan)), 1:2)
+        recording = plan.recording
+        for (n, width) in ((3, 4), (0, 4), (2, 0), (2, 3), (0, 3), (5, 2))
+            count[] = Int32(n)
+            size[] = Int32(width)
+            Mantle.run!(plan); Mantle.waitfor!(plan)
+            @test Array(out) == Int32[i <= width ? n : 0 for i in 1:4]
+            @test plan.recording === recording
+        end
+    finally
+        Mantle.free!(plan)
+        Mantle.free!(out)
+        Mantle.free!(count)
+        Mantle.free!(size)
+    end
+end
