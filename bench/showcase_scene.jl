@@ -383,6 +383,12 @@ end
         end
         n = UInt32(0)
         if dmax > 0f0
+            # A tile holding one lit pixel against sky has dmin == dmax, and eight
+            # corners at one depth are a sheet with no thickness: lights that reach
+            # the tile miss it and the tile goes dark. A slightly thicker slab costs
+            # a few extra lights on the list.
+            dmin = max(0f0, dmin - 1f-3)
+            dmax = min(0.999999f0, dmax + 1f-3)
             lo = Vec3f(1f30, 1f30, 1f30)
             hi = Vec3f(-1f30, -1f30, -1f30)
             m = invvp[1]
