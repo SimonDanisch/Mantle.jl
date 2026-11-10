@@ -97,7 +97,7 @@ const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
     :end_render_pass!, :imageusage, :indirectslot, :initbackend!, :layout,
     :makeimage, :makerecording, :readback_framebuffer, :record_draw!, :recorder,
     :remakeimage!, :remakedevice, :resetrecording!,
-    :setviewport!, :windowsurface, :fitsurface!, :closesurface!,
+    :setviewport!, :setscissor!, :windowsurface, :fitsurface!, :closesurface!,
     :makeframebuffer, :maketexture, :makesampler,
     :stages, :storebytes!, :submit!,
     :use_bindings!,
@@ -363,8 +363,9 @@ end
     # memory), `supports_tessellation`, which Metal answers through core's `false` now
     # that core refuses tessellation (`checkstages`; the old regex had read Metal's
     # call to it as a definition), and `adopt!`, core's identity that Metal (and the
-    # ROCm extension, not scanned here) answer.
-    @test length(lonely) <= 33
+    # ROCm extension, not scanned here) answer. 34 with `submitlimit`: only RADV caps
+    # the command buffers of one submission, so only Vulkan answers it.
+    @test length(lonely) <= 34
 end
 
 # 0.9: extension-defined Mantle methods must belong to the declared vocabulary.
