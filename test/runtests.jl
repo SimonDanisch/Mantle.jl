@@ -676,6 +676,9 @@ foreachbackend(joinpath(@__DIR__, "test_declared_kernel.jl"))
 # A plain kernel guards its own tail; eight lost the guard with `@kernel` and
 # wrote past their outputs. Every backend's launch pads to whole workgroups.
 foreachbackend(joinpath(@__DIR__, "test_kernel_tails.jl"))
+# A run-time index into a tuple of device arrays, `ml[l][T]` as in BiotSavartBCs'
+# FMM kernel: the stack copy of the tuple is stepped in bytes.
+foreachbackend(joinpath(@__DIR__, "test_dynamic_tuple_getindex.jl"))
 # And a library call declared as a pass member: `mul!` with no ndrange. The two
 # GPU backends answer `runscalls` differently and the file asserts both sides.
 foreachbackend(joinpath(@__DIR__, "test_declared_call.jl"))
