@@ -36,7 +36,10 @@ end
                     body = only(r for r in rec.parts if count(x -> x === r, reduce(vcat, rec.batches)) == 128)
                     @test all(b -> count(x -> x === body, b) <= 1, rec.batches)
                 else
-                    @test length(rec.batches) == 1
+                    # No budget: only the device's own limit on one submission splits it.
+                    limit = Mantle.submitlimit(dev)
+                    @test length(rec.batches) == cld(sum(length, rec.batches), limit)
+                    @test all(b -> length(b) <= limit, rec.batches)
                 end
                 for start in (5, 11)
                     fill!(Mantle.storage(out), Int32(0))
