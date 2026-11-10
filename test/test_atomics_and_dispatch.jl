@@ -136,6 +136,32 @@ const KA = KernelAbstractions
         expected = Float32[(2k - 1) * 10 + (2k) * 10 for k in 1:P]
         @test r == expected
     end
+
+    @testset "atomics on workgroup memory (radix-sort histogram)" begin
+        # AcceleratedKernels' radix sort counts digits in `@localmem`, then adds
+        # each workgroup's counts to the global histogram. One-dimensional and
+        # two-dimensional indices, the second through a CartesianIndex.
+        @kernel function local_histogram!(out, @Const(src))
+            i = @index(Global, Linear)
+            li = @index(Local, Linear)
+            h = @localmem UInt32 (4, 2)
+            li <= 8 && (@inbounds h[li] = 0x0)
+            @synchronize
+            @inbounds d = src[i] % UInt32(4) + UInt32(1)
+            Atomix.@atomic :monotonic h[d] += UInt32(1)
+            Atomix.@atomic :monotonic h[CartesianIndex(Int(d), 2)] += UInt32(2)
+            @synchronize
+            li <= 8 && (Atomix.@atomic :monotonic out[li] += h[li])
+        end
+
+        N = 1024
+        src = Mantle.devicearray(TESTBACKEND, UInt32.(0:N-1) .* UInt32(7))
+        out = Mantle.devicearray(TESTBACKEND, zeros(UInt32, 8))
+        local_histogram!(TESTBACKEND, 64)(out, src; ndrange = N)
+        KA.synchronize(TESTBACKEND)
+        counts = UInt32[count(x -> x % 4 == d, UInt32.(0:N-1) .* UInt32(7)) for d in 0:3]
+        @test Array(out) == vcat(counts, 2 .* counts)
+    end
 end
 
 # ═══════════════════════════════════════════════════════════════════════
