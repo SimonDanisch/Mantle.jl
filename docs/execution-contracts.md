@@ -386,18 +386,18 @@ the compiler's existing atomic operation/scope/order vocabulary. Fences have
 explicit scope/order support too. A Bool supports_atomics cannot stand in for
 this table. Lowering must preserve requested semantics or fail before enqueue;
 CUDA/HIP/Vulkan/Metal names alone do not prove device-scope acquire/release.
-Only reorder hints may become no-ops. No silent demotion of atomic loads/stores.
-Sequential consistency also cannot be replaced by acquire/release: the latter
-does not provide the requested total order. Vulkan does not support SPIR-V
-SequentiallyConsistent semantics; absent a separately proved lowering, reject
-that raw ordering before enqueue and omit it from atomicfeatures. Portable
-algorithms may explicitly select a correct acquire/release implementation, but
-must not weaken an arbitrary user kernel. CAS success/failure orderings remain
-separate, and fences need actual lowering. F33's reproduced Lava demotion is
-fixed: supported atomic loads/stores/fences retain their ordering, unsupported
-sequential consistency fails compilation, and Atomix's requested order is
-preserved. Default Atomix RMW requests sequential consistency too; changing a
-caller to acquire/release or monotonic requires an algorithm-level justification.
+Only reorder hints may become no-ops. No silent demotion of the atomic orderings
+Vulkan supports. Sequential consistency is the one exception: `Atomix.@atomic`, and
+with it portable KernelAbstractions code, requests it by default, and Vulkan does not
+support SPIR-V SequentiallyConsistent semantics. Lava lowers it to the strongest
+ordering Vulkan has: acquire/release for RMW, CAS success and fences, acquire for
+loads and CAS failure, release for stores. That does not provide the requested total
+order, so a kernel relying on one across locations (Dekker-style mutual exclusion) is
+not correct on Vulkan, and compilation cannot detect that. It stays omitted from
+atomicfeatures. CAS success/failure orderings remain separate, and fences need actual
+lowering. F33's reproduced Lava demotion of supported orderings is fixed: atomic
+loads/stores/fences with a supported ordering retain it, and Atomix's requested order
+reaches the emitter.
 Device scope must retain Device scope across queue families and enable its
 native feature, rather than being narrowed to QueueFamily. Historical evidence
 and the repair's compiler/native checks are indexed in the review's

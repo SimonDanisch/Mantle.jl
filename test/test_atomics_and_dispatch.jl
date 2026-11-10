@@ -25,6 +25,19 @@ const KA = KernelAbstractions
 
 @testset "Atomic GPU Execution" begin
 
+    # KernelAbstractions' documented form, which portable packages use: no ordering.
+    @testset "atomic counter with Atomix's default ordering" begin
+        @kernel function atomic_counter_default!(counter)
+            Atomix.@atomic counter[1] += Int32(1)
+        end
+
+        N = 4096
+        counter = Mantle.devicearray(TESTBACKEND, Int32[0])
+        atomic_counter_default!(TESTBACKEND)(counter; ndrange=N)
+        KA.synchronize(TESTBACKEND)
+        @test Array(counter)[1] == Int32(N)
+    end
+
     @testset "atomic counter (Int32)" begin
         @kernel function atomic_counter_i32!(counter)
             Atomix.@atomic :monotonic counter[1] += Int32(1)
