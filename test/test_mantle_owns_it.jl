@@ -364,8 +364,11 @@ end
     # that core refuses tessellation (`checkstages`; the old regex had read Metal's
     # call to it as a definition), and `adopt!`, core's identity that Metal (and the
     # ROCm extension, not scanned here) answer. 34 with `submitlimit`: only RADV caps
-    # the command buffers of one submission, so only Vulkan answers it.
-    @test length(lonely) <= 34
+    # the command buffers of one submission, so only Vulkan answers it. 35 with
+    # `compilekernels!`: compiling a plan's kernels at once needs a thread-safe
+    # compiler, and only Lava's is known to be; Metal compiles each in turn. 36 with
+    # `inferring`: only Lava serializes the inference its walks and compiles share.
+    @test length(lonely) <= 36
 end
 
 # 0.9: extension-defined Mantle methods must belong to the declared vocabulary.

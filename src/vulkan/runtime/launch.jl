@@ -246,9 +246,11 @@ go together, since each can return a pipeline the others would rebuild.
 Submissions and plans keep their own references, so accepted work stays valid.
 """
 function clear_kernel_cache!(ctx::LavaDevice = Device(VulkanAPI()))
-    empty!(ctx.caches.pipelines)
-    empty!(ctx.caches.pipeline_order)
-    empty!(ctx.caches.linked)
+    @lock ctx.caches.lock begin
+        empty!(ctx.caches.pipelines)
+        empty!(ctx.caches.pipeline_order)
+        empty!(ctx.caches.linked)
+    end
     empty!(ctx.caches.launchplans)
     return nothing
 end
@@ -268,20 +270,36 @@ function link_kernel(ctx::LavaDevice, compiled::LavaGPUKernel)
 end
 
 """
-    get_compiled_kernel_and_pipeline(ctx, f, tt, workgroup_size; enable_ray_query=false)
+    linkedkernel(ctx, compiled) -> LavaLinkedKernel
+
+`compiled` linked on `ctx`: found, or its pipeline created (`link_kernel`). The driver
+compiles outside the lock, so `compilekernels!` links a plan's kernels at once; when
+two threads link one kernel, the first stored is the one every caller gets.
+"""
+function linkedkernel(ctx::LavaDevice, compiled::LavaGPUKernel)
+    linked = @lock ctx.caches.lock get(ctx.caches.linked, compiled, nothing)
+    linked === nothing || return linked
+    made = link_kernel(ctx, compiled)
+    return @lock ctx.caches.lock get!(ctx.caches.linked, compiled, made)
+end
+
+"""
+    get_compiled_kernel_and_pipeline(ctx, f, tt, workgroup_size; enable_ray_query=false, readonly=0)
       -> (compiled, pipeline, offsets, byval_sizes)
 
 The SPIR-V for `(f, tt, workgroup_size)` (`compile_or_lookup`) and this device's
-pipeline for it. `@noinline` and `@nospecialize` keep compiler inference out of
+pipeline for it. `readonly` has a bit for each argument of `tt` whose memory nothing
+writes (`readonlymask`). `@noinline` and `@nospecialize` keep compiler inference out of
 specialised launch callers.
 """
 @noinline function get_compiled_kernel_and_pipeline(ctx::LavaDevice, @nospecialize(f), @nospecialize(tt),
                                           workgroup_size;
-                                          enable_ray_query::Bool=false)
-    job = lava_kernel_job(f, tt; workgroup_size, enable_ray_query, features = ctx.features)
+                                          enable_ray_query::Bool=false,
+                                          readonly::UInt64=UInt64(0))
+    job = lava_kernel_job(f, tt; workgroup_size, enable_ray_query, features = ctx.features, readonly)
     # `invokelatest` keeps compiler invalidations away from the warm launch path.
     compiled = Base.invokelatest(compile_or_lookup, job)::LavaGPUKernel
-    linked = get!(() -> link_kernel(ctx, compiled), ctx.caches.linked, compiled)
+    linked = linkedkernel(ctx, compiled)
 
     return linked.compiled, linked.pipeline, linked.offsets, linked.byval_sizes
 end

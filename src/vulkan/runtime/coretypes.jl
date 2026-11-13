@@ -107,6 +107,9 @@ struct LaunchPlan
     world::UInt64
     wg::NTuple{3,Int}
     ray_query::Bool
+    # The signature's arguments compiled as read-only, a bit each (`readonlymask`): the
+    # same kernel and argument types compile again when another set of them is.
+    readonly::UInt64
 end
 
 """
@@ -302,6 +305,9 @@ mutable struct DeviceCaches
     # `Mantle.AccessCache`: per device because the answers come through this
     # device's method table and target features.
     accesses::Any
+    # Guards `pipelines`, `pipeline_order`, `linked`, `coopmat_warned` and the subgroup
+    # queries: `compilekernels!` creates a plan's pipelines on several threads.
+    lock::ReentrantLock
 end
 
 # `MemoryPolicy()` resolves at call time, long after `memory.jl` is loaded.
@@ -311,4 +317,4 @@ DeviceCaches() = DeviceCaches(
     MemoryPolicy(), 0, nothing, (0, 0, 0), nothing, false,
     CompilationCache{Tuple,VulkanCompiledGraphicsPipeline}(),
     nothing, 0, 1.0, Any[],
-    IdDict{DataType,Vector{Any}}(), nothing, AccessCache())
+    IdDict{DataType,Vector{Any}}(), nothing, AccessCache(), ReentrantLock())

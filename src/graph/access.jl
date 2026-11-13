@@ -1139,16 +1139,17 @@ supplies the signature (interpreter, device-side argument types, leading kernel
 arguments); the walk, `accessof`, is shared.
 """
 function kerneltouches(dev, kernel, @nospecialize(args::Tuple), ndrange, group)
-    argT = map(a -> devicetype(dev, a), args)
+    # `argwise`: `map` compiled once for every kernel's arguments.
+    argT = argwise(a -> devicetype(dev, a), args)
     if buildskernel(kernel, dev)
         interp, body, tt = kakernelaccesssignature(dev, kernel, argT, ndrange, group)
-        return accessof(interp, body, tt; cache = accesscache(dev))[3:end]
+        return inferring(() -> accessof(interp, body, tt; cache = accesscache(dev)), dev)[3:end]
     end
     # Refuse a kernel this device cannot compile at the same boundary as `bake`,
     # before inference reports some device intrinsic instead.
-    kisupported(dev, kernel) || kikernel(kernel, dev, argmap(a -> resolve(dev, a), args))
+    kisupported(dev, kernel) || kikernel(kernel, dev, argwise(a -> resolve(dev, a), args))
     interp = kernelinterpreter(dev, kernel, Tuple{argT...})
-    return accessof(interp, kernel, argT; cache = accesscache(dev))[2:end]
+    return inferring(() -> accessof(interp, kernel, argT; cache = accesscache(dev)), dev)[2:end]
 end
 
 """

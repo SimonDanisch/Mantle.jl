@@ -536,14 +536,17 @@ One dispatch compiled for this backend, so a frame only packs arguments and
 records: the launch plan (pipeline and argument layout), the iteration plan, the
 kernel function after `Adapt` and the declared arguments. `argoff` and `indirect`
 are where core placed its arguments and its indirect command, fixed at compile.
-Concrete throughout, as in `CompiledDraw`.
+Not parametric: a recording packs each dispatch once, one argument at a time
+(`packdispatch!`), so nothing here may be compiled for a kernel's whole argument
+tuple. With the tuple as a type parameter, every accessor and the packing compiled
+again for every kernel, about a quarter of a second each.
 """
-struct LavaDispatch{L,I,K,A<:Tuple,R}
-    launch::L
-    iter::I
-    kernel::K
-    args::A
-    ndrange::R
+struct LavaDispatch
+    launch::LaunchPlan
+    iter::IterPlan
+    kernel::Any
+    args::Tuple
+    ndrange::Any
     tlas::Bool                          # whether the pipeline was built for ray query
     argoff::Int
     argsize::Int
@@ -562,42 +565,100 @@ then only packs and emits; this is the only place a Mantle frame compiles a kern
 An ndrange given as a resource is its `count` now, as a draw's is.
 """
 function compile_dispatch(c::Compile{LavaDevice}, d::Dispatch, argoff::Int, indirect::Int)
-    dev = c.graph.dev
     # A call (no ndrange) compiles nothing; core's `bake` makes it a `Call`.
     iscall(d) && return bake(c, d)
-    # A plain KernelInterface function rather than a `@kernel` constructor, by
-    # core's `buildskernel`.
-    buildskernel(d.kernel, dev) ||
-        return kicompile_dispatch(c, dev, d, argoff, indirect)
-    obj = kernelfor(d, dev)
-    raw = resolve(dev, d.args)
-    args = readonlyargs(c.graph, argument_usage(dev, d.kernel, d.args, d.ndrange, d.group),
-                        raw, devargs(adaptor(dev.default_bq), raw))
-    iter = get_or_build_iter_plan(obj, dispatchrange(d.ndrange), callgroup(obj, d.group), dev)
-    tlas = find_tlas_in_args(raw) !== nothing
-    launch = launch_plan(dev.default_bq, obj.f, (obj.f, iter.ka_ctx, args...), iter.ws_3d, tlas)
-    LavaDispatch(launch, iter, obj.f, d.args, d.ndrange, tlas, argoff, launch.total_size, indirect)
+    dev = c.graph.dev
+    f, all_args, iter, tlas, readonly = dispatchkernel(c, dev, d)
+    launch = launch_plan(dev.default_bq, f, all_args, iter.ws_3d, tlas, readonly)
+    LavaDispatch(launch, iter, f, d.args, d.ndrange, tlas, argoff, launch.total_size, indirect)
 end
 
 """
-    kicompile_dispatch(compile, dev, dispatch, argoff, indirect) -> LavaDispatch
+    dispatchkernel(c, dev, d::Dispatch) -> (f, all_args, iter, tlas, readonly)
 
-Compile a plain-function `KernelInterface` kernel into the same `LavaDispatch` as
-the KA path. With no `KA.Kernel`, `iter.ka_ctx` is `nothing`, `all_args[1]` is a
-zero-sized `nothing` that `ka_launch!` drops, and the extents come from
-[`ki_launch_extents`](@ref), as for the immediate launch.
+What `d` launches: the kernel function, the arguments it is compiled for and launched
+with (`all_args`, whose first slot is the one GPUCompiler prepends), the iteration
+plan, whether it binds a TLAS, and a bit for each argument of the kernel's signature
+that is read-only (`readonlymask`). A `@kernel` constructor goes through KA's
+iteration context. A plain `KernelInterface` function (core's `buildskernel` is
+false) has none: `all_args[1]` is a zero-sized `nothing` that `ka_launch!` drops, and
+the extents come from [`ki_launch_extents`](@ref), as for the immediate launch.
 """
-function kicompile_dispatch(c::Compile{LavaDevice}, dev::LavaDevice, d::Dispatch,
-                            argoff::Int, indirect::Int)
-    raw = resolve(dev, d.args)
-    args = readonlyargs(c.graph, argument_usage(dev, d.kernel, d.args, d.ndrange, d.group),
-                        raw, devargs(adaptor(dev.default_bq), raw))
+function dispatchkernel(c::Compile{LavaDevice}, dev::LavaDevice, d::Dispatch)
+    raw, args, readonly = compiledargs(c, dev, d)
+    tlas = argstlas(raw) !== nothing
+    if buildskernel(d.kernel, dev)
+        obj = kernelfor(d, dev)
+        iter = get_or_build_iter_plan(obj, dispatchrange(d.ndrange), callgroup(obj, d.group), dev)
+        # The iteration context leads the signature.
+        return obj.f, (obj.f, iter.ka_ctx, args...), iter, tlas, readonly << 1
+    end
     kern = kikernel(d.kernel, dev, args)
     wg, blocks = ki_launch_extents(kern, dispatchrange(d.ndrange), d.group)
-    iter = IterPlan(nothing, pad_to_3d(dev, blocks), wg, prod(blocks))
-    tlas = find_tlas_in_args(raw) !== nothing
-    launch = launch_plan(dev.default_bq, d.kernel, (nothing, args...), iter.ws_3d, tlas)
-    LavaDispatch(launch, iter, d.kernel, d.args, d.ndrange, tlas, argoff, launch.total_size, indirect)
+    return d.kernel, (nothing, args...), IterPlan(nothing, pad_to_3d(dev, blocks), wg, prod(blocks)), tlas,
+           readonly
+end
+
+"""
+    compilekernels!(c::Compile{LavaDevice})
+
+Every dispatch's kernel, compiled and linked at once on Julia's threads before
+`compile_dispatch` lays the plan out and finds each in the caches: Lava's SPIR-V and
+the driver's pipeline, whose compile is as long again on some drivers. A kernel two
+dispatches share is compiled once. On a validating device the pipelines are created
+by `compile_dispatch`, one at a time, so each validation error is reported for the
+pipeline that caused it.
+"""
+function compilekernels!(c::Compile{LavaDevice})
+    dev = c.graph.dev
+    jobs = Dict{Any,LavaCompilerJob}()
+    for p in ordered(c), d in p.dispatches
+        d isa Dispatch && !iscall(d) || continue
+        f, all_args, iter, tlas, readonly = dispatchkernel(c, dev, d)
+        job = lava_kernel_job(f, launchtypes(all_args); workgroup_size = iter.ws_3d,
+                              enable_ray_query = tlas, features = dev.features, readonly)
+        jobs[(job.source, job.config)] = job
+    end
+    length(jobs) > 1 || return nothing
+    link = !validating(dev)
+    # `invokelatest`, as `get_compiled_kernel_and_pipeline`: a kernel can be newer than
+    # the caller's world.
+    tasks = map(collect(values(jobs))) do job
+        Threads.@spawn begin
+            compiled = Base.invokelatest(compile_or_lookup, job)::LavaGPUKernel
+            link && linkedkernel(dev, compiled)
+        end
+    end
+    foreach(wait, tasks)
+    return nothing
+end
+
+"""
+    compiledargs(c, dev, d::Dispatch) -> (raw, args, readonly)
+
+A dispatch's arguments resolved to storage (`raw`), adapted to the device values its
+kernel is compiled for (`args`), and a bit for each that is read-only (`readonlymask`).
+Element by element ([`argwise`](@ref)): called on the whole tuple, `resolve` and
+`devargs` compiled once per kernel.
+"""
+function compiledargs(c::Compile{LavaDevice}, dev::LavaDevice, d::Dispatch)
+    raw = argwise(a -> resolve(dev, a), d.args)
+    ad = adaptor(dev.default_bq)
+    readonly = readonlymask(c.graph, argument_usage(dev, d.kernel, d.args, d.ndrange, d.group), raw)
+    return raw, argwise(a -> Adapt.adapt(ad, a), raw), readonly
+end
+
+"""
+The TLAS that `raw`, a dispatch's resolved arguments, names (`find_tlas_in_args`, the
+last one wins), looked for one argument at a time.
+"""
+function argstlas(@nospecialize(raw::Tuple))
+    tlas = nothing
+    for i in 1:nfields(raw)
+        h = find_tlas_in_args((getfield(raw, i),))
+        h === nothing || (tlas = h)
+    end
+    return tlas
 end
 
 """
@@ -820,10 +881,7 @@ end
 Pack one dispatch's arguments into the plan's memory and emit it over its
 compiled iteration plan. Nothing here compiles or allocates.
 """
-# Not specialised on the dispatch: a recording emits it once, and only packing its arguments
-# (`packdispatch!`) depends on their types. Specialised, the whole launch compiled again for
-# every new kernel type.
-function emitdispatch!(e::Emitter, @nospecialize(d::LavaDispatch), name::AbstractString)
+function emitdispatch!(e::Emitter, d::LavaDispatch, name::AbstractString)
     it = d.iter
     it.nblocks == 0 && return nothing
     am = e.args
@@ -1088,20 +1146,54 @@ address of these bytes, so their values are fixed for the plan's life; a value
 that changes is a [`GPURef`](@ref), packed as its address. A walked run does this
 every time, in memory of its own ([`runargs`](@ref)).
 """
-function packdispatch!(e::Emitter, d::LavaDispatch, it)
-    am = e.args
-    off = d.argoff
+function packdispatch!(e::Emitter, d::LavaDispatch, it::IterPlan)
     lp = d.launch
-    raw = resolve(e.ctx, d.args)
+    # The slots of `(kernel, iteration context, args...)`, as `pack_args_direct!` lays
+    # them out, one argument at a time: each `packslot!` specialises on that
+    # argument's type, which other kernels share, never on the whole tuple.
+    p = ArgPack(e.owner, argsite(e), e.args.ptr + d.argoff, e.args.address + d.argoff,
+                lp.offsets, lp.byval_sizes, 0, lp.arg_buffer_size)
     # Adapt holds nothing, so hold the original leaves here; this also registers
     # their buffers for submission ordering, so a replay cannot race a host write.
     holdleaves!(e.owner, d.kernel)
-    holdleaves!(e.owner, raw)
-    # Not wrapped by `readonlyargs`: a `Lava.Const` packs as the array it wraps.
-    args = devargs(adaptor(e), raw)
-    pack_args_direct!(e.owner, argsite(e), am.ptr + off, am.address + off, lp.offsets,
-                      lp.arg_buffer_size, lp.byval_sizes, (d.kernel, it.ka_ctx, args...))
-    return d.tlas ? find_tlas_in_args(raw) : nothing
+    p = packslot!(p, d.kernel)
+    p = packslot!(p, it.ka_ctx)
+    ad = adaptor(e)
+    tlas = nothing
+    for i in 1:nfields(d.args)
+        raw = resolve(e.ctx, getfield(d.args, i))
+        holdleaves!(e.owner, raw)
+        if d.tlas
+            h = find_tlas_in_args((raw,))
+            h === nothing || (tlas = h)
+        end
+        p = packslot!(p, Adapt.adapt(ad, raw))
+    end
+    return tlas
+end
+
+"""
+Where `packdispatch!` writes a dispatch's next argument: its slice of the plan's
+argument memory, the launch plan's layout, the layout slots filled so far and the
+inline byte offset reached.
+"""
+struct ArgPack{O<:Closed,S}
+    owner::O
+    site::S
+    ptr::Ptr{UInt8}
+    address::UInt64
+    offsets::Vector{Int}
+    byval_sizes::Vector{Int}
+    slot::Int
+    inline::Int
+end
+
+function packslot!(p::ArgPack, x)
+    notpassed(typeof(x)) && return p
+    slot = p.slot + 1
+    inline = pack_arg!(x, p.ptr, p.address, p.offsets[slot], p.byval_sizes[slot], p.inline,
+                       p.owner, p.site)
+    return ArgPack(p.owner, p.site, p.ptr, p.address, p.offsets, p.byval_sizes, slot, inline)
 end
 
 """

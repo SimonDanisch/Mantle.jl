@@ -10,15 +10,17 @@ argtype(dev::LavaDevice, @nospecialize(y)) =
 
 accesscache(dev::LavaDevice) = dev.caches.accesses::AccessCache
 
+# The walk infers through Lava's interpreter, so it waits its turn like a compile.
+inferring(f, ::LavaDevice) = @lock Lava.INFERENCE_LOCK f()
+
 precompile_array_type(::Type{T}, N::Int) where {T} = LavaDeviceArray{T,N}
-precompile_readonly_type(::Type{T}, N::Int) where {T} = Lava.Const{T,N}
 
 function kernel_precompile_abi(::Type{LavaDevice}, group::Int)
     CI = CartesianIndices{1,Tuple{Base.OneTo{Int}}}
     NI = KA.NDIteration
     iteration = NI.NDRange{1,NI.DynamicSize,NI.StaticSize{(group,)},CI,Nothing,Nothing}
     context = KA.CompilerMetadata{NI.DynamicSize,NI.DynamicCheck,Nothing,CI,iteration,Nothing,Nothing}
-    return (; array = precompile_array_type, readonly = precompile_readonly_type, context)
+    return (; array = precompile_array_type, context)
 end
 
 precompile_kernelinterpreter(::Type{LavaDevice}, kernel, tt, group::Int) =
@@ -77,7 +79,7 @@ function katouches(obj::KA.Kernel{LavaDevice}, args::Tuple, iter::IterPlan)
     cached = cachedtouches(dev, Tuple{typeof(obj.f), typeof(iter.ka_ctx), argT...}, 2)
     cached === nothing || return cached
     interp, body, tt = kaaccesssignature(obj, iter, argT)
-    t = accessof(interp, body, tt; cache = accesscache(dev))
+    t = inferring(() -> accessof(interp, body, tt; cache = accesscache(dev)), dev)
     return view(t, 3:length(t))
 end
 
@@ -106,14 +108,14 @@ function vertextouches(dev::LavaDevice, shader, args::Tuple)
     argT = map(a -> devicetype(dev, a), args)
     tt = Tuple{argT...}
     vfn, _, _, _ = resolve_shader_pair(shader, tt, Tuple{})
-    return accessof(Lava.kernelinterpreter(vfn, tt), vfn, argT; cache = accesscache(dev))[2:end]
+    return inferring(() -> accessof(Lava.kernelinterpreter(vfn, tt), vfn, argT; cache = accesscache(dev)), dev)[2:end]
 end
 
 function fragmenttouches(dev::LavaDevice, shader, args::Tuple)
     argT = map(a -> devicetype(dev, a), args)
     tt = Tuple{argT...}
     _, _, ffn, _ = resolve_shader_pair(shader, Tuple{}, tt)
-    return accessof(Lava.kernelinterpreter(ffn, tt), ffn, argT; cache = accesscache(dev))[2:end]
+    return inferring(() -> accessof(Lava.kernelinterpreter(ffn, tt), ffn, argT; cache = accesscache(dev)), dev)[2:end]
 end
 
 # Lava's `_lava_coopmat_<op>_...` / `_lava_tensor_<op>_...` intrinsics are

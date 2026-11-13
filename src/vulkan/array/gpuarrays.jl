@@ -312,7 +312,7 @@ function Base.fill!(a::LavaArray{T}, val) where T
     v = convert(T, val)
     # The array's backend, not the global context, which may be another GPU.
     k = KI.Kernel(KernelAbstractions.get_backend(a), fill_kernel!)
-    k(a, v; ndrange=length(a))
+    k(a, v; ndrange = length(a), workgroupsize = rangefreegroup(k))
     return a
 end
 

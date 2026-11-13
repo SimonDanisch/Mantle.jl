@@ -297,6 +297,23 @@ storage(x::NamedTuple{Names}) where {Names} = NamedTuple{Names}(argmap(storage, 
     return Expr(:tuple, (:(f(getfield(args, $i))) for i in 1:fieldcount(T))...)
 end
 
+"""    argwise(f, args::Tuple) -> Tuple
+
+`map` over a tuple compiled once, not once per tuple type: each `f` call
+specialises on its element alone. For code that runs once per dispatch (compiling
+and recording a graph), where an element type, the scene or the film, recurs across
+kernels and a whole argument tuple never does. Unlike [`argmap`](@ref) it allocates
+and its result is not inferred."""
+function argwise(f::F, @nospecialize(args::Tuple)) where {F}
+    # `nfields`/`getfield` are builtins: `length` or iteration on an abstract tuple
+    # would dispatch on, and compile for, its concrete type.
+    v = Vector{Any}(undef, nfields(args))
+    for i in eachindex(v)
+        v[i] = f(getfield(args, i))
+    end
+    return Tuple(v)
+end
+
 """    basealignment(x) -> Int
 
 Known power-of-two device alignment, or 1 when unknown. Wide-load kernels must

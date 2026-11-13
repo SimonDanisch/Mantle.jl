@@ -94,12 +94,12 @@ LavaArray{T,N}(data::AbstractArray{S,N}; kw...) where {T,S,N} =
 import LinearAlgebra: UniformScaling
 
 # Top level: a closure per call would be a new function, compiled every time.
-function identity_kernel!(res, stride, val)
+# `n` is the diagonal's length. A lane past it still lands inside a wide matrix
+# (lane 3 of a 2x4 one writes element 7, row 1), so it is the bound, not `length(res)`.
+function identity_kernel!(res, stride, val, n)
     i = KI.get_global_id().x
-    ilin = (stride * (i - 1)) + i
-    if ilin <= length(res)
-        @inbounds res[ilin] = val
-    end
+    i <= n || return nothing
+    @inbounds res[(stride * (i - 1)) + i] = val
     return nothing
 end
 
@@ -108,8 +108,9 @@ function (::Type{LavaArray{T,N}})(s::UniformScaling, dims::Tuple{Int,Int}) where
     fill!(res, zero(T))
     isempty(res) && return res
     # The array's device, not the global `Device(VulkanAPI())`, which may be another GPU.
-    KI.Kernel(KernelAbstractions.get_backend(res), identity_kernel!)(
-        res, size(res, 1), T(s.λ); ndrange=minimum(dims))
+    k = KI.Kernel(KernelAbstractions.get_backend(res), identity_kernel!)
+    n = minimum(dims)
+    k(res, size(res, 1), T(s.λ), n; ndrange = n, workgroupsize = rangefreegroup(k))
     return res
 end
 (::Type{LavaArray{T}})(s::UniformScaling, dims::Tuple{Int,Int}) where {T} =

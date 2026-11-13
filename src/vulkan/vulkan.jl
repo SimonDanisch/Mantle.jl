@@ -12,7 +12,7 @@ using Lava
 using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             CoopMatrix, FragmentWrapper, GeometryConfig,
             KI_REDUCE_ADD_TYPES, KI_SHFL_TYPES, LavaCompilationError,
-            LavaCompilerParams, LavaDeviceArray, LavaError, LavaGPUKernel,
+            LavaCompilerJob, LavaCompilerParams, LavaDeviceArray, LavaError, LavaGPUKernel,
             LavaGfxShader, LavaSharedArray, MatrixA, MatrixB,
             Op, PushConstantInfo, Scope, SourceMap, TargetFeatures, TessConfig,
             GeometryWrapper, MeshWrapper, VertexWrapper, WorkgroupMatrix,

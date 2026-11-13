@@ -169,6 +169,26 @@ function compiledraw end
 function compile_dispatch end
 
 """
+    compilekernels!(c)
+
+Compile the kernel of every dispatch in `c` before the `Pipelines` phase lays the
+plan out, which then finds them compiled. A backend whose compiler is thread-safe
+compiles them concurrently: a scene with a dozen material kernels waits for the
+slowest, not for all of them in turn. Core's default compiles nothing ahead.
+"""
+compilekernels!(c) = nothing
+
+"""
+    inferring(f, device)
+
+`f()`, an access walk, run the way `device`'s compiler runs Julia's inference of a
+kernel. Lava infers one kernel at a time (`Lava.INFERENCE_LOCK`): kernels with callees
+in common, inferred on several threads at once, came out less precise. Core's default
+runs `f`.
+"""
+inferring(f, dev) = f()
+
+"""
     passbarriers(c, pass) -> (images, pre, barrier)
 
 The transitions the `Barriers` phase derived for this pass (`pre`), as the backend
@@ -636,7 +656,7 @@ const BACKEND_VOCABULARY = (
     :nativeformat,
     # compile: the phases are core's, a backend answers these
     :syncbackend,
-    :compiledraw, :compile_dispatch, :imagebarriers, :passbarrier,
+    :compiledraw, :compile_dispatch, :compilekernels!, :inferring, :imagebarriers, :passbarrier,
     :argbytes, :indirectslot,
     # Argument packing is core's (`graph/packing.jl`); a backend adds `passedas`
     # only for its own allocation handles.

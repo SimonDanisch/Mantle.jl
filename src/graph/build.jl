@@ -43,7 +43,7 @@ Throw if `touches` marks no argument as touched. That means the access walk miss
 a memory access (typically an intrinsic without `intrinsic_usage`), and a missed
 store would silently remove a barrier.
 """
-function refusenothing(@nospecialize(kernel), args::Tuple, touches)
+function refusenothing(@nospecialize(kernel), @nospecialize(args::Tuple), touches)
     any(touched, touches) && return touches
     throw(ArgumentError(
         "dispatch!: `$(kernelname(kernel))` is declared to touch none of its $(length(args)) " *

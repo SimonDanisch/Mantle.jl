@@ -48,6 +48,18 @@ KI.multiprocessor_count(backend::LavaDevice) = caps(backend).cores
 KI.max_work_group_size(k::KI.Kernel{LavaDevice}) = KI.max_work_group_size(k.backend)
 
 """
+    rangefreegroup(k::KI.Kernel{LavaDevice}) -> Int
+
+The work-group size of a 1-D launch of `k` that names none, passed explicitly:
+KernelInterface's configured size, which a call with `ndrange` alone clamps to the
+range. Lava compiles the size into the kernel, so the clamp made every length below
+it a kernel and pipeline of its own (each `fill!` of a short array). Large launches
+get the same groups as before; a short one runs one group, and its kernel checks
+the bounds.
+"""
+rangefreegroup(k::KI.Kernel{LavaDevice}) = KI.launch_configuration(k).workgroupsize
+
+"""
     KI.argconvert(::LavaDevice, a)
 
 Device-side value for KI's type derivation; holds no resource. `KI.launch`
@@ -82,12 +94,9 @@ function KI.launch(k::KI.Kernel{LavaDevice}, groups::Dims{3}, items::Dims{3}, ar
         holdleaves!(owner, args)
         adaptor = LavaAdaptor(owner)
         adapted = argmap(a -> Adapt.adapt(adaptor, a), args)
-        # As in `emitlaunch!`: one dynamic call, taken only when there is something
-        # to wrap.
-        any(isreadonly, touches) &&
-            return kilaunchwith!(e, k.kern, readonlyargs(nothing, touches, args, adapted),
-                                 groups, items, tlas)
-        kilaunchwith!(e, k.kern, adapted, groups, items, tlas)
+        # As in `emitlaunch!`, but a KI kernel's signature is its arguments alone.
+        readonly = readonlymask(nothing, touches, args)
+        kilaunchwith!(e, k.kern, adapted, groups, items, tlas, readonly)
     end
     return nothing
 end
@@ -95,5 +104,5 @@ end
 # `ka_launch!` drops `all_args[1]`, where the KA path passes the kernel function; a KI
 # kernel passes a zero-sized `nothing` there.
 # `::K`, as `launchwith!` has it: a function only passed on is not specialised on.
-@noinline kilaunchwith!(e, kern::K, args::Tuple, groups, items, tlas) where {K} =
-    ka_launch!(e, kern, (nothing, args...), groups, items, tlas)
+@noinline kilaunchwith!(e, kern::K, args::Tuple, groups, items, tlas, readonly) where {K} =
+    ka_launch!(e, kern, (nothing, args...), groups, items, tlas, readonly)

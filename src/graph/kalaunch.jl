@@ -197,9 +197,19 @@ backend: `threads` work-items (at most `maxthreads`) filling the dimensions in
 order. Small groups bound the idle lanes in a row's last group (first-axis
 maximal groups made a 1080x1920 frame 1.6x slower), and filling later axes keeps
 a `(3, n)` range from idling most lanes.
+
+The last dimension takes every work-item the others leave, even past its extent,
+so the group does not depend on how small a launch is. Lava compiles the group
+into the kernel: a launch over 3, 4 or 6 items compiled a kernel for each, and a
+scene with one more instance compiled every TLAS kernel again. A launch smaller
+than one group runs one group, whose lanes past the range fail the bounds check.
 """
-defaultgroup(ndrange::Tuple, maxthreads::Integer; threads::Integer = 64) =
-    KI.threads_to_workgroupsize(min(threads, maxthreads), ndrange)
+function defaultgroup(ndrange::Tuple, maxthreads::Integer; threads::Integer = 64)
+    isempty(ndrange) && return ()
+    n = min(threads, maxthreads)
+    leading = Base.front(KI.threads_to_workgroupsize(n, ndrange))
+    return (leading..., max(div(n, prod(leading)), 1))
+end
 
 """
     LaunchShape
@@ -310,6 +320,8 @@ argument block (`argcursor`) and each device-sized dispatch its indirect slot
 `compiledraw` and `compile_dispatch`.
 """
 function run!(::Pipelines, c::Compile)
+    # `invokelatest` for the reason the dispatch loop below gives.
+    Base.invokelatest(compilekernels!, c)
     argcursor = 0
     indcursor = 0
     for p in ordered(c)

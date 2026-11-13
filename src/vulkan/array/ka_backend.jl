@@ -86,7 +86,8 @@ end
 Adapt.adapt_storage(::KA.CPU, a::LavaArray) = Array(a)
 
 # `@Const` wraps a device array in `Lava.Const`, whose loads Lava declares
-# NonWritable; `readonlyargs` adapts the arguments a dispatch only reads the same way.
+# NonWritable. The arguments a dispatch only reads are not wrapped but flagged
+# (`readonlymask`), so they compile at the types the access walk inferred.
 # KA 0.10 rebuilds reshaped and permuted wrappers around the adapted parent
 # without re-validating, so no throwing `reshape` constructor reaches the device.
 Adapt.adapt_storage(::KA.ConstAdaptor, a::LavaDeviceArray) = Lava.Const(a)
@@ -301,20 +302,16 @@ end
     adaptor = LavaAdaptor(owner)
     converted_f = Adapt.adapt(adaptor, obj.f)
     converted_args = argmap(a -> Adapt.adapt(adaptor, a), args)
-    # Which arguments `readonlyargs` wraps is decided per call (two may share a
-    # buffer), so its result has no inferable type: one dynamic call into the launch,
-    # taken only when there is something to wrap.
-    any(isreadonly, touches) &&
-        return launchwith!(e, converted_f, ka_ctx,
-                           readonlyargs(nothing, touches, args, converted_args),
-                           block_dims, ws_3d, tlas)
-    launchwith!(e, converted_f, ka_ctx, converted_args, block_dims, ws_3d, tlas)
+    # Decided per call: two arguments may share a buffer. The iteration context leads
+    # the signature, so the arguments' bits move up one.
+    readonly = readonlymask(nothing, touches, args) << 1
+    launchwith!(e, converted_f, ka_ctx, converted_args, block_dims, ws_3d, tlas, readonly)
 end
 
 # `::F`: a function argument only passed on is not specialised on, and an abstract
 # `f` boxes the argument tuple.
-@noinline launchwith!(e, f::F, ka_ctx, args::Tuple, block_dims, ws_3d, tlas) where {F} =
-    ka_launch!(e, f, (f, ka_ctx, args...), block_dims, ws_3d, tlas)
+@noinline launchwith!(e, f::F, ka_ctx, args::Tuple, block_dims, ws_3d, tlas, readonly) where {F} =
+    ka_launch!(e, f, (f, ka_ctx, args...), block_dims, ws_3d, tlas, readonly)
 
 # Vulkan dispatches are at most 3-D: `pad_to_3d` maps the block grid onto
 # `ctx.max_wg_dims`, splitting large dimensions across Y and Z. Extra workgroups
@@ -374,7 +371,7 @@ end
 @inline launch_plan_cache(ctx) = ctx.caches.launchplans
 
 @inline function launch_plan(bq::SubmitChannel{<:VulkanQueue}, @nospecialize(f), all_args::Tuple,
-                             wg::NTuple{3,Int}, ray_query::Bool)
+                             wg::NTuple{3,Int}, ray_query::Bool, readonly::UInt64)
     # The key includes the kernel type: a KI kernel has `nothing` in
     # `all_args[1]`, so two with the same argument types would share a pipeline.
     key = Tuple{typeof(f), typeof(all_args)}
@@ -388,29 +385,40 @@ end
             # A typeassert on a `Vector{Any}` element does not copy; a
             # `Vector{LaunchPlan}` would box on every read.
             p = q::LaunchPlan
-            (p.world === world && p.wg === wg && p.ray_query === ray_query) && return p
+            (p.world === world && p.wg === wg && p.ray_query === ray_query &&
+             p.readonly === readonly) && return p
         end
     end
-    build_launch_plan!(bq, f, all_args, wg, ray_query, key, world)
-end
-
-# `all_args` has a different concrete type per kernel, so any method taking it is
-# inferred per kernel. This method only computes `tt`; the kernel-independent
-# rest is `build_launch_plan_tt!` behind `Ref{Any}` boxes, so it is inferred once.
-# `@nospecialize` alone does not prevent the per-kernel specialisation.
-@noinline function build_launch_plan!(bq::SubmitChannel{<:VulkanQueue}, @nospecialize(f), all_args::Tuple,
-                                      wg::NTuple{3,Int}, ray_query::Bool,
-                                      key::DataType, world::UInt64)
-    # Drops `all_args[1]`, the function slot GPUCompiler prepends itself.
-    # `arg_sigtype` recovers `Type{X}` for type-valued arguments, which
-    # `typeof(all_args)` erases to `DataType`.
-    tt = Tuple{map(arg_sigtype, Base.tail(all_args))...}
-    # `key` is boxed too: a type-valued argument specialises like `tt`.
-    build_launch_plan_tt!(bq, Ref{Any}(f), Ref{Any}(tt), Ref{Any}(key), wg, ray_query, world)
+    build_launch_plan!(bq, f, all_args, wg, ray_query, readonly, key, world)
 end
 
 """
-    build_launch_plan_tt!(bq, fbox, ttbox, keybox, wg, ray_query, world) -> LaunchPlan
+    launchtypes(all_args) -> Type{<:Tuple}
+
+The signature a kernel launched with `all_args` is compiled at. Drops `all_args[1]`,
+the function slot GPUCompiler prepends itself. `arg_sigtype` recovers `Type{X}` for
+type-valued arguments, which `typeof(all_args)` erases to `DataType`. By index with
+the `nfields`/`getfield` builtins: `map` or `Base.tail` dispatch on, and compile for,
+the concrete tuple, which is another one for every kernel.
+"""
+Base.@nospecializeinfer launchtypes(@nospecialize(all_args::Tuple)) =
+    Tuple{Any[arg_sigtype(getfield(all_args, i)) for i in 2:nfields(all_args)]...}
+
+# `all_args` has a different concrete type per kernel. This method only computes
+# `tt`, inferred and compiled once (`@nospecializeinfer`); the rest is
+# `build_launch_plan_tt!` behind `Ref{Any}` boxes.
+@noinline Base.@nospecializeinfer function build_launch_plan!(bq::SubmitChannel{<:VulkanQueue},
+                                      @nospecialize(f), @nospecialize(all_args::Tuple),
+                                      wg::NTuple{3,Int}, ray_query::Bool,
+                                      readonly::UInt64,
+                                      key::DataType, world::UInt64)
+    tt = launchtypes(all_args)
+    # `key` is boxed too: a type-valued argument specialises like `tt`.
+    build_launch_plan_tt!(bq, Ref{Any}(f), Ref{Any}(tt), Ref{Any}(key), wg, ray_query, readonly, world)
+end
+
+"""
+    build_launch_plan_tt!(bq, fbox, ttbox, keybox, wg, ray_query, readonly, world) -> LaunchPlan
 
 The kernel-independent half of `build_launch_plan!`, inferred once. The
 `Ref{Any}` boxes erase `f`, `tt` and `key`, for which Julia ignores
@@ -420,16 +428,17 @@ The kernel-independent half of `build_launch_plan!`, inferred once. The
                                          ttbox::Base.RefValue{Any},
                                          keybox::Base.RefValue{Any},
                                          wg::NTuple{3,Int}, ray_query::Bool,
+                                         readonly::UInt64,
                                          world::UInt64)
     f = fbox[]
     tt = ttbox[]
     key = keybox[]::DataType
     compiled, pipeline, offsets, byval_sizes = get_compiled_kernel_and_pipeline(
-        deviceof(bq), f, tt, wg; enable_ray_query=ray_query)
+        deviceof(bq), f, tt, wg; enable_ray_query=ray_query, readonly)
     base = compiled.push_info.arg_buffer_size
     p = LaunchPlan(compiled, pipeline, offsets, byval_sizes, base,
                    base + compute_inline_extra_from_byval(byval_sizes, base),
-                   world, wg, ray_query)
+                   world, wg, ray_query, readonly)
     v = get!(() -> Any[], launch_plan_cache(deviceof(bq)), key)
     filter!(q -> (q::LaunchPlan).world === world, v)  # superseded worlds are dead
     push!(v, p)
@@ -437,18 +446,19 @@ The kernel-independent half of `build_launch_plan!`, inferred once. The
 end
 
 """
-    ka_launch!(e, f, all_args, block_dims, workgroup_size, tlas = nothing)
+    ka_launch!(e, f, all_args, block_dims, workgroup_size, tlas, readonly)
 
 Look up or compile `f` for the post-adapt `all_args`, pack the arguments into
 `e`'s one-shot and record the dispatch over `block_dims`. `all_args[1]` is the
-function slot and is not part of the signature.
+function slot and is not part of the signature; `readonly` has a bit for each of the
+signature's read-only arguments (`readonlymask`).
 """
 function ka_launch!(e::Emitter, @nospecialize(f), all_args::Tuple,
                     block_dims::NTuple{3,Int}, workgroup_size::NTuple{3,Int},
-                    tlas=nothing)  # positional: no keyword NamedTuple on the hot path
+                    tlas, readonly::UInt64)  # positional: no keyword NamedTuple on the hot path
     bq = queueof(e)
     # A TLAS argument compiles with ray query and binds the TLAS descriptor.
-    plan = launch_plan(bq, f, all_args, workgroup_size, tlas !== nothing)
+    plan = launch_plan(bq, f, all_args, workgroup_size, tlas !== nothing, readonly)
 
     # The one-shot owns the argument memory. Taken once from the emitter:
     # reaching it through the queue allocates when that field infers abstract.

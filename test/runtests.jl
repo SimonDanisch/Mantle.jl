@@ -576,6 +576,10 @@ if _VULKAN_OK
     check_channel_waits(Mantle.Device(Mantle.VulkanAPI()))
     include(joinpath(@__DIR__, "vulkan", "test_video_sessions.jl"))
     check_video_sessions(Mantle.Device(Mantle.VulkanAPI()))
+    include(joinpath(@__DIR__, "vulkan", "test_launch_size_kernels.jl"))
+    check_launch_size_kernels(Mantle.Device(Mantle.VulkanAPI()))
+    include(joinpath(@__DIR__, "vulkan", "test_compile_kernels_at_once.jl"))
+    check_compile_kernels_at_once(Mantle.Device(Mantle.VulkanAPI()))
 end
 # Also needs no GPU, and that is the point of the design rather than a happy
 # accident: everything the geometry-to-mesh lowering does except read one builtin
@@ -914,7 +918,7 @@ foreachbackend(joinpath(@__DIR__, "test_graphics_pipeline.jl"))
 foreachbackend(joinpath(@__DIR__, "test_video_decode.jl"))
 
 foreachbackend(joinpath(@__DIR__, "test_access_kernels.jl"))
-# What the access walk says a dispatch only reads reaches Lava as `Lava.Const`.
+# What the access walk says a dispatch only reads compiles as read-only memory, at the walked types.
 _VULKAN_OK && foreachbackend(joinpath(@__DIR__, "vulkan", "test_readonly_args.jl"))
 _VULKAN_OK && foreachbackend(joinpath(@__DIR__, "vulkan", "test_pipeline_cache_merge.jl"))
 _VULKAN_OK && foreachbackend(joinpath(@__DIR__, "vulkan", "test_pipeline_resource_summary.jl"))

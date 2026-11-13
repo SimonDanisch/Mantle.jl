@@ -112,10 +112,13 @@ function createpipeline(create, ctx::LavaDevice, flags::VK.PipelineCreateFlag, n
     if d.no_pipeline_compile
         pipeline, code = create(flags | NO_COMPILE_FLAGS)
         code == VK.PIPELINE_COMPILE_REQUIRED || return pipeline
-        d.pipeline_compiles_refused += 1
-        # `spirv_content_hash`, not `Base.hash`, which samples large vectors.
-        push!(d.pipeline_compile_misses, string(name, " spirv=", string(spirv_content_hash(spirv), base=16),
-                                                " (", length(spirv), " bytes)"))
+        # Locked: `compilekernels!` creates pipelines on several threads.
+        @lock ctx.caches.lock begin
+            d.pipeline_compiles_refused += 1
+            # `spirv_content_hash`, not `Base.hash`, which samples large vectors.
+            push!(d.pipeline_compile_misses, string(name, " spirv=", string(spirv_content_hash(spirv), base=16),
+                                                    " (", length(spirv), " bytes)"))
+        end
     end
     return first(create(flags))
 end
@@ -262,15 +265,18 @@ function get_compute_pipeline(ctx::LavaDevice, spirv_bytes::Vector{UInt8}, entry
                                needs_tlas_descriptor::Bool=false)
     cache_key = hash((spirv_content_hash(spirv_bytes), length(spirv_bytes),
                       entry_name, push_constant_size, needs_tlas_descriptor))
-    cached = get(ctx.caches.pipelines, cache_key, nothing)
+    cached = @lock ctx.caches.lock get(ctx.caches.pipelines, cache_key, nothing)
     if cached !== nothing
         return cached
     end
 
     dev = ctx.device
 
+    # Unlocked from here to the insert: the driver compiles in `createpipeline`, and
+    # `compilekernels!` runs it for a plan's kernels at once. The validation queue has
+    # one reader, so draining it takes the lock.
     shader_mod = create_shader_module(dev, spirv_bytes)
-    check_validation_errors!("vkCreateShaderModule (compute)", ctx)
+    @lock ctx.caches.lock check_validation_errors!("vkCreateShaderModule (compute)", ctx)
 
     push_ranges = if push_constant_size > 0
         [VK.PushConstantRange(
@@ -305,7 +311,8 @@ function get_compute_pipeline(ctx::LavaDevice, spirv_bytes::Vector{UInt8}, entry
     # COOPMAT_SUBGROUP. That is a function of (SPIR-V, device), so `cache_key`
     # need not name it. A device already that wide gets an untouched create-info.
     stage_next = C_NULL
-    if spirv_declares_capability(spirv_bytes, Cap.CooperativeMatrixKHR) &&
+    # Locked: the subgroup queries fill their fields on first use, once per device.
+    @lock ctx.caches.lock if spirv_declares_capability(spirv_bytes, Cap.CooperativeMatrixKHR) &&
        device_subgroup_size(ctx) != COOPMAT_SUBGROUP
         if can_require_subgroup_size(ctx, COOPMAT_SUBGROUP)
             stage_next = VK.PipelineShaderStageRequiredSubgroupSizeCreateInfo(
@@ -350,15 +357,21 @@ function get_compute_pipeline(ctx::LavaDevice, spirv_bytes::Vector{UInt8}, entry
 
     result = LavaComputePipeline(shader_mod, layout, pipeline, UInt32(push_constant_size),
                                   needs_tlas_descriptor, ds_layout)
-    ctx.caches.pipelines[cache_key] = result
-    push!(ctx.caches.pipeline_order, cache_key)
-    while length(ctx.caches.pipeline_order) > MAX_PIPELINE_CACHE_SIZE[]
-        old_key = popfirst!(ctx.caches.pipeline_order)
-        delete!(ctx.caches.pipelines, old_key)
-        # Safe to evict: every dispatch `hold!`s its pipeline, so submissions
-        # using it keep it alive until they complete.
+    return @lock ctx.caches.lock begin
+        # Another thread may have made the same pipeline meanwhile (two kernels with
+        # one SPIR-V); its is the one the cache keeps, and ours is collected unused.
+        existing = get(ctx.caches.pipelines, cache_key, nothing)
+        existing === nothing || return existing
+        ctx.caches.pipelines[cache_key] = result
+        push!(ctx.caches.pipeline_order, cache_key)
+        while length(ctx.caches.pipeline_order) > MAX_PIPELINE_CACHE_SIZE[]
+            old_key = popfirst!(ctx.caches.pipeline_order)
+            delete!(ctx.caches.pipelines, old_key)
+            # Safe to evict: every dispatch `hold!`s its pipeline, so submissions
+            # using it keep it alive until they complete.
+        end
+        result
     end
-    return result
 end
 
 """Allocate a compute binding for tlas.accel. The caller must hold the pool through

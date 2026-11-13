@@ -1,29 +1,32 @@
-# Which arguments of a compute dispatch Lava may load as memory nothing writes.
+# Which arguments of a compute dispatch nothing writes while it runs.
 #
-# Lava loads a `Lava.Const` with `!invariant.load` and declares that memory
-# NonWritable, so a driver may read a uniform address through its scalar cache
-# (RADV only does for memory it knows is not written). The access walk already says
-# what a kernel does to each argument. It cannot say whether two arguments reach the
-# same buffer, and NonWritable is a promise about the memory, not the argument:
-# `x .= x .+ 1` reads `x` through the `Broadcasted` and writes it as the destination.
-# That half is decided per dispatch, from the byte ranges the arguments reach.
+# Lava loads the memory such an argument reaches with `!invariant.load` and declares it
+# NonWritable, so a driver may read a uniform address through its scalar cache (RADV only
+# does for memory it knows is not written). The access walk already says what a kernel
+# does to each argument. It cannot say whether two arguments reach the same buffer, and
+# NonWritable is a promise about the memory, not the argument: `x .= x .+ 1` reads `x`
+# through the `Broadcasted` and writes it as the destination. That half is decided per
+# dispatch, from the byte ranges the arguments reach.
 #
-# `packdispatch!` packs the unwrapped arguments: `Lava.Const` has the layout of the
-# array it wraps, so the bytes are the ones the pipeline was compiled for, the patch
-# points a move rewrites are the array's, and recording stays free of the analysis.
+# The answer is a mask, one bit per argument, which the compile job carries
+# (`Lava.LavaCompilerParams`): the argument types stay the ones the walk inferred, so the
+# compile finds the walk's inference cached. Wrapping the arguments in `Lava.Const`
+# instead gave the compile a signature of its own, and Julia inferred every kernel twice.
+# A mask, not a tuple of flags, so no launch path is compiled per argument count, and an
+# eager launch compares it with its cached plans without allocating. An argument past
+# the 64th is never read-only: it loses NonWritable, nothing else.
 
 """
-    readonlyargs(g, touches, raw, adapted) -> Tuple
+    readonlymask(g, touches, raw) -> UInt64
 
-`adapted`, a dispatch's arguments after `LavaAdaptor`, with every argument the kernel
-reads and does not write, and whose bytes no written argument reaches, adapted
-through `KA.ConstAdaptor`: each device array in it becomes a `Lava.Const`. `raw` are
-the same arguments before adapting, `touches` what the kernel does to each, and `g`
-the graph slices are interned in (`nothing` for an eager launch).
+Bit `i - 1` set for each of a dispatch's arguments `raw` that the kernel reads and does
+not write, and that no argument it writes reaches the same bytes of. `touches` is what
+the kernel does to each, `g` the graph slices are interned in (`nothing` for an eager
+launch).
 """
-function readonlyargs(g, touches::AbstractVector{Touch}, raw::Tuple, adapted::Tuple)
-    any(isreadonly, touches) || return adapted
-    return constargs(g, touches, raw, raw, adapted, 1)
+function readonlymask(g, touches::AbstractVector{Touch}, raw::Tuple)
+    any(isreadonly, touches) || return UInt64(0)
+    return flagged(g, touches, raw, raw, 1)
 end
 
 # A graph computes these aliases once, while compiling its plan. The tuple
@@ -57,9 +60,10 @@ readonlyoverlap(a::ReadonlyRegion, b::ReadonlyRegion) = a.bounded && b.bounded ?
     a.first < a.past && b.first < b.past && a.first < b.past && b.first < a.past :
     a.owner === b.owner
 
-@noinline Base.@nospecializeinfer function readonlyargs(g::Graph, touches::AbstractVector{Touch},
-        @nospecialize(raw::Tuple), @nospecialize(adapted::Tuple))
-    any(isreadonly, touches) || return adapted
+@noinline Base.@nospecializeinfer function readonlymask(g::Graph, touches::AbstractVector{Touch},
+                                                        @nospecialize(raw::Tuple))
+    mask = UInt64(0)
+    any(isreadonly, touches) || return mask
     written_regions = ReadonlyRegion[]
     for i in eachindex(touches)
         touches[i].write || continue
@@ -67,44 +71,53 @@ readonlyoverlap(a::ReadonlyRegion, b::ReadonlyRegion) = a.bounded && b.bounded ?
             push!(written_regions, readonlyregion(resource))
         end
     end
-    result = Vector{Any}(undef, length(adapted))
-    for i in eachindex(adapted)
-        wrap = isreadonly(touches[i])
-        if wrap
+    for i in 1:min(nfields(raw), 64)
+        readonly = isreadonly(touches[i])
+        if readonly
             for resource in resourceleaves!(Any[], g, raw[i])
                 region = readonlyregion(resource)
                 for written in written_regions
                     if readonlyoverlap(region, written)
-                        wrap = false
+                        readonly = false
                         break
                     end
                 end
-                wrap || break
+                readonly || break
             end
         end
-        result[i] = wrap ? Adapt.adapt(KA.ConstAdaptor(), adapted[i]) : adapted[i]
+        readonly && (mask |= UInt64(1) << (i - 1))
     end
-    return Tuple(result)
+    return mask
 end
 
 isreadonly(t::Touch) = t.read & !t.write
 
-# Walked as a tuple, so every argument keeps its type: an eager launch takes this path
-# on each call, and an argument that is a device array allocates nothing here.
-constargs(g, touches, all::Tuple, ::Tuple{}, ::Tuple{}, i::Int) = ()
-function constargs(g, touches, all::Tuple, raw::Tuple, adapted::Tuple, i::Int)
-    a = first(adapted)
-    wrap = isreadonly(touches[i]) &&
-           !anyresource(b -> written(g, touches, all, b, 1), g, first(raw))
-    return (wrap ? Adapt.adapt(KA.ConstAdaptor(), a) : a,
-            constargs(g, touches, all, Base.tail(raw), Base.tail(adapted), i + 1)...)
+# Walked as a tuple, so an eager launch, which takes this path on each call, allocates
+# nothing here for an argument that is a device array. The recursion is the only part
+# compiled per argument tuple, and it is small: whether a written argument reaches
+# `first(raw)` is `writtenalias`, compiled once, comparing pairs through `argsoverlap`,
+# compiled per pair of argument types, which kernels share. Closures over the whole tuple
+# there compiled anew for every kernel, about 70 ms each for every argument.
+flagged(g, touches, all::Tuple, ::Tuple{}, i::Int) = UInt64(0)
+flagged(g, touches, all::Tuple, raw::Tuple, i::Int) =
+    (i <= 64 && isreadonly(touches[i]) && !writtenalias(g, touches, all, first(raw)) ?
+     UInt64(1) << (i - 1) : UInt64(0)) | flagged(g, touches, all, Base.tail(raw), i + 1)
+
+
+"""Whether an argument of `all` that the kernel writes reaches a buffer `x` reaches."""
+@noinline Base.@nospecializeinfer function writtenalias(g, touches, @nospecialize(all::Tuple),
+                                                        @nospecialize(x))
+    # `nfields`/`getfield` are builtins: iterating the abstract tuple would dispatch on,
+    # and compile for, its concrete type.
+    for j in 1:nfields(all)
+        touches[j].write || continue
+        argsoverlap(g, getfield(all, j), x) && return true
+    end
+    return false
 end
 
-"""Whether one of `args`, the `j`th argument onwards, is written and reaches buffer `b`."""
-written(g, touches, ::Tuple{}, b, j::Int) = false
-written(g, touches, args::Tuple, b, j::Int) =
-    (touches[j].write && anyresource(c -> readonlyoverlap(c, b), g, first(args))) ||
-    written(g, touches, Base.tail(args), b, j + 1)
+"""Whether a resource `written` reaches overlaps one `x` reaches."""
+argsoverlap(g, written, x) = anyresource(b -> anyresource(c -> readonlyoverlap(c, b), g, written), g, x)
 
 """
 Whether `p` holds for a resource `x` reaches, following slices and views.
