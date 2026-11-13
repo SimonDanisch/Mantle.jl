@@ -27,7 +27,7 @@ end
 # Four seed support pairs: (Minkowski vertices, shape A's world-space points).
 # Degenerate directions fall back to canonical axes; there is no success flag.
 @inline function seed_polytope(A::ConvexShape, B::ConvexShape,
-                               T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32},
+                               T_A::Mat3x4f, T_B::Mat3x4f,
                                eps::Float32)
     # Direction 1: world-space vector from B toward A (same heuristic as gjk()).
     origin_A = Vec3f(T_A[4],  T_A[8],  T_A[12])
@@ -146,7 +146,7 @@ Recover closest-face penetration data after GJK reports overlap. `gjk_simplex`
 is unused: EPA rebuilds support pairs to track shape A's contact points. See
 EPAResult for orientation and failure data."""
 function epa(A::ConvexShape, B::ConvexShape,
-             T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32},
+             T_A::Mat3x4f, T_B::Mat3x4f,
              gjk_simplex::NTuple{4,Vec3f};
              max_iters::Int=24, eps::Float32=1f-4)
 

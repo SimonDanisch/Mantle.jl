@@ -24,7 +24,7 @@ end
     @test length(leaves) == 1 && only(leaves) === Mantle.nativeslice(g, x)
     if Mantle.supports_hwtlas(TESTBACKEND)
         mesh = GeometryBasics.Mesh(Point3f[(0, 0, 0), (1, 0, 0), (0, 1, 0)], GLTriangleFace[(1, 2, 3)])
-        records = Mantle.instancerecords([Mat4f(I)], UInt32[1], UInt8(0xff))
+        records = Raycore.instancerecords([Mat4f(I)], UInt32[1], UInt8(0xff))
         live = Mantle.HWTLAS{Raycore.Triangle{UInt32}}(TESTBACKEND)
         push!(live, mesh, records; n = 1)
         Raycore.sync!(live)

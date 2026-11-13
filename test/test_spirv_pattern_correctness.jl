@@ -228,9 +228,9 @@ end
 # ═══════════════════════════════════════════════════════════════════════
 # Fix 7: PHI cycle detection infinite loop
 #
-# Symptom: trace_to_non_alloca() mishandled PHI cycles, returning wrong
-# storage class. GPU crash on multi-material scenes.
-# Fix: Return true (=PSB) for cycles, since PHI cycles only occur with PSB pointers
+# Symptom: the alloca trace (now `traces_to_alloca`) mishandled PHI cycles,
+# returning the wrong storage class. GPU crash on multi-material scenes.
+# Fix: a cycle that meets no alloca is PSB, since PHI cycles only occur with PSB pointers
 # ═══════════════════════════════════════════════════════════════════════
 
 @testset "Fix 7: PHI cycles in complex control flow" begin

@@ -9,8 +9,6 @@ using Base: @propagate_inbounds
 import KernelAbstractions
 const KA = KernelAbstractions
 
-const Mat4f = SMatrix{4, 4, Float32, 16}
-
 blastype(::LavaDevice) = LavaBLAS
 
 # Read by the build as its input: `AS_INPUT_USAGE`.

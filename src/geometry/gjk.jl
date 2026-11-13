@@ -3,46 +3,14 @@
 # transposed linear block. Simplex region tests follow Muratori/Bullet.
 using GeometryBasics: Vec3f
 using LinearAlgebra: dot, cross
+using StaticArrays: SOneTo
 
-"""
-    transform_point(T::NTuple{12,Float32}, p::Vec3f) -> Vec3f
-
-Apply a row-major 3x4 instance transform to a point `p` (rotation + translation).
-"""
-@inline function transform_point(T::NTuple{12,Float32}, p::Vec3f)
-    Vec3f(
-        T[1]*p[1] + T[2]*p[2] + T[3]*p[3] + T[4],
-        T[5]*p[1] + T[6]*p[2] + T[7]*p[3] + T[8],
-        T[9]*p[1] + T[10]*p[2] + T[11]*p[3] + T[12],
-    )
-end
-
-"""
-    transform_dir(T::NTuple{12,Float32}, d::Vec3f) -> Vec3f
-
-Apply only the rotation (upper-left 3x3) of a row-major 3x4 instance transform
-to a direction `d` (no translation).
-"""
-@inline function transform_dir(T::NTuple{12,Float32}, d::Vec3f)
-    Vec3f(
-        T[1]*d[1] + T[2]*d[2] + T[3]*d[3],
-        T[5]*d[1] + T[6]*d[2] + T[7]*d[3],
-        T[9]*d[1] + T[10]*d[2] + T[11]*d[3],
-    )
-end
-
-"""inv_transform_dir(T::NTuple{12,Float32}, d::Vec3f) -> Vec3f
+"""inv_transform_dir(T::Mat3x4f, d::Vec3f) -> Vec3f
 
 Apply the transpose of T's linear block to a world-space support direction.
 Despite the name, this is not a general inverse; it equals inverse rotation
 only when the block is orthonormal."""
-@inline function inv_transform_dir(T::NTuple{12,Float32}, d::Vec3f)
-    Vec3f(
-        T[1]*d[1] + T[5]*d[2] + T[9]*d[3],
-        T[2]*d[1] + T[6]*d[2] + T[10]*d[3],
-        T[3]*d[1] + T[7]*d[2] + T[11]*d[3],
-    )
-end
+@inline inv_transform_dir(T::Mat3x4f, d::Vec3f) = T[SOneTo(3), SOneTo(3)] * d
 
 """
     support_AB(A, B, T_A, T_B, dir_world) -> Vec3f
@@ -51,17 +19,17 @@ Minkowski-difference support point for (A - B) along `dir_world`, in world space
 Both shapes live in their own local frames; the transforms bring them to world.
 """
 @inline support_AB(A::ConvexShape, B::ConvexShape,
-                   T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32}, dir_world::Vec3f) =
+                   T_A::Mat3x4f, T_B::Mat3x4f, dir_world::Vec3f) =
     support_pair_world(A, B, T_A, T_B, dir_world)[3]
 
 "World-space support pair and its Minkowski difference, shared by GJK and EPA."
 @inline function support_pair_world(A::ConvexShape, B::ConvexShape,
-                             T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32},
+                             T_A::Mat3x4f, T_B::Mat3x4f,
                              dir_world::Vec3f)
     dir_A = inv_transform_dir(T_A, dir_world)
     dir_B = inv_transform_dir(T_B, dir_world)
-    s_A   = transform_point(T_A, support(A, dir_A))
-    s_B   = transform_point(T_B, support(B, -dir_B))
+    s_A   = Vec3f(Raycore.transform_point(T_A, Point3f(support(A, dir_A))))
+    s_B   = Vec3f(Raycore.transform_point(T_B, Point3f(support(B, -dir_B))))
     return s_A, s_B, s_A - s_B
 end
 
@@ -204,11 +172,11 @@ end
 
 """gjk(A, B, T_A, T_B; max_iters=32, eps=1f-6) -> GJKResult
 
-Test transformed convex shapes using row-major Float32 affine tuples.
+Test transformed convex shapes given as row-major `Mat3x4f` affines.
 An enclosing tetrahedron reports overlap; separation, degenerate search
 direction or iteration exhaustion reports false. No distance certificate is returned."""
 function gjk(A::ConvexShape, B::ConvexShape,
-             T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32};
+             T_A::Mat3x4f, T_B::Mat3x4f;
              max_iters::Int=32, eps::Float32=1f-6)
 
     # Initial search direction: world-space vector from B's origin to A's origin.

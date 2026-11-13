@@ -1,6 +1,6 @@
-using Test, Mantle
-using Mantle: UnitCube, gjk, GJKResult, transform_point, support_AB
-using GeometryBasics: Vec3f
+using Test, Mantle, Raycore
+using Mantle: UnitCube, gjk, GJKResult, support_AB
+using GeometryBasics: Vec3f, Point3f
 
 # Shared narrow-phase helpers: translation_transform, rotation_z_transform,
 # ID, tx.  Guarded so re-includes in the same Main are no-ops.
@@ -172,29 +172,25 @@ end
 # ---------------------------------------------------------------------------
 
 @testset "GJK internals -- transform helpers" begin
-    using Mantle: transform_point, transform_dir, inv_transform_dir
-
+    # GJK moves support points with Raycore's `Mat3x4f` transforms.
     T = translation_transform(1, 2, 3)
 
     @testset "transform_point applies rotation + translation" begin
-        p = Vec3f(0, 0, 0)
-        @test Mantle.transform_point(T, p) ≈ Vec3f(1, 2, 3)
-        p2 = Vec3f(1, 0, 0)
-        @test Mantle.transform_point(T, p2) ≈ Vec3f(2, 2, 3)
+        @test Raycore.transform_point(T, Point3f(0, 0, 0)) ≈ Point3f(1, 2, 3)
+        @test Raycore.transform_point(T, Point3f(1, 0, 0)) ≈ Point3f(2, 2, 3)
     end
 
-    @testset "transform_dir ignores translation" begin
-        d = Vec3f(1, 0, 0)
-        @test Mantle.transform_dir(T, d) ≈ Vec3f(1, 0, 0)
+    @testset "transform_direction ignores translation" begin
+        @test Raycore.transform_direction(T, Vec3f(1, 0, 0)) ≈ Vec3f(1, 0, 0)
     end
 
-    @testset "inv_transform_dir is inverse of transform_dir for orthonormal R" begin
+    @testset "inv_transform_dir is inverse of transform_direction for orthonormal R" begin
         angle = Float32(pi/5)
         T_rot = rotation_z_transform(angle)
         d_world = Vec3f(1, 1, 0)
         d_local = Mantle.inv_transform_dir(T_rot, d_world)
         # Rotating d_local back to world should recover d_world.
-        d_back  = Mantle.transform_dir(T_rot, d_local)
+        d_back  = Raycore.transform_direction(T_rot, d_local)
         @test d_back ≈ d_world atol=1f-5
     end
 end

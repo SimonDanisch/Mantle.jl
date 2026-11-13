@@ -21,7 +21,7 @@ const NO_CONTACT = EPAResult(Vec3f(0f0, 0f0, 0f0), 0f0, Vec3f(0f0, 0f0, 0f0), 0,
 """narrow_phase_kernel(transforms, pairs, shape, results)
 
 One invocation per 1-based (i,j) pair: run GJK/EPA and write EPAResult or
-NO_CONTACT. Transforms are row-major NTuple{12,Float32}; both bodies use shape.
+NO_CONTACT. Transforms are row-major `Mat3x4f`s; both bodies use shape.
 Require length(results)==length(pairs) and valid pair indices."""
 function narrow_phase_kernel(
         transforms,

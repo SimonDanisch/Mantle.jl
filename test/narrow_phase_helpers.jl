@@ -10,17 +10,17 @@
 # work standalone.
 
 function translation_transform(x, y, z)
-    (1f0, 0f0, 0f0, Float32(x),
-     0f0, 1f0, 0f0, Float32(y),
-     0f0, 0f0, 1f0, Float32(z))
+    Mantle.Mat3x4f(1f0, 0f0, 0f0, Float32(x),
+                   0f0, 1f0, 0f0, Float32(y),
+                   0f0, 0f0, 1f0, Float32(z))
 end
 
 function rotation_z_transform(angle, tx=0f0, ty=0f0, tz=0f0)
     c = Float32(cos(angle))
     s = Float32(sin(angle))
-    (c,    -s,   0f0,  Float32(tx),
-     s,     c,   0f0,  Float32(ty),
-     0f0,  0f0,  1f0,  Float32(tz))
+    Mantle.Mat3x4f(c,    -s,   0f0,  Float32(tx),
+                   s,     c,   0f0,  Float32(ty),
+                   0f0,  0f0,  1f0,  Float32(tz))
 end
 
 # Identity transform (no rotation, no translation).

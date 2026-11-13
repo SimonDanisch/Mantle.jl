@@ -92,7 +92,7 @@ end
 batchgeometry!(t::BatchedTLAS, blas, triangles) = (geometryindex!(t, blas), triangles)
 
 function batchgeometry!(t::BatchedTLAS{Tri}, mesh::GeometryBasics.Mesh, _) where {Tri}
-    triangles = meshtriangles(Tri, mesh)
+    triangles = Raycore.meshtriangles(Tri, mesh)
     vertices = trianglevertices(triangles)
     blas = build_accel!(batchqueue(t.backend)) do ctx
         build_blas(ctx, vertices, UInt32.(0:length(vertices) - 1))
@@ -137,13 +137,13 @@ end
 function Base.push!(t::BatchedTLAS, geometry, transform::Mat4f = Mat4f(I);
                     instance_id::UInt32 = UInt32(0), instance_mask::UInt8 = UInt8(0xff),
                     opaque::Bool = true)
-    return push!(t, geometry, instancerecords([transform], [instance_id], instance_mask); opaque)
+    return push!(t, geometry, Raycore.instancerecords([transform], [instance_id], instance_mask); opaque)
 end
 
 function Base.push!(t::BatchedTLAS, geometry, transforms::AbstractVector{Mat4f};
                     instance_ids::Union{Nothing,AbstractVector{<:Integer}} = nothing,
                     instance_mask::UInt8 = UInt8(0xff), opaque::Bool = true)
-    records = instancerecords(transforms, instance_ids, instance_mask)
+    records = Raycore.instancerecords(transforms, instance_ids, instance_mask)
     return push!(t, geometry, records; opaque)
 end
 
@@ -175,30 +175,16 @@ function Raycore.update_transforms!(t::BatchedTLAS, handle::Raycore.TLASHandle,
     return nothing
 end
 
-function Raycore.update_transform!(t::BatchedTLAS, handle::Raycore.TLASHandle, transform)
-    b = requirebatch(t, handle, "update_transform!")
-    canonical = transform isa Mat3x4f ? transform : Raycore.mat4_to_mat3x4(transform)
-    return Raycore.update_transforms!(t, handle, fill(canonical, b.n))
-end
+Raycore.instancecount(t::BatchedTLAS, handle::Raycore.TLASHandle) = requirebatch(t, handle, "instancecount").n
 
-"""Map a flat instance range onto exactly one complete batch, before mutation."""
-function Raycore.update_instance_transforms!(t::BatchedTLAS, transforms::AbstractVector,
-                                             n_to_update::Integer, first_idx::Integer = 1)
-    n, i0 = Int(n_to_update), Int(first_idx)
-    n > 0 || return nothing
+function Raycore.instanceranges(t::BatchedTLAS)
+    ranges = Tuple{Raycore.TLASHandle,UnitRange{Int}}[]
     base = 0
     for b in t.instances
-        if i0 <= base + b.n
-            (i0 == base + 1 && n == b.n) || error(
-                "update_instance_transforms!: instances $(i0):$(i0 + n - 1) do not " *
-                "cover exactly one batch (batch at $(base + 1):$(base + b.n)). " *
-                "A $(nameof(typeof(t))) updates whole batches; address it by handle instead.")
-            return Raycore.update_transforms!(t, b.handle, transforms)
-        end
+        push!(ranges, (b.handle, base+1:base+b.n))
         base += b.n
     end
-    error("update_instance_transforms!: instance index $(i0) past the end " *
-          "($(base) instances in $(length(t.instances)) batches).")
+    return ranges
 end
 
 function Base.delete!(t::BatchedTLAS, handle::Raycore.TLASHandle)

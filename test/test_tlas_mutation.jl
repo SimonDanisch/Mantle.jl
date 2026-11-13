@@ -12,7 +12,7 @@ if Mantle.supports_hwtlas(TESTBACKEND)
     mesh = GeometryBasics.Mesh(Point3f[(0,0,0), (1,0,0), (0,1,0)],
                                GLTriangleFace[(1,2,3)])
     transforms = fill(Mat4f(I), 2)
-    records = Mantle.instancerecords(transforms, UInt32[11,12], UInt8(0x42))
+    records = Raycore.instancerecords(transforms, UInt32[11,12], UInt8(0x42))
     @test_throws ArgumentError push!(t, mesh, records; n=-1)
     @test_throws ArgumentError push!(t, mesh, records; n=3)
     @test_throws ArgumentError push!(t, mesh, transforms; instance_ids=UInt32[1])
@@ -34,7 +34,7 @@ if Mantle.supports_hwtlas(TESTBACKEND)
     @test Raycore.set_visible!(t, first, false)
     @test !t.dirty
     @test_throws ArgumentError Raycore.update_transforms!(t, second, transforms[1:1])
-    @test_throws ErrorException Raycore.update_instance_transforms!(t, transforms, 2, 1)
+    @test_throws ArgumentError Raycore.update_instance_transforms!(t, transforms, 2, 1)
     @test isempty(t.pending) && !t.transforms_dirty
     moved = Mat4f(1,0,0,0, 0,1,0,0, 0,0,1,0, 2,3,4,1)
     Raycore.update_instance_transforms!(t, fill(moved,2), 2, 2)

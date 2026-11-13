@@ -182,7 +182,7 @@ function write_grain_instances_kernel(positions, quats, radius::Float32, phys, r
     i <= length(positions) || return nothing   # the launch is whole workgroups
     @inbounds p = positions[i]
     @inbounds q = quats[i]
-    T = Mantle.Mat3x4f(Mantle.build_4x3_pervec(Mantle.quat_to_rot3x3(q), Vec3f(radius), p))
+    T = Mantle.build_4x3_pervec(Mantle.quat_to_rot3x3(q), Vec3f(radius), p)
     id = (i - 1) % UInt32
     @inbounds phys[i] = Raycore.InstanceRecord(T, id, UInt32(0x02))
     @inbounds rend[i] = Raycore.InstanceRecord(T, id, UInt32(0x04))

@@ -97,8 +97,8 @@ end
     # Past its last pair a lane would read the next pair in the parent, which is a
     # real overlapping one, and write its result into the canary.
     @testset "narrow_phase_kernel" begin
-        tr = [(1f0, 0f0, 0f0, 0f0,  0f0, 1f0, 0f0, 0f0,  0f0, 0f0, 1f0, 0f0),
-              (1f0, 0f0, 0f0, 1.9f0, 0f0, 1f0, 0f0, 0f0,  0f0, 0f0, 1f0, 0f0)]
+        tr = [Mantle.Mat3x4f(1f0, 0f0, 0f0, 0f0,  0f0, 1f0, 0f0, 0f0,  0f0, 0f0, 1f0, 0f0),
+              Mantle.Mat3x4f(1f0, 0f0, 0f0, 1.9f0, 0f0, 1f0, 0f0, 0f0,  0f0, 0f0, 1f0, 0f0)]
         t = Mantle.Buffer(dev, tr)
         n = 5
         pp, pairs = tailed(dev, n, 64, (Int32(1), Int32(2)))
@@ -113,8 +113,8 @@ end
 
     # The same over-read, which here bumps both grains' counters once per lane.
     @testset "narrow_phase_contacts_kernel" begin
-        tr = [(1f0, 0f0, 0f0, 0f0,  0f0, 1f0, 0f0, 0f0,  0f0, 0f0, 1f0, 0f0),
-              (1f0, 0f0, 0f0, 1.9f0, 0f0, 1f0, 0f0, 0f0,  0f0, 0f0, 1f0, 0f0)]
+        tr = [Mantle.Mat3x4f(1f0, 0f0, 0f0, 0f0,  0f0, 1f0, 0f0, 0f0,  0f0, 0f0, 1f0, 0f0),
+              Mantle.Mat3x4f(1f0, 0f0, 0f0, 1.9f0, 0f0, 1f0, 0f0, 0f0,  0f0, 0f0, 1f0, 0f0)]
         t = Mantle.Buffer(dev, tr)
         n = 3
         pp, pairs = tailed(dev, n, 64, (Int32(1), Int32(2)))
