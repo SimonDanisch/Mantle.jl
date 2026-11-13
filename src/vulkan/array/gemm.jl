@@ -37,15 +37,18 @@ function LinearAlgebra.mul!(C::LavaArray{T,1}, A::AbstractVecOrMat,
     gemmlaunch!(C, A, B, M, 1, K, T(α), T(β))
 end
 
-# Disambiguate against the dense methods above; GPUArrays handles Diagonal
-# operands, including scaling and dimension checks.
+# Disambiguate against the dense methods above; GPUArrays' own Diagonal methods
+# do the work, including scaling and dimension checks, reached through `invoke`.
 function LinearAlgebra.mul!(C::LavaArray{T,2},
                             D::Diagonal{<:Any, <:AbstractGPUArray},
                             B::Union{AbstractGPUArray,
                                      Adjoint{S, <:AbstractGPUArray{S}},
                                      Transpose{S, <:AbstractGPUArray{S}}},
                             α::Number, β::Number) where {T<:Number, S}
-    return GPUArrays.generic_diagonal_mul!(C, D, B, α, β)
+    return invoke(LinearAlgebra.mul!,
+                  Tuple{AbstractGPUVecOrMat, Diagonal{<:Any, <:AbstractGPUArray},
+                        typeof(B), Number, Number},
+                  C, D, B, α, β)
 end
 
 function LinearAlgebra.mul!(C::LavaArray{T,2},
@@ -54,14 +57,20 @@ function LinearAlgebra.mul!(C::LavaArray{T,2},
                                      Transpose{S, <:AbstractGPUArray{S}}},
                             D::Diagonal{<:Any, <:AbstractGPUArray},
                             α::Number, β::Number) where {T<:Number, S}
-    return GPUArrays.generic_diagonal_mul!(C, A, D, α, β)
+    return invoke(LinearAlgebra.mul!,
+                  Tuple{AbstractGPUVecOrMat, typeof(A),
+                        Diagonal{<:Any, <:AbstractGPUArray}, Number, Number},
+                  C, A, D, α, β)
 end
 
 function LinearAlgebra.mul!(C::LavaArray{T,2},
                             A::Diagonal{<:Any, <:AbstractGPUArray},
                             B::Diagonal{<:Any, <:AbstractGPUArray},
                             α::Number, β::Number) where {T<:Number}
-    return GPUArrays.generic_diagonal_mul!(C, A, B, α, β)
+    return invoke(LinearAlgebra.mul!,
+                  Tuple{AbstractGPUArray, Diagonal{<:Any, <:AbstractGPUArray},
+                        Diagonal{<:Any, <:AbstractGPUArray}, Number, Number},
+                  C, A, B, α, β)
 end
 
 """
