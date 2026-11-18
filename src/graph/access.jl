@@ -249,9 +249,12 @@ struct Summary
 end
 Summary(touches, ci, world) = Summary(touches, ci, world, Core.CodeInstance[])
 
+# `0x01` is the `dispatch_status` bit Julia names `METHOD_SIG_LATEST_WHICH` (in
+# `Base.StaticData` on 1.12, `Compiler.ReinferUtils` on 1.13): the method is still the
+# one dispatch picks for its own signature.
 holds(ci::Core.CodeInstance, world::UInt) =
     (@atomic :monotonic ci.max_world) >= world &&
-    !iszero(ci.def.def.dispatch_status & Base.StaticData.METHOD_SIG_LATEST_WHICH)
+    !iszero(ci.def.def.dispatch_status & 0x01)
 holds(s::Summary, world::UInt) =
     (s.ci === nothing ? s.world == world : holds(s.ci, world)) &&
     all(ci -> holds(ci, world), s.dependencies)
