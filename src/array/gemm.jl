@@ -776,8 +776,10 @@ end
 # Scalar staged GEMM uses Float32 shared tiles with explicit strides and scalar
 # register accumulators. WARP decomposes indices; no subgroup operation requires
 # it to match the native subgroup width.
-"""Scalar GEMM block dimensions, also used by DNNKernels.planewise_worth."""
-const SGEMM_BM, SGEMM_BN, SGEMM_BK = 64, 64, 32
+# Scalar GEMM block dimensions, also used by DNNKernels.planewise_worth.
+const SGEMM_BM = 64
+const SGEMM_BN = 64
+const SGEMM_BK = 32
 
 """Minimum scalar GEMM tile count, also used by DNNKernels.planewise_worth."""
 const SGEMM_MINTILES = 16
