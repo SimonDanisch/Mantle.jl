@@ -167,8 +167,7 @@ host. `splitidx` stays: it is a 32-bit sequence, cheaper than the 64-bit one.
 """
 
 using Test, KernelAbstractions
-using KernelInterface: AcceleratedMatrix, MatrixA, MatrixB, Accumulator, MatrixShape,
-    SubgroupScope
+using Lava: AcceleratedMatrix, MatrixA, MatrixB, Accumulator, MatrixShape, SubgroupScope
 using Mantle: splitidx
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions

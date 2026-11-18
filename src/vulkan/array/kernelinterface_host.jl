@@ -1,6 +1,6 @@
 # Host side of `KernelInterface` (KI) for `LavaDevice`: the methods that need a
 # device. Device-side intrinsics are in Lava's
-# `device/kernelinterface.jl`. `caps(::LavaDevice)` is `KI.caps` (imported in
+# `device/kernelinterface.jl`. `caps(::LavaDevice)` is `Lava.caps` (imported in
 # `Mantle.jl`); KI derives `matrix_shapes`, `supports`, `bestshape` and
 # `wggranularity` from it.
 
@@ -16,16 +16,12 @@ KI.supports_float64(::LavaDevice) = true
 # the device-side methods are generated from.
 KI.supports_subgroups(::LavaDevice) = true
 KI.supports_shuffle(::LavaDevice, ::Type{T}) where {T} = T in KI_SHFL_TYPES
-KI.shfl_types(::LavaDevice) = collect(KI_SHFL_TYPES)
-
-# Reduce-add has its own list: it is a separate capability from shuffles.
-KI.sub_group_reduce_add_types(::LavaDevice) = collect(KI_REDUCE_ADD_TYPES)
 
 # `VK_NV_cooperative_matrix2` features as reported at device creation.
-KI.supports_tensor_addressing(b::LavaDevice) = b.coopmat2.tensor_addressing
-KI.supports_coopmat_perelement(b::LavaDevice) = b.coopmat2.per_element_operations
-KI.supports_coopmat_reduce(b::LavaDevice) = b.coopmat2.reductions
-KI.supports_flexible_coopmat_shapes(b::LavaDevice) = b.coopmat2.flexible_dimensions
+Lava.supports_tensor_addressing(b::LavaDevice) = b.coopmat2.tensor_addressing
+Lava.supports_coopmat_perelement(b::LavaDevice) = b.coopmat2.per_element_operations
+Lava.supports_coopmat_reduce(b::LavaDevice) = b.coopmat2.reductions
+Lava.supports_flexible_coopmat_shapes(b::LavaDevice) = b.coopmat2.flexible_dimensions
 
 """
     KI.sub_group_size(backend) -> Int

@@ -64,7 +64,7 @@ end
         m <<= 1
     end
     out[i] = acc
-    ref[i] = KI.sub_group_reduce_add(v)
+    ref[i] = KI.sub_group_reduce(+, v)
 end
 
 # `shfl` with a per-lane (non-uniform) selector — the case that distinguishes it
@@ -89,7 +89,7 @@ end
 
 @kernel function reduce_t!(out)
     i = @index(Global, Linear)
-    out[i] = KI.sub_group_reduce_add(eltype(out)(sglane() + UInt32(1)))
+    out[i] = KI.sub_group_reduce(+, eltype(out)(sglane() + UInt32(1)))
 end
 
 @testset "subgroup shuffle family" begin
@@ -138,7 +138,7 @@ end
         @test Array(rot) == Float32[mod(l + 1, S) for l in hlane]
     end
 
-    @testset "a butterfly reduction agrees with sub_group_reduce_add" begin
+    @testset "a butterfly reduction agrees with sub_group_reduce(+)" begin
         x = KA.allocate(be, Float32, N)
         copyto!(x, Float32.(1:N))
         out, ref = KA.zeros(be, Float32, N), KA.zeros(be, Float32, N)
@@ -183,7 +183,9 @@ end
             got = Array(out)
             @test all(got[i] == T(l + 1) for (i, l) in enumerate(hlane) if l <= S - 2)
         end
-        for T in KI.sub_group_reduce_add_types(be)
+        # natively where the backend has the instruction, by KI's shuffles otherwise;
+        # integer types whose sum `S(S+1)/2` fits
+        for T in filter(T -> T <: AbstractFloat || typemax(T) >= S * (S + 1) ÷ 2, shuffled)
             out = KA.zeros(be, T, N)
             reduce_t!(be, WG)(out; ndrange=N)
             KA.synchronize(be)

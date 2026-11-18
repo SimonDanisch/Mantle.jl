@@ -22,7 +22,7 @@ import LinearAlgebra
 import Libdl
 using Mantle: Pool, Buffers, Images, Persistent, TransientBuffer, DeviceArray,
     DeviceInfo, ROCmAPI, register_backend!, selectdevice, adopt!
-using KernelInterface: DeviceCaps, MatrixShape
+using Mantle: DeviceCaps, MatrixShape, SubgroupScope
 
 const Managed = AMDGPU.Managed
 const HIPBuffer = AMDGPU.Mem.HIPBuffer
@@ -914,7 +914,7 @@ function Mantle.caps(d::ROCmDevice)
         Int(p.maxThreadsPerMultiProcessor) ÷ Int(p.warpSize),
         NTuple{4,Int}[],                    # wggran: no granularity table
         coopmat ? [MatrixShape(Float16, Float32, 16, 16, 16,
-                               KI.SubgroupScope())] : MatrixShape[],
+                               SubgroupScope())] : MatrixShape[],
     )
 end
 
@@ -941,7 +941,7 @@ KI.kernel_function(d::ROCmDevice, f::F, tt::TT = Tuple{}; kwargs...) where {F,TT
 KI.record_event(d::ROCmDevice) = (adopt!(d); KI.record_event(ROC))
 KI.wait_event(d::ROCmDevice, ev::AMDGPU.HIP.HIPEvent) = (adopt!(d); KI.wait_event(ROC, ev))
 for f in (:functional, :supports_float64, :supports_atomics, :supports_unified,
-          :supports_subgroups, :shfl_types, :sub_group_reduce_add_types)
+          :supports_subgroups)
     @eval KI.$f(::ROCmDevice) = KI.$f(ROC)
 end
 # Device queries read the current device, which `adopt!` makes this one.

@@ -38,12 +38,11 @@ AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
 MantleROCmExt = "AMDGPU"
 
 [sources]
+Lava = {url = "https://github.com/SimonDanisch/Lava.jl", rev = "main"}
 Raycore = {url = "https://github.com/JuliaGeometry/Raycore.jl", rev = "sd/with-texture"}
 
 [compat]
 GLFW = "4"
-# KernelInterface needs the local matrix-vocabulary branch until registered;
-# develop KernelAbstractions/lib/KernelInterface and Lava locally.
 GPUCompiler = "1, 2"
 GPUToolbox = "3.3"
 KernelInterface = "0.4"

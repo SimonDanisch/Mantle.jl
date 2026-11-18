@@ -64,8 +64,8 @@ function fft_kernel!(
         dst, src, ::Val{N}, ::Val{LEAD}, ::Val{SIGN}, ::Val{SKEW},
         ::Val{NB}) where {N,LEAD,SIGN,SKEW,NB}
     # Shared extents must be compile-time constants; SKEW adds i÷32 padding.
-    sre = KI.localmemory(Float32, Val((NB * (SKEW ? N + N ÷ 32 : N),)), Val(1))
-    sim = KI.localmemory(Float32, Val((NB * (SKEW ? N + N ÷ 32 : N),)), Val(2))
+    sre = KI.localmemory(Float32, Val((NB * (SKEW ? N + N ÷ 32 : N),)))
+    sim = KI.localmemory(Float32, Val((NB * (SKEW ? N + N ÷ 32 : N),)))
     @inline sx(i) = SKEW ? i + i ÷ 32 : i
 
     lid = KI.get_local_id().x - 1          # 0 .. NB*T-1
@@ -442,8 +442,8 @@ fftmixed_kernel(RS::Tuple, sign::Int) = MixedFFTKernel{RS,sign}()
         end)
     end
     return quote
-        sre = KI.localmemory(Float32, Val(($N,)), Val(1))
-        sim = KI.localmemory(Float32, Val(($N,)), Val(2))
+        sre = KI.localmemory(Float32, Val(($N,)))
+        sim = KI.localmemory(Float32, Val(($N,)))
         tid = KI.get_local_id().x - 1
         blk = KI.get_group_id().x - 1
         base = blk * $N

@@ -158,50 +158,42 @@ clamp01(x) = clamp(x, 0.0f0, 1.0f0)
         @test result[4] == -1f0
     end
 
-    @testset "min/max non-propagating (matches GPU convention)" begin
-        # Julia 1.12's `Base.min`/`Base.max` lower to `llvm.minimum`/`maximum`
-        # (NaN-propagating). GLSL.std.450 has no propagating op; overlaying
-        # to `llvm.minnum`/`maxnum` (non-propagating, IEEE 754-2008) matches
-        # CUDA/ROCm/SPIRVIntrinsics. Lava's emitter errors on any leaked
-        # `llvm.minimum`/`maximum`, so these kernels must compile AND return
-        # the non-NaN operand when one input is NaN.
-        @kernel function min_kernel!(out, xs, ys)
+    @testset "min/max are Julia's; @fastmath min is the native one" begin
+        # `Base.min`/`max` give the host's answer on every backend: a NaN operand gives
+        # NaN, and -0.0 < 0.0. The native minimum (minNum, GLSL.std.450 NMin) is
+        # `@fastmath min` (`Base.FastMath.min_fast`), for loops that never see a NaN.
+        @kernel function minmax_kernel!(mi, ma, xs, ys)
             i = @index(Global, Linear)
-            @inbounds out[i] = min(xs[i], ys[i])
+            @inbounds mi[i] = min(xs[i], ys[i])
+            @inbounds ma[i] = max(xs[i], ys[i])
         end
-        @kernel function max_kernel!(out, xs, ys)
+        @kernel function fastmath_minmax!(mi, ma, xs, ys)
             i = @index(Global, Linear)
-            @inbounds out[i] = max(xs[i], ys[i])
+            @inbounds mi[i] = @fastmath min(xs[i], ys[i])
+            @inbounds ma[i] = @fastmath max(xs[i], ys[i])
         end
-        xs = Mantle.devicearray(TESTBACKEND, Float32[1f0, NaN32, NaN32, 3f0, -1f0])
-        ys = Mantle.devicearray(TESTBACKEND, Float32[NaN32, 2f0, NaN32, 5f0, -2f0])
-        mi = Mantle.devicearray(TESTBACKEND, zeros(Float32, 5))
-        ma = Mantle.devicearray(TESTBACKEND, zeros(Float32, 5))
-        min_kernel!(TESTBACKEND)(mi, xs, ys; ndrange=5)
-        max_kernel!(TESTBACKEND)(ma, xs, ys; ndrange=5)
-        KA.synchronize(TESTBACKEND)
-        r_min = Array(mi); r_max = Array(ma)
-        # Non-NaN wins where exactly one operand is NaN; both-NaN → NaN.
-        @test r_min[1] == 1f0
-        @test r_min[2] == 2f0
-        @test isnan(r_min[3])
-        @test r_min[4] == 3f0
-        @test r_min[5] == -2f0
-        @test r_max[1] == 1f0
-        @test r_max[2] == 2f0
-        @test isnan(r_max[3])
-        @test r_max[4] == 5f0
-        @test r_max[5] == -1f0
+        for T in testeltypes(Float16, Float32, Float64)
+            x = T[1, NaN, NaN, 3, -1, 0.0, -0.0, Inf, -Inf]
+            y = T[NaN, 2, NaN, 5, -2, -0.0, 0.0, 1, 1]
+            xs, ys = Mantle.devicearray(TESTBACKEND, x), Mantle.devicearray(TESTBACKEND, y)
+            mi = Mantle.devicearray(TESTBACKEND, zeros(T, length(x)))
+            ma = Mantle.devicearray(TESTBACKEND, zeros(T, length(x)))
+            minmax_kernel!(TESTBACKEND)(mi, ma, xs, ys; ndrange = length(x))
+            KA.synchronize(TESTBACKEND)
+            # `isequal`: NaN equals NaN, and -0.0 differs from 0.0
+            @test isequal(Array(mi), min.(x, y))
+            @test isequal(Array(ma), max.(x, y))
 
-        # @fastmath min/max must also reach the overlay, not llvm.minimum.
-        @kernel function fastmath_min!(out, xs, ys)
-            i = @index(Global, Linear)
-            @inbounds out[i] = @fastmath min(xs[i], ys[i])
+            # only where minNum and Julia agree: no NaN, no pair of zeros
+            fx, fy = T[1, 3, -1, 2, -Inf], T[2, 5, -2, -3, 1]
+            fxs, fys = Mantle.devicearray(TESTBACKEND, fx), Mantle.devicearray(TESTBACKEND, fy)
+            fmi = Mantle.devicearray(TESTBACKEND, zeros(T, length(fx)))
+            fma = Mantle.devicearray(TESTBACKEND, zeros(T, length(fx)))
+            fastmath_minmax!(TESTBACKEND)(fmi, fma, fxs, fys; ndrange = length(fx))
+            KA.synchronize(TESTBACKEND)
+            @test Array(fmi) == min.(fx, fy)
+            @test Array(fma) == max.(fx, fy)
         end
-        fout = Mantle.devicearray(TESTBACKEND, zeros(Float32, 5))
-        fastmath_min!(TESTBACKEND)(fout, xs, ys; ndrange=5)
-        KA.synchronize(TESTBACKEND)
-        @test Array(fout)[1] == 1f0  # compiles without emitter error
     end
 
     @testset "saturating integer arith" begin
@@ -301,72 +293,92 @@ clamp01(x) = clamp(x, 0.0f0, 1.0f0)
         @test gpu ≈ cpu
     end
 
-    @testset "^ overlay (Base.:(^) → llvm.pow → GLSL Pow)" begin
-        # `Base.:(^)(::Float32, ::Float32)` is overlaid in device/math.jl via
-        # `@_lava_binary_intrinsic ... "llvm.pow"`, matching SPIRVIntrinsics'
-        # `Base.:(^) → OpenCL pow` and AMDGPU's `Base.:(^) → __ocml_pow`.
-        # Lock that in: bypass Julia's CPU `^` (which uses Float64 intermediate
-        # `power_by_squaring` and a `throw_exp_domainerror` stub) and hit the
-        # direct llvm.pow → GLSL Pow path.
+    @testset "^ gives the host's answer" begin
+        # Vulkan's native Pow is undefined for a negative base and for x = 0, y <= 0, so
+        # Lava answers Base's special cases itself and keeps the native Pow for x > 0;
+        # `@fastmath x^y` is the native Pow alone. Where the host throws a DomainError
+        # (negative base, non-integer exponent) there is no answer to compare with: Lava
+        # gives NaN, Metal's `pow` C's value.
         @kernel function pow_kernel!(out, x, y)
             i = @index(Global, Linear)
             @inbounds out[i] = x[i] ^ y[i]
         end
-
-        # Float32, positive base — all cases well-defined in GLSL Pow.
-        x = Mantle.devicearray(TESTBACKEND, Float32[2f0, 3f0, 0.5f0, 10f0, 1f0])
-        y = Mantle.devicearray(TESTBACKEND, Float32[3f0, 0.5f0, -2f0, 0f0, 100f0])
-        out = Mantle.devicearray(TESTBACKEND, zeros(Float32, 5))
-        pow_kernel!(TESTBACKEND)(out, x, y; ndrange=5)
-        KA.synchronize(TESTBACKEND)
-        cpu = Float32[2f0^3f0, 3f0^0.5f0, 0.5f0^-2f0, 10f0^0f0, 1f0^100f0]
-        @test Array(out) ≈ cpu rtol=1f-5
-
-        # Float64, where the device has it. On Vulkan this routes through Lava's
-        # downcast overlay (`^(::Float64, ::Float64) = Float64(Float32(x) ^
-        # Float32(y))`), because GLSL.std.450 Pow does not support f64, which is
-        # why the tolerance is single precision.
-        for T in testeltypes(Float64)
-            xd = Mantle.devicearray(TESTBACKEND, T[2.0, 3.0, 0.5])
-            yd = Mantle.devicearray(TESTBACKEND, T[3.0, 0.5, -2.0])
-            outd = Mantle.devicearray(TESTBACKEND, zeros(T, 3))
-            pow_kernel!(TESTBACKEND)(outd, xd, yd; ndrange=3)
+        function hostpow(x, y)
+            try
+                x^y
+            catch err
+                err isa DomainError || rethrow()
+                nothing
+            end
+        end
+        X = [-2, -0.5, -0.0, 0.0, 0.5, 1, 2, 3.7, Inf, -Inf, NaN]
+        Y = [-3, -2, -1, -0.5, 0, 0.5, 1, 2, 3, 2.5, 5, -5, 7, 30, Inf, -Inf, NaN]
+        for T in testeltypes(Float16, Float32, Float64)
+            x, y = T[a for a in X for b in Y], T[b for a in X for b in Y]
+            out = Mantle.devicearray(TESTBACKEND, zeros(T, length(x)))
+            pow_kernel!(TESTBACKEND)(out, Mantle.devicearray(TESTBACKEND, x), Mantle.devicearray(TESTBACKEND, y); ndrange = length(x))
             KA.synchronize(TESTBACKEND)
-            @test Array(outd) ≈ [8.0, sqrt(3.0), 4.0] rtol=1e-5
+            want = hostpow.(x, y)
+            # the native Pow's precision for x > 0: Vulkan only bounds it loosely
+            rtol = T === Float64 ? 1e-13 : T === Float32 ? 1f-5 : Float16(1e-3)
+            bad = [(a, b, g, w) for (a, b, g, w) in zip(x, y, Array(out), want)
+                   if w !== nothing && !(isequal(g, w) || isapprox(g, w; rtol))]
+            @test isempty(bad)
         end
 
-        # Negative base with integer exponent — must take the
-        # `power_by_squaring` path, NOT llvm.pow (GLSL Pow is spec-undefined
-        # for x<0). Julia's `Base.:(^)(::Float32, ::Integer)` handles this
-        # correctly; the overlay does not touch the Integer method.
-        @kernel function pow_int_kernel!(out, x, y::Int32)
+        # integer exponents: negative bases keep their sign
+        @kernel function pow_int_kernel!(out, x, n)
             i = @index(Global, Linear)
-            @inbounds out[i] = x[i] ^ y
+            @inbounds out[i] = x[i] ^ n[i]
         end
-        xn = Mantle.devicearray(TESTBACKEND, Float32[-2f0, -3f0, 2f0, 0f0, -1f0])
-        on = Mantle.devicearray(TESTBACKEND, zeros(Float32, 5))
-        pow_int_kernel!(TESTBACKEND)(on, xn, Int32(3); ndrange=5)
+        xn = Float32[-2, -3, 2, 0, -1, -0.0, -2, 0.5]
+        nn = Int32[3, 4, 5, 3, 7, -3, -5, -2]
+        on = Mantle.devicearray(TESTBACKEND, zeros(Float32, length(xn)))
+        pow_int_kernel!(TESTBACKEND)(on, Mantle.devicearray(TESTBACKEND, xn), Mantle.devicearray(TESTBACKEND, nn); ndrange = length(xn))
         KA.synchronize(TESTBACKEND)
-        @test Array(on) == Float32[-8, -27, 8, 0, -1]
+        @test all(isequal(g, w) || isapprox(g, w; rtol = 1f-6) for (g, w) in zip(Array(on), xn .^ nn))
+        @test isequal(Array(on)[6], -Inf32)   # (-0.0)^-3
 
-        # Even integer exponent — sign must flip back
-        oe = Mantle.devicearray(TESTBACKEND, zeros(Float32, 5))
-        pow_int_kernel!(TESTBACKEND)(oe, xn, Int32(4); ndrange=5)
-        KA.synchronize(TESTBACKEND)
-        @test Array(oe) == Float32[16, 81, 16, 0, 1]
-
-        # `@fastmath ^` on Julia 1.12 rewrites to a fast-math `Base.:(^)`
-        # call, which hits the same overlay. Compiles AND gives numeric result.
         @kernel function fastmath_pow!(out, x, y)
             i = @index(Global, Linear)
             @inbounds out[i] = @fastmath x[i] ^ y[i]
         end
-        xf = Mantle.devicearray(TESTBACKEND, Float32[2f0, 3f0])
-        yf = Mantle.devicearray(TESTBACKEND, Float32[3f0, 2f0])
-        of = Mantle.devicearray(TESTBACKEND, zeros(Float32, 2))
-        fastmath_pow!(TESTBACKEND)(of, xf, yf; ndrange=2)
+        xf = Mantle.devicearray(TESTBACKEND, Float32[2, 3, 0.5])
+        yf = Mantle.devicearray(TESTBACKEND, Float32[3, 0.5, 2])
+        of = Mantle.devicearray(TESTBACKEND, zeros(Float32, 3))
+        fastmath_pow!(TESTBACKEND)(of, xf, yf; ndrange = 3)
         KA.synchronize(TESTBACKEND)
-        @test Array(of) ≈ Float32[8f0, 9f0] rtol=1f-5
+        @test Array(of) ≈ Float32[8, sqrt(3), 0.25] rtol = 1f-5
+    end
+
+    @testset "clamp, hypot and complex abs give the host's answer" begin
+        @kernel function clamp_kernel!(out, x)
+            i = @index(Global, Linear)
+            @inbounds out[i] = clamp(x[i], zero(eltype(x)), one(eltype(x)))
+        end
+        @kernel function hypot_kernel!(h, c, x, y)
+            i = @index(Global, Linear)
+            @inbounds h[i] = hypot(x[i], y[i])
+            @inbounds c[i] = abs(complex(x[i], y[i]))
+        end
+        for T in testeltypes(Float32, Float64)
+            # a NaN passes through, as Base's comparisons pass it
+            cx = T[NaN, -0.0, 0.0, -1, 2, 0.25, Inf, -Inf]
+            co = Mantle.devicearray(TESTBACKEND, zeros(T, length(cx)))
+            clamp_kernel!(TESTBACKEND)(co, Mantle.devicearray(TESTBACKEND, cx); ndrange = length(cx))
+            KA.synchronize(TESTBACKEND)
+            @test isequal(Array(co), clamp.(cx, zero(T), one(T)))
+
+            # scaled: neither overflows nor underflows where the result is representable
+            big, tiny = T === Float32 ? (3f20, 3f-25) : (3e200, 3e-200)
+            x, y = T[3, big, tiny, Inf, NaN, -4, 0], T[4, 4big/3, 4tiny/3, NaN, Inf, 3, 0]
+            h = Mantle.devicearray(TESTBACKEND, zeros(T, length(x)))
+            c = Mantle.devicearray(TESTBACKEND, zeros(T, length(x)))
+            hypot_kernel!(TESTBACKEND)(h, c, Mantle.devicearray(TESTBACKEND, x), Mantle.devicearray(TESTBACKEND, y); ndrange = length(x))
+            KA.synchronize(TESTBACKEND)
+            @test all(isapprox.(Array(h), hypot.(x, y); rtol = 2eps(T), nans = true))
+            @test all(isapprox.(Array(c), abs.(complex.(x, y)); rtol = 2eps(T), nans = true))
+        end
     end
 
     @testset "round halfway (round-to-nearest-even)" begin
@@ -388,6 +400,14 @@ clamp01(x) = clamp(x, 0.0f0, 1.0f0)
         cpu = Float32[round(x) for x in Float32[0.5, 1.5, 2.5, 3.5, -0.5, -1.5, -2.5, 4.5]]
         # Expected (round-to-even): 0, 2, 2, 4, -0, -2, -2, 4
         @test gpu == cpu
+
+        @kernel function round_away_kernel!(out, xs)
+            i = @index(Global, Linear)
+            @inbounds out[i] = round(xs[i], RoundNearestTiesAway)
+        end
+        round_away_kernel!(TESTBACKEND)(out, xs; ndrange=8)
+        KA.synchronize(TESTBACKEND)
+        @test Array(out) == round.(Float32[0.5, 1.5, 2.5, 3.5, -0.5, -1.5, -2.5, 4.5], RoundNearestTiesAway)
     end
 end
 

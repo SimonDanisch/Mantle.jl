@@ -1,5 +1,5 @@
 using Test, KernelAbstractions
-using KernelInterface: AcceleratedMatrix, MatrixA, MatrixB, Accumulator
+using Lava: AcceleratedMatrix, MatrixA, MatrixB, Accumulator
 include(joinpath(@__DIR__, "testbackend.jl"))
 
 # Can a cooperative matrix be loaded out of `@localmem`?

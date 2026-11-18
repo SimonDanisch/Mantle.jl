@@ -4,47 +4,44 @@ module Mantle
 using ColorTypes: RGBA, BGRA, Colorant
 export RGBA, BGRA
 
-using KernelInterface: MatrixUse, MatrixA, MatrixB, Accumulator,
-    MatrixScope, SubgroupScope, WorkgroupScope, MatrixShape, DeviceCaps
-using KernelInterface: sub_group_reduce_add
-using KernelInterface: CoopMatrix, AcceleratedMatrix, WorkgroupMatrix,
-    matrixuse, matrixscope, coopmat_load, coopmat_store, coopmat_muladd,
-    coopmat_mul, coopmat_add,
-    coopmat_zero, coopmat_undef, coopmat_convert, coopmat_length,
-    coopmat_getcomp, coopmat_setcomp
-using KernelInterface: TensorLayout, TensorView, TENSOR_CLAMP_UNDEFINED,
-    TENSOR_CLAMP_CONSTANT, TENSOR_CLAMP_TO_EDGE, tensor_layout, tensor_setdim,
-    tensor_setstride, tensor_setclampvalue, tensor_slice, tensor_view, tensor_load,
-    tensor_store
-using KernelInterface: vertex_index, instance_index, frag_coord, frag_coord_x,
-    frag_coord_y, frag_coord_z, frag_coord_w, frag_coord_xy, dFdx, dFdy,
-    set_point_size!, sample_texture_2d, emit_vertex!, end_primitive!,
-    primitive_id_in, clip_y, discard
+# The device vocabulary is Lava's (`Lava/src/vocabulary/`); every backend lowers it,
+# Metal's in `metal/`. Lava loads on every platform, also without a Vulkan loader.
+import Lava
+using Lava: MatrixUse, MatrixA, MatrixB, Accumulator, MatrixScope, SubgroupScope,
+    WorkgroupScope, MatrixShape, DeviceCaps
+using Lava: CoopMatrix, AcceleratedMatrix, WorkgroupMatrix, matrixuse, matrixscope,
+    coopmat_load, coopmat_store, coopmat_muladd, coopmat_mul, coopmat_add, coopmat_zero,
+    coopmat_undef, coopmat_convert, coopmat_length, coopmat_getcomp, coopmat_setcomp
+using Lava: TensorLayout, TensorView, TENSOR_CLAMP_UNDEFINED, TENSOR_CLAMP_CONSTANT,
+    TENSOR_CLAMP_TO_EDGE, tensor_layout, tensor_setdim, tensor_setstride,
+    tensor_setclampvalue, tensor_slice, tensor_view, tensor_load, tensor_store
+using Lava: vertex_index, instance_index, frag_coord, frag_coord_x, frag_coord_y,
+    frag_coord_z, frag_coord_w, frag_coord_xy, dFdx, dFdy, set_point_size!,
+    sample_texture_2d, emit_vertex!, end_primitive!, primitive_id_in, clip_y, discard
 export vertex_index, instance_index, frag_coord, frag_coord_x, frag_coord_y,
     frag_coord_z, frag_coord_w, frag_coord_xy, dFdx, dFdy, set_point_size!,
     sample_texture_2d, emit_vertex!, end_primitive!, primitive_id_in, clip_y,
     discard
-using KernelInterface: VertexIndex, wantsvertexindex
+using Lava: VertexIndex, wantsvertexindex
 export VertexIndex
-using KernelInterface: MeshConfig, ObjectConfig, PrimitiveEmitter, NativeEmitter,
-    MeshEmitter, emit!, endprimitive!, set_mesh_vertex!, set_mesh_triangle!,
-    set_mesh_line!, set_mesh_point!, set_mesh_primitive_data!, set_mesh_outputs!,
-    set_mesh_groups!, mesh_thread_index, mesh_group_index
-using KernelInterface: nvertices, nprimitives
-using KernelInterface: Flat, isflat, unflat, flatnames, smoothnames, valuetypes,
-    GeometryConfig, inputvertices
+using Lava: MeshConfig, ObjectConfig, PrimitiveEmitter, NativeEmitter, MeshEmitter, emit!,
+    endprimitive!, set_mesh_vertex!, set_mesh_triangle!, set_mesh_line!, set_mesh_point!,
+    set_mesh_primitive_data!, set_mesh_outputs!, set_mesh_groups!, mesh_thread_index,
+    mesh_group_index
+using Lava: nvertices, nprimitives
+using Lava: Flat, isflat, unflat, flatnames, smoothnames, valuetypes, GeometryConfig,
+    inputvertices
 export MeshConfig, ObjectConfig, PrimitiveEmitter, NativeEmitter, MeshEmitter,
     emit!, endprimitive!, set_mesh_vertex!, set_mesh_triangle!, set_mesh_line!,
     set_mesh_point!, set_mesh_primitive_data!, set_mesh_outputs!, set_mesh_groups!,
     mesh_thread_index, mesh_group_index
 export Flat, isflat, unflat, GeometryConfig
 
-using KernelInterface: primitivevertices,
-    Topology, TriangleList, TriangleStrip, LineList,
-    LineStrip, PointList, PatchList, LineListAdjacency, LineStripAdjacency
-using KernelInterface: primitivestride, primitivecount, firstinputvertex
+using Lava: primitivevertices, Topology, TriangleList, TriangleStrip, LineList, LineStrip,
+    PointList, PatchList, LineListAdjacency, LineStripAdjacency
+using Lava: primitivestride, primitivecount, firstinputvertex
 # Extended with Device methods.
-import KernelInterface: supports, bestshape, caps, matrix_shapes, wggranularity
+import Lava: supports, bestshape, caps, matrix_shapes, wggranularity
 
 import KernelInterface
 const KI = KernelInterface
@@ -344,7 +341,7 @@ import Vulkan as VK
 @static if Sys.isapple()
     using Metal: MtlArray
     using Metal.ObjectiveC: NSArray
-    using KernelInterface: DeviceCaps, MatrixShape, MatrixScope, SubgroupScope
+    using Lava: DeviceCaps, MatrixShape, MatrixScope, SubgroupScope
     # Extend Raycore's traversal interface.
     import Raycore: closest_hit, any_hit, sync!, world_bound, n_geometries,
         n_instances, update_transforms!, update_transform!, wait_for_gpu!

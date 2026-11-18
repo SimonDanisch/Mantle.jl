@@ -542,7 +542,6 @@ include(joinpath(@__DIR__, "test_precompile_statements.jl"))
 include(joinpath(@__DIR__, "test_storebits.jl"))
 include(joinpath(@__DIR__, "test_collection_policy.jl"))
 include(joinpath(@__DIR__, "test_compilation_cache.jl"))
-include(joinpath(@__DIR__, "test_kernel_preparation.jl"))
 include(joinpath(@__DIR__, "test_video_bitstream.jl"))
 if _VULKAN_OK
     include(joinpath(@__DIR__, "vulkan", "test_collection_policy.jl"))
@@ -584,7 +583,7 @@ end
 # Also needs no GPU, and that is the point of the design rather than a happy
 # accident: everything the geometry-to-mesh lowering does except read one builtin
 # is portable code over an output object, so `runprimitive` plus
-# `KernelInterface.HostMeshOutput` runs what a mesh stage runs and shows the
+# `Lava.HostMeshOutput` runs what a mesh stage runs and shows the
 # vertices, indices and per-primitive values a frame can only imply.
 include(joinpath(@__DIR__, "test_lowering.jl"))
 # Whether a ray query through an accel is a call already; no device needed.
@@ -677,6 +676,7 @@ foreachbackend(joinpath(@__DIR__, "test_run_ordering.jl"))
 # whether it is that or a `@kernel` constructor. Per-backend because the decision
 # was being made three times and the three did not agree.
 foreachbackend(joinpath(@__DIR__, "test_declared_kernel.jl"))
+foreachbackend(joinpath(@__DIR__, "test_kernel_preparation.jl"))
 # A plain kernel guards its own tail; eight lost the guard with `@kernel` and
 # wrote past their outputs. Every backend's launch pads to whole workgroups.
 foreachbackend(joinpath(@__DIR__, "test_kernel_tails.jl"))
@@ -786,7 +786,7 @@ foreachbackend(joinpath(@__DIR__, "test_coopmat_shared.jl"))
 foreachbackend(joinpath(@__DIR__, "test_gemm_batched.jl"))
 foreachbackend(joinpath(@__DIR__, "test_gemm_cm2.jl"))
 # Tensor addressing and the cooperative-matrix extensions, on every backend that
-# answers `KernelInterface.supports_tensor_addressing` and friends (Vulkan with
+# answers `Lava.supports_tensor_addressing` and friends (Vulkan with
 # `VK_NV_cooperative_matrix2`); the rest skip on the predicate, not on a name.
 # The load: compiling and validating is not enough, the instruction validated twice
 # while still wrong, so this runs it and checks the values and the orientation.

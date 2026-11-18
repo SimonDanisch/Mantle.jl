@@ -2,7 +2,7 @@
 #
 # No GPU. That is not a compromise here: the whole lowering except one builtin is
 # portable code over an output object, so `runprimitive` with a primitive index
-# and `KernelInterface.HostMeshOutput` runs exactly what a mesh stage runs and
+# and `Lava.HostMeshOutput` runs exactly what a mesh stage runs and
 # says what came out. `test/metal/test_graphics_metal.jl` draws the same bodies on
 # a device and asserts the pixels; this asserts the vertices, the indices and the
 # per-primitive values, which a frame can only show indirectly.

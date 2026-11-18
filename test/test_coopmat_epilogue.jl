@@ -21,7 +21,7 @@ something the Vulkan spec spells out — it is checked rather than assumed.
 """
 
 using Test, KernelAbstractions
-using KernelInterface: AcceleratedMatrix, Accumulator, MatrixA, MatrixB
+using Lava: AcceleratedMatrix, Accumulator, MatrixA, MatrixB
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 

@@ -31,7 +31,7 @@
 
 using Test, KernelAbstractions
 import KernelInterface as KI
-using KernelInterface: AcceleratedMatrix, Accumulator, coopmat_getcomp
+using Lava: AcceleratedMatrix, Accumulator, coopmat_getcomp
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
@@ -40,7 +40,7 @@ const WG_SP = 64          # one wave64, or two wave32 subgroups
 # What each lane sees, written out per lane. The same body for both kernels, so
 # the comparison cannot be between two different programs.
 @inline function sgp_observe!(sz, lane, red, indep, x, i)
-    r = KI.sub_group_reduce_add(x[i])                  # width-DEPENDENT
+    r = KI.sub_group_reduce(+, x[i])                  # width-DEPENDENT
     @inbounds begin
         sz[i]    = KI.get_sub_group_size(Int32)
         lane[i]  = KI.get_sub_group_local_id(Int32) - Int32(1)

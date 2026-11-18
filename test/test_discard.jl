@@ -1,7 +1,7 @@
 # `discard()` is KernelInterface's, and it throws a fragment away.
 #
 # It was never declared there. Lava defined it by overriding
-# `KernelInterface.discard() = …`, and a qualified definition CREATES the
+# `Lava.discard() = …`, and a qualified definition CREATES the
 # binding in the module it names — so `discard` existed whenever Lava was
 # loaded and not otherwise. On a machine with no Vulkan, Mantle's
 # `using KernelInterface: …, discard` found nothing (a warning, not an error, in
@@ -13,21 +13,20 @@
 # every backend with graphics, with the same assertions.
 
 using Test, Mantle
-import KernelInterface
+import Lava
 using Mantle: Vec4f
 using ColorTypes: BGRA
 using ColorTypes.FixedPointNumbers: N0f8
 
-@testset "discard is declared by KernelInterface" begin
-    @test isdefined(KernelInterface, :discard)
-    # Mantle re-exports KernelInterface's function, not a copy of its own.
-    @test Mantle.discard === KernelInterface.discard
+@testset "discard is declared by Lava's device vocabulary" begin
+    # Mantle re-exports the vocabulary's function, not a copy of its own.
+    @test Mantle.discard === Lava.discard
     # On the host it SAYS something, like every other shader builtin, rather
     # than being a MethodError. Before the declaration, the only method on a
     # Vulkan machine was Lava's device overlay, so this was a MethodError there
     # and an UndefVarError everywhere else.
     err = try
-        KernelInterface.discard()
+        Lava.discard()
         nothing
     catch e
         e

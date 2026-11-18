@@ -25,7 +25,7 @@ assertion runs everywhere the device has cooperative matrices at all.
 """
 
 using Test, KernelAbstractions
-using KernelInterface: AcceleratedMatrix, Accumulator, coopmat_add
+using Lava: AcceleratedMatrix, Accumulator, coopmat_add
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 

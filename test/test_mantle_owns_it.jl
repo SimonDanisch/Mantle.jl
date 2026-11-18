@@ -227,9 +227,61 @@ const PURE_BOOKKEEPING_ALLOWED = Set{Tuple{Symbol,String}}([
 end
 
 # 0.4: core names no driver in code, except the exact backend-loader imports.
+#
+# Lava is two things to Mantle: the Vulkan backend's compiler, which core must not
+# name, and the home of the device vocabulary (`Lava/src/vocabulary/`: matrices,
+# tensors, graphics and mesh stages, `DeviceCaps`) that every backend lowers and
+# core is written against. Core may name Lava for the second only.
+
+"Every name `Lava/src/vocabulary/` defines at top level."
+function vocabulary_names()
+    dir = joinpath(pkgdir(Mantle.Lava), "src", "vocabulary")
+    out = Set{Symbol}()
+    stripname(x) = x isa Expr && x.head in (:curly, :<:, :where, :(::)) ? stripname(x.args[1]) : x
+    function signame(x)
+        while x isa Expr && x.head in (:where, :(::))
+            x = x.args[1]
+        end
+        return x isa Expr && x.head === :call ? stripname(x.args[1]) : x
+    end
+    function def(ex)
+        ex isa Expr || return
+        if ex.head in (:block, :toplevel, :const, :macrocall)
+            foreach(def, ex.args)
+        elseif ex.head === :struct
+            n = stripname(ex.args[2]); n isa Symbol && push!(out, n)
+        elseif ex.head in (:abstract, :primitive)
+            n = stripname(ex.args[1]); n isa Symbol && push!(out, n)
+        elseif ex.head === :function
+            n = signame(ex.args[1]); n isa Symbol && push!(out, n)
+        elseif ex.head === :(=)
+            # `f(x) = …`, `const X = …`, and the alias `const A{T} = B{T, …}`
+            lhs = ex.args[1]
+            n = lhs isa Expr && lhs.head === :curly ? stripname(lhs) : signame(lhs)
+            n isa Symbol && push!(out, n)
+        end
+    end
+    for f in readdir(dir; join = true)
+        endswith(f, ".jl") && def(Meta.parseall(read(f, String)))
+    end
+    return out
+end
+
+"""`code` without the places it names Lava for the vocabulary: `Lava.x` and
+`using/import Lava: x, …` for vocabulary names `x`, and a bare `import Lava`."""
+function withoutvocabulary(code::AbstractString, voc)
+    code = replace(code, r"\bLava\.(\w+!?)" => m -> Symbol(m[6:end]) in voc ? "" : m)
+    stmt = r"^[ \t]*(?:using|import)[ \t]+Lava[ \t]*:((?:[^\n]*,[ \t]*\n)*[^\n]*)$"m
+    code = replace(code, stmt => function (m)
+        names = Symbol.(strip.(split(replace(m, r"^[ \t]*(?:using|import)[ \t]+Lava[ \t]*:" => ""), ',')))
+        all(in(voc), names) ? "" : m
+    end)
+    return replace(code, r"^[ \t]*import[ \t]+Lava[ \t]*$"m => "")
+end
 
 @testset "0.4 core names no backend" begin
     core, _ = sourcefiles()
+    voc = vocabulary_names()
     # `VulkanAPI`, `MetalAPI`, `WebGPUAPI` are core's own marker types and the
     # suffix is deliberate — `sync/backend.jl` explains that a marker called
     # `Vulkan` shadows the package inside this module. They are not violations.
@@ -237,7 +289,7 @@ end
     hits = Tuple{String,String}[]
     for p in core
         for m in eachmatch(r"\b(Lava\w*|lava_\w+|Vulkan\w*|vk_\w+|VK_\w+|MTL\w*|mtl[a-z]\w*)\b",
-                           codeonly(read(p, String)))
+                           withoutvocabulary(codeonly(read(p, String)), voc))
             occursin(markers, m.match) && continue
             # `/` on every OS, so the pinned exceptions below match on Windows too.
             push!(hits, (replace(relpath(p, ROOT), '\\' => '/'), m.match))
@@ -248,6 +300,10 @@ end
     extra = sort(hits) != sort(allowed) ? hits : Tuple{String,String}[]
     isempty(extra) || @info "0.4 backend names in core" count = length(hits) first10 = first(hits, 10)
     @test sort(hits) == sort(allowed)
+    # The filter is not vacuous: it drops vocabulary names and nothing else.
+    @test :MatrixShape in voc && :vertex_index in voc && !(:lava_compile in voc)
+    @test occursin("Lava", withoutvocabulary("Lava.lava_compile(f)", voc))
+    @test !occursin("Lava", withoutvocabulary("Lava.supports(b, s)", voc))
 end
 
 # 0.6: all Metal capability/device entry points must share one device and pool.

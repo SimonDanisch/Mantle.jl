@@ -1,8 +1,8 @@
 using Test, Mantle, KernelAbstractions
-import KernelInterface as KI
+import Lava
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
-const AMc = KI.AcceleratedMatrix
+const AMc = Lava.AcceleratedMatrix
 
 # A CLAMPING layout makes an out-of-range block legal, and this is the claim the
 # whole tensor-addressing port rests on.
@@ -33,18 +33,18 @@ const TC = 16
 const SENT = -999.0f0
 
 @kernel cpu = false function tensorclamp_kernel!(out, @Const(src), @Const(sentinel), off::Int32)
-    lay = KI.tensor_slice(
-            KI.tensor_setdim(
-                KI.tensor_layout(Val(2), Val(KI.TENSOR_CLAMP_CONSTANT)),
+    lay = Lava.tensor_slice(
+            Lava.tensor_setdim(
+                Lava.tensor_layout(Val(2), Val(Lava.TENSOR_CLAMP_CONSTANT)),
                 (Int32(EXT_C), Int32(EXT_C))),
             (off, off), (Int32(TC), Int32(TC)))
-    obj = AMc{Float32,TC,TC,KI.Accumulator}(pointer(sentinel), 1, TC)
+    obj = AMc{Float32,TC,TC,Lava.Accumulator}(pointer(sentinel), 1, TC)
     Mantle.copyto!(pointer(out), 1, TC,
-                 KI.tensor_load(obj, UInt64(pointer(src)), lay))
+                 Lava.tensor_load(obj, UInt64(pointer(src)), lay))
 end
 
 @testset "a clamping layout makes an unpadded extent legal" begin
-    if !KI.supports_tensor_addressing(TESTBACKEND)
+    if !Lava.supports_tensor_addressing(TESTBACKEND)
         @info "device has no coopmat2 tensor addressing — skipping"
     else
         back = TESTBACKEND
@@ -100,20 +100,20 @@ const EA_V = 10        # rows the array has; the load asks for EXT_V and the res
 @kernel cpu = false unsafe_indices = true function clampvalue_kernel!(out, @Const(A),
                                                                      v::Int32,
                                                                      ::Val{SET}) where {SET}
-    l = KI.tensor_setstride(
-            KI.tensor_setdim(
-                KI.tensor_layout(Val(2), Val(KI.TENSOR_CLAMP_CONSTANT)),
+    l = Lava.tensor_setstride(
+            Lava.tensor_setdim(
+                Lava.tensor_layout(Val(2), Val(Lava.TENSOR_CLAMP_CONSTANT)),
                 (Int32(TC), Int32(EA_V))),
             (Int32(EA_V), Int32(1)))
-    l = SET ? KI.tensor_setclampvalue(l, v) : l
-    l = KI.tensor_slice(l, (Int32(0), Int32(0)), (Int32(TC), Int32(TC)))
+    l = SET ? Lava.tensor_setclampvalue(l, v) : l
+    l = Lava.tensor_slice(l, (Int32(0), Int32(0)), (Int32(TC), Int32(TC)))
     Mantle.copyto!(pointer(out), 1, TC,
-                 KI.tensor_load(KI.coopmat_zero(AMc{Float32,TC,TC,KI.Accumulator}),
+                 Lava.tensor_load(Lava.coopmat_zero(AMc{Float32,TC,TC,Lava.Accumulator}),
                                   UInt64(pointer(A)), l))
 end
 
 @testset "the clamp constant is settable, and it is a bit pattern" begin
-    if !KI.supports_tensor_addressing(TESTBACKEND)
+    if !Lava.supports_tensor_addressing(TESTBACKEND)
         @info "device has no coopmat2 tensor addressing — skipping"
     else
         back = TESTBACKEND
@@ -134,8 +134,8 @@ end
         end
 
         @test fillvalue(Int32(0), false) == 0.0f0                       # documented default
-        @test fillvalue(KI.tensor_clampbits(1.0f0, Float32), true) == 1.0f0
-        @test fillvalue(KI.tensor_clampbits(2.5f0, Float32), true) == 2.5f0
+        @test fillvalue(Lava.tensor_clampbits(1.0f0, Float32), true) == 1.0f0
+        @test fillvalue(Lava.tensor_clampbits(2.5f0, Float32), true) == 2.5f0
         # NUMERIC would make this 1.0; BITS makes it the smallest subnormal.
         @test fillvalue(Int32(1), true) == reinterpret(Float32, UInt32(1))
         @test fillvalue(Int32(1), true) != 1.0f0
@@ -146,9 +146,9 @@ end
     # Host-side and exact, so it holds on a machine with no such device — and it
     # is the half of the fp16 story the GPU arms above cannot show, since they
     # run in fp32.
-    @test KI.tensor_clampbits(1.0f0, Float16) == Int32(0x3C00)
-    @test KI.tensor_clampbits(1.0f0, Float32) == Int32(reinterpret(UInt32, 1.0f0))
-    @test reinterpret(Float16, UInt16(KI.tensor_clampbits(1.0f0, Float16))) === Float16(1)
+    @test Lava.tensor_clampbits(1.0f0, Float16) == Int32(0x3C00)
+    @test Lava.tensor_clampbits(1.0f0, Float32) == Int32(reinterpret(UInt32, 1.0f0))
+    @test reinterpret(Float16, UInt16(Lava.tensor_clampbits(1.0f0, Float16))) === Float16(1)
     # The mistake the type parameter exists to prevent.
     @test reinterpret(Float16, UInt16(1)) !== Float16(1)
 end

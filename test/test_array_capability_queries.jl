@@ -7,7 +7,7 @@
 #     workgroup_limit(vk_context(A))   ->   workgrouplimit(A)
 #     max_shared_memory(vk_context(A)) ->   sharedbudget(A)
 #
-# array to backend to `KernelInterface.caps`, instead of array to context to
+# array to backend to `Lava.caps`, instead of array to context to
 # caps. `test_array_algorithm_portability.jl` is the source-level ratchet on
 # that move; this is the device half. It compared the portable answers with the
 # Vulkan context's, which is a middle step another backend does not have. What

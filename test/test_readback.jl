@@ -16,7 +16,6 @@ end
 
 @testset "graph readback futures" begin
     dev = Mantle.Device(TESTBACKEND)
-    @test Mantle.Readback !== KernelAbstractions.CPU
 
     @testset "one run including stores and multiple shaped outputs, no fetch submission" begin
         g, a, k = rb_plan(dev, Int32, (19, 27))

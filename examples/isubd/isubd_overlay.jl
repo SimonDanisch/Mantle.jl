@@ -19,13 +19,13 @@ function fem_overlay_mesh(out, keys, basecorners, basecell, cx, cy, cf, ramp,
                           white_point::Float32, inv_gamma::Float32, apply_gamma::Int32,
                           strokewidth::Float32, strokecolor::Vec4f, resolution::Vec2f,
                           px_per_unit::Float32, fxaa::Int32)
-    g = KI.mesh_group_index()
-    t = KI.mesh_thread_index()
+    g = Lava.mesh_group_index()
+    t = Lava.mesh_thread_index()
     warp = Float32(params[1])  # Apple GPUs have no Float64
 
     i = (g - Int32(1)) * Int32(meshthreads()) + t
     nlocal = min(Int32(meshthreads()), nkeys - (g - Int32(1)) * Int32(meshthreads()))
-    KI.set_mesh_outputs!(out, Int32(3) * nlocal, nlocal)
+    Lava.set_mesh_outputs!(out, Int32(3) * nlocal, nlocal)
 
     if t <= nlocal
         @inbounds k = keys[i]
@@ -42,10 +42,10 @@ function fem_overlay_mesh(out, keys, basecorners, basecell, cx, cy, cf, ramp,
         n2 = Vec3f(world_normalmatrix * surfacenormal(cx, cy, cf, cell, c2[1], c2[2], warp))
         n3 = Vec3f(world_normalmatrix * surfacenormal(cx, cy, cf, cell, c3[1], c3[2], warp))
 
-        KI.set_mesh_vertex!(out, v0 + Int32(1), fem_vertex(p1, n1, c1, cellf, p1, p2, p3, model, pvm))
-        KI.set_mesh_vertex!(out, v0 + Int32(2), fem_vertex(p2, n2, c2, cellf, p1, p2, p3, model, pvm))
-        KI.set_mesh_vertex!(out, v0 + Int32(3), fem_vertex(p3, n3, c3, cellf, p1, p2, p3, model, pvm))
-        KI.set_mesh_triangle!(out, t, v0 + Int32(1), v0 + Int32(2), v0 + Int32(3))
+        Lava.set_mesh_vertex!(out, v0 + Int32(1), fem_vertex(p1, n1, c1, cellf, p1, p2, p3, model, pvm))
+        Lava.set_mesh_vertex!(out, v0 + Int32(2), fem_vertex(p2, n2, c2, cellf, p1, p2, p3, model, pvm))
+        Lava.set_mesh_vertex!(out, v0 + Int32(3), fem_vertex(p3, n3, c3, cellf, p1, p2, p3, model, pvm))
+        Lava.set_mesh_triangle!(out, t, v0 + Int32(1), v0 + Int32(2), v0 + Int32(3))
     end
     return nothing
 end

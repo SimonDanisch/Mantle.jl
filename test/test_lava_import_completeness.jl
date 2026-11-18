@@ -59,6 +59,8 @@ answer right.
 """
 function referenced_names(path::AbstractString)
     out = Set{Symbol}()
+    # Names a function body assigns, which are its locals and not references.
+    assigned = Set{Symbol}()
 
     # A parameter contributes its annotation and its default, never its name —
     # and the name it binds is collected so the body cannot report it.
@@ -111,15 +113,33 @@ function referenced_names(path::AbstractString)
             foreach(walk, ex.args[2:end]); return
         elseif ex.head === :kw          # `f(; key = v)`: `key` is not a reference
             length(ex.args) > 1 && walk(ex.args[2]); return
+        elseif ex.head === :struct
+            # A field NAME is not a reference, its type is: `vertices::UInt32`
+            # contributes `UInt32`. Inner constructors are walked as functions.
+            walk(ex.args[2])
+            for item in ex.args[3].args
+                item isa Symbol && continue
+                item isa Expr && item.head === :(::) ? walk(item.args[end]) : walk(item)
+            end
+            return
+        elseif ex.head === :(=) && (ex.args[1] isa Symbol ||
+                                    ex.args[1] isa Expr && ex.args[1].head === :tuple)
+            # `x = …` and `a, b = …` bind in this scope; only the right side refers
+            # to anything.
+            lhs = ex.args[1]
+            foreach(a -> a isa Symbol ? push!(assigned, a) : walk(a), lhs isa Symbol ? (lhs,) : lhs.args)
+            walk(ex.args[2]); return
         elseif ex.head === :function || (ex.head === :(=) && ex.args[1] isa Expr &&
                                          ex.args[1].head in (:call, :where))
             bound = Set{Symbol}()
             signature(ex.args[1], bound)
             if length(ex.args) > 1
                 outer, out = out, Set{Symbol}()     # collect the body separately…
+                outerassigned, assigned = assigned, Set{Symbol}()
                 walk(ex.args[2])
-                union!(outer, setdiff(out, bound))  # …minus what the signature binds
-                out = outer
+                # …minus what the signature binds and what the body assigns
+                union!(outer, setdiff(out, bound, assigned))
+                out, assigned = outer, outerassigned
             end
             return
         end

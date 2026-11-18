@@ -88,11 +88,11 @@ end
 
 # No `@inline` before `@device_override`: it registers an ordinary method instead
 # of an overlay, which fails at shader compile with a `MethodError`.
-Metal.@device_override KI.set_mesh_vertex!(out::Metal.MeshPtr, slot::Integer,
+Metal.@device_override Lava.set_mesh_vertex!(out::Metal.MeshPtr, slot::Integer,
                                            v::NamedTuple) =
     write_mesh_vertex!(out, Int32(slot) - Int32(1), v)
 
-Metal.@device_override KI.set_mesh_primitive_data!(out::Metal.MeshPtr, slot::Integer,
+Metal.@device_override Lava.set_mesh_primitive_data!(out::Metal.MeshPtr, slot::Integer,
                                                    d::NamedTuple) =
     write_mesh_primitive!(out, Int32(slot) - Int32(1), d)
 
@@ -108,29 +108,29 @@ Metal.@device_override KI.set_mesh_primitive_data!(out::Metal.MeshPtr, slot::Int
     return nothing
 end
 
-Metal.@device_override KI.set_mesh_triangle!(out::Metal.MeshPtr, slot::Integer,
+Metal.@device_override Lava.set_mesh_triangle!(out::Metal.MeshPtr, slot::Integer,
                                              i0::Integer, i1::Integer, i2::Integer) =
     write_mesh_indices!(out, (Int32(slot) - Int32(1)) * Int32(3),
                          Int32(i0), Int32(i1), Int32(i2))
 
-Metal.@device_override KI.set_mesh_line!(out::Metal.MeshPtr, slot::Integer,
+Metal.@device_override Lava.set_mesh_line!(out::Metal.MeshPtr, slot::Integer,
                                          i0::Integer, i1::Integer) =
     write_mesh_indices!(out, (Int32(slot) - Int32(1)) * Int32(2), Int32(i0), Int32(i1))
 
-Metal.@device_override KI.set_mesh_point!(out::Metal.MeshPtr, slot::Integer,
+Metal.@device_override Lava.set_mesh_point!(out::Metal.MeshPtr, slot::Integer,
                                           i0::Integer) =
     write_mesh_indices!(out, Int32(slot) - Int32(1), Int32(i0))
 
 # Metal takes only the primitive count; the vertex bound is in the object type.
 # A threadgroup declaring zero primitives is discarded with its side effects.
-Metal.@device_override KI.set_mesh_outputs!(out::Metal.MeshPtr, ::Integer,
+Metal.@device_override Lava.set_mesh_outputs!(out::Metal.MeshPtr, ::Integer,
                                             nprimitives::Integer) =
     Metal.set_primitive_count_mesh(out, Int32(nprimitives))
 
 # Metal.jl's thread intrinsics are already 1-based.
-Metal.@device_override KI.mesh_thread_index() =
+Metal.@device_override Lava.mesh_thread_index() =
     Int32(Metal.thread_index_in_threadgroup())
-Metal.@device_override KI.mesh_group_index() =
+Metal.@device_override Lava.mesh_group_index() =
     Int32(Metal.threadgroup_position_in_grid().x)
 
 # `set_mesh_groups!` is absent on purpose: Metal.jl emits no `air.object` stage,

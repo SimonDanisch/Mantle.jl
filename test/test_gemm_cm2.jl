@@ -12,7 +12,7 @@ that ever stops holding, this is where it shows.
 """
 
 using Test, KernelAbstractions
-using KernelInterface: DeviceCaps
+using Lava: DeviceCaps
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 

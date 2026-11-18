@@ -291,8 +291,8 @@ function staged_gemm_body(family, cfg)
     AREPS4,BREPS4 = BM*BK÷4÷WG,BK*BN÷4÷WG
     if family === :scalar
         return quote
-            sA = KI.localmemory(Float16, Val(($LDA * $BK,)), Val(1))
-            sB = KI.localmemory(Float16, Val(($LDB * $BN,)), Val(2))
+            sA = KI.localmemory(Float16, Val(($LDA * $BK,)))
+            sB = KI.localmemory(Float16, Val(($LDB * $BN,)))
 
             tid = KI.get_local_id().x - 1
             blk = KI.get_group_id().x - 1
@@ -362,8 +362,8 @@ function staged_gemm_body(family, cfg)
             staging = :(if ABL !== :nostage || kb == $Index(0); $staging; end)
         end
         return quote
-            sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
-            sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
+            sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)))
+            sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)))
 
             tid = $Index(KI.get_local_id().x - 1)
             blk = $Index(KI.get_group_id().x - 1)
@@ -397,8 +397,8 @@ function staged_gemm_body(family, cfg)
         end
     elseif family === :prefetch
         return quote
-            sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
-            sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
+            sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)))
+            sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)))
 
             tid = Int32(KI.get_local_id().x - 1)
             blk = Int32(KI.get_group_id().x - 1)
@@ -498,8 +498,8 @@ function staged_gemm_body(family, cfg)
         end
     elseif family === :doublebuf
         return quote
-            sA = KI.localmemory(GemmV2, Val((2 * $LDA2 * $BK,)), Val(1))
-            sB = KI.localmemory(GemmV2, Val((2 * $LDB2 * $BN,)), Val(2))
+            sA = KI.localmemory(GemmV2, Val((2 * $LDA2 * $BK,)))
+            sB = KI.localmemory(GemmV2, Val((2 * $LDB2 * $BN,)))
 
             tid = Int32(KI.get_local_id().x - 1)
             blk = Int32(KI.get_group_id().x - 1)
@@ -576,8 +576,8 @@ function staged_gemm_body(family, cfg)
         end
     elseif family === :vec4
         return quote
-            sA = KI.localmemory(GemmV4, Val(($LDA4 * $BK,)), Val(1))
-            sB = KI.localmemory(GemmV4, Val(($LDB4 * $BN,)), Val(2))
+            sA = KI.localmemory(GemmV4, Val(($LDA4 * $BK,)))
+            sB = KI.localmemory(GemmV4, Val(($LDB4 * $BN,)))
 
             tid = Int32(KI.get_local_id().x - 1)
             blk = Int32(KI.get_group_id().x - 1)
@@ -631,8 +631,8 @@ function staged_gemm_body(family, cfg)
         end
     elseif family === :gather
         return quote
-            sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
-            sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
+            sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)))
+            sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)))
 
             tid = Int32(KI.get_local_id().x - 1)
             blk = Int32(KI.get_group_id().x - 1)
@@ -809,8 +809,8 @@ const SGEMM_NKSTEP = SGEMM_BK ÷ SGEMM_BKSTEP
     function scalar_gemm_staged_kernel!(
             C, A, B, ::Val{M}, ::Val{N}, ::Val{K}, ::Val{FAST},
             co, cr, cc_, ao, ar, ac, bo, br, bc, α, β, nblk_m) where {M,N,K,FAST}
-        bufa = KI.localmemory(Float32, Val(($SGEMM_BM * $SGEMM_SHF,)), Val(1))
-        bufb = KI.localmemory(Float32, Val(($SGEMM_BN * $SGEMM_SHF,)), Val(2))
+        bufa = KI.localmemory(Float32, Val(($SGEMM_BM * $SGEMM_SHF,)))
+        bufb = KI.localmemory(Float32, Val(($SGEMM_BN * $SGEMM_SHF,)))
 
         tid = KI.get_local_id().x - 1
         blk = KI.get_group_id().x - 1

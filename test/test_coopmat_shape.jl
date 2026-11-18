@@ -15,7 +15,7 @@
 # `test_device_caps.jl`; this is that the query built on it keeps the type.
 
 using Test
-using KernelInterface: MatrixShape, SubgroupScope, supports, matrix_shapes
+using Lava: MatrixShape, SubgroupScope, supports, matrix_shapes
 include(joinpath(@__DIR__, "testbackend.jl"))
 
 @testset "coopmat shape query honours the operand type" begin

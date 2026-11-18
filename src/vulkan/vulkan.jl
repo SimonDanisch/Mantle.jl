@@ -11,7 +11,7 @@
 using Lava
 using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             CoopMatrix, FragmentWrapper, GeometryConfig,
-            KI_REDUCE_ADD_TYPES, KI_SHFL_TYPES, LavaCompilationError,
+            KI_SHFL_TYPES, LavaCompilationError,
             LavaCompilerJob, LavaCompilerParams, LavaDeviceArray, LavaError, LavaGPUKernel,
             LavaGfxShader, LavaSharedArray, MatrixA, MatrixB,
             Op, PushConstantInfo, Scope, SourceMap, TargetFeatures, TessConfig,

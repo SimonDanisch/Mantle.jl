@@ -18,7 +18,7 @@
 # dropped or shifted change the total.
 
 using Test, Mantle
-import KernelInterface as KI
+import Lava
 using Mantle: Vec4f
 using ColorTypes: BGRA
 using ColorTypes.FixedPointNumbers: N0f8
@@ -41,13 +41,13 @@ end
 ms_fragment(inputs, colours, a::Vararg{Float32,MS_N}) = inputs.tint * verdict(colours, a)
 
 function ms_mesh(out, colours, a::Vararg{Float32,MS_N})
-    KI.set_mesh_outputs!(out, 3, 1)
+    Lava.set_mesh_outputs!(out, 3, 1)
     c = verdict(colours, a)
     col = (c[1], c[2], c[3], c[4])
-    KI.set_mesh_vertex!(out, 1, (position = (-1f0, -1f0, 0f0, 1f0), tint = col))
-    KI.set_mesh_vertex!(out, 2, (position = ( 3f0, -1f0, 0f0, 1f0), tint = col))
-    KI.set_mesh_vertex!(out, 3, (position = (-1f0,  3f0, 0f0, 1f0), tint = col))
-    KI.set_mesh_triangle!(out, 1, 1, 2, 3)
+    Lava.set_mesh_vertex!(out, 1, (position = (-1f0, -1f0, 0f0, 1f0), tint = col))
+    Lava.set_mesh_vertex!(out, 2, (position = ( 3f0, -1f0, 0f0, 1f0), tint = col))
+    Lava.set_mesh_vertex!(out, 3, (position = (-1f0,  3f0, 0f0, 1f0), tint = col))
+    Lava.set_mesh_triangle!(out, 1, 1, 2, 3)
     return nothing
 end
 

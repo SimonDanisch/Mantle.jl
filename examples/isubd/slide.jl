@@ -39,11 +39,11 @@ end
 function resolve(out::MeshOut, e::Element, key::Key, mvp::Mat4f)
     ξ = corners(key)
     for i in 1:3
-        KI.set_mesh_vertex!(out, i, (position = toclip(surfacepoint(e, ξ[i]), mvp),
+        Lava.set_mesh_vertex!(out, i, (position = toclip(surfacepoint(e, ξ[i]), mvp),
                                      normal   = normal(e, ξ[i]),
                                      ξ = ξ[i]))
     end
-    KI.set_mesh_triangle!(out, 1, (1, 2, 3))
+    Lava.set_mesh_triangle!(out, 1, (1, 2, 3))
 end
 
 function resolve(ray::Ray, e::Element; steps = 8)

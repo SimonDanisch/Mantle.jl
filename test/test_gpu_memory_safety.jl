@@ -95,7 +95,7 @@ end
 
 @kernel function sg_atomic_add!(out)
     x = 1f0
-    s = KI.sub_group_reduce_add(x)
+    s = KI.sub_group_reduce(+, x)
     if KI.get_sub_group_local_id(UInt32) == UInt32(1)
         # Only the atomic sum is shared; the host reads after synchronize.
         Atomix.@atomic :monotonic out[1] += s

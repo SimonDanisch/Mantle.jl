@@ -174,13 +174,13 @@ end
               :crossqueuecost, :inlinestore, :inlinealign)
         @test f in propertynames(c)
     end
-    @test c.kernel isa KI.DeviceCaps
-    @test KI.matrix_shapes(c) == KI.matrix_shapes(c.kernel)
-    @test KI.wggranularity(c, 32) == KI.wggranularity(c.kernel, 32)
-    @test KI.bestshape(c, Float16, Float32) == KI.bestshape(c.kernel, Float16, Float32)
+    @test c.kernel isa Lava.DeviceCaps
+    @test Lava.matrix_shapes(c) == Lava.matrix_shapes(c.kernel)
+    @test Lava.wggranularity(c, 32) == Lava.wggranularity(c.kernel, 32)
+    @test Lava.bestshape(c, Float16, Float32) == Lava.bestshape(c.kernel, Float16, Float32)
     @test KI.supports_float64(dev) == (Float64 in c.scalars)
-    for shape in KI.matrix_shapes(c)
-        @test KI.supports(c, shape)
+    for shape in Lava.matrix_shapes(c)
+        @test Lava.supports(c, shape)
     end
     checkinline(c, dev)
 end

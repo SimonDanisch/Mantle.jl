@@ -26,9 +26,9 @@ a local closure captures it, and the compile fails several layers from the cause
 """
 
 using Test, KernelAbstractions
-using KernelInterface: CoopMatrix, AcceleratedMatrix, WorkgroupMatrix, MatrixA, MatrixB,
-    Accumulator, SubgroupScope, WorkgroupScope, matrixscope, coopmat_muladd, wggranularity
-import KernelInterface
+using Lava: CoopMatrix, AcceleratedMatrix, WorkgroupMatrix, MatrixA, MatrixB, Accumulator,
+    SubgroupScope, WorkgroupScope, matrixscope, coopmat_muladd, wggranularity
+import Lava
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
@@ -57,9 +57,9 @@ function wgtgroup(c)
     return isempty(fits) ? nothing : maximum(fits)
 end
 
-"KernelInterface's own methods of `f` that could take arguments of these types."
-kimethods(f, types...) =
-    filter(m -> m.module === KernelInterface, collect(methods(f, Tuple{types...})))
+"The device vocabulary's own methods of `f` (Lava's `vocabulary/`) that could take arguments of these types."
+vocabmethods(f, types...) =
+    filter(m -> m.module === Lava, collect(methods(f, Tuple{types...})))
 
 @testset "workgroup-scope cooperative matrices" begin
     c = Mantle.caps(TESTBACKEND)
@@ -96,11 +96,11 @@ kimethods(f, types...) =
         @test matrixscope(sg) === SubgroupScope
         @test matrixscope(wg) === WorkgroupScope
         # `muladd` is what a kernel writes. Base keeps an untyped
-        # `muladd(x, y, z) = x*y + z` fallback, so it is KernelInterface's method
+        # `muladd(x, y, z) = x*y + z` fallback, so it is the vocabulary's method
         # that must not match — and must match when the scopes agree, or the
         # negative proves nothing.
-        @test !isempty(kimethods(muladd, sg, AcceleratedMatrix{Float16,16,16,MatrixB}, acc))
-        @test isempty(kimethods(muladd, sg, wg, acc))
+        @test !isempty(vocabmethods(muladd, sg, AcceleratedMatrix{Float16,16,16,MatrixB}, acc))
+        @test isempty(vocabmethods(muladd, sg, wg, acc))
         # …and no backend lowers a mixed product either.
         @test isempty(methods(coopmat_muladd, Tuple{sg, wg, acc}))
     end

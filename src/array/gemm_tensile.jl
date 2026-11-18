@@ -127,8 +127,8 @@ let
         """
         function coopmat_gemm_tensile_kernel!(C, A, B, bias, epi,
                                               ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
-            sA = KI.localmemory(GemmV4, Val((2 * $SA,)), Val(1))
-            sB = KI.localmemory(GemmV4, Val((2 * $SB,)), Val(2))
+            sA = KI.localmemory(GemmV4, Val((2 * $SA,)))
+            sB = KI.localmemory(GemmV4, Val((2 * $SB,)))
             tid = KI.get_local_id().x - 1
             tm, tn = tensile_tile(KI.get_group_id().x - 1, Val(M ÷ $TENSILE_BM), Val(N ÷ $TENSILE_BN))
             m0 = tm * $TENSILE_BM

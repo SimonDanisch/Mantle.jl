@@ -83,7 +83,6 @@ function alloc_index_buffer(bq::SubmitChannel{<:VulkanQueue}, data::AbstractVect
     upload!(arr, data)
     return arr
 end
-Adapt.adapt_storage(::KA.CPU, a::LavaArray) = Array(a)
 
 # `@Const` wraps a device array in `Lava.Const`, whose loads Lava declares
 # NonWritable. The arguments a dispatch only reads are not wrapped but flagged

@@ -2,7 +2,7 @@
 # configuration and interface. A stage declares only its outputs; its inputs are
 # the previous stage's outputs (`stageinputs`). An entry may be `Flat{T}`: the
 # value belongs to the primitive rather than the vertex, and only the declaration
-# carries it (see `KernelInterface.Flat`).
+# carries it (see `Lava.Flat`).
 
 """
     ShaderStage
@@ -72,7 +72,7 @@ ntextures(s::FragmentShader) = s.textures
 The per-primitive stage: sees a whole input primitive and emits vertices.
 `input` fixes how many vertices one invocation sees, `output` what the emitted
 vertices are grouped into. `f` takes `(emitter, prim)`; see
-`KernelInterface.emit!`. Ask [`supports_geometry_stage`](@ref) before building a
+`Lava.emit!`. Ask [`supports_geometry_stage`](@ref) before building a
 pipeline with one; a backend without the stage can run the body through a
 [`MeshShader`](@ref).
 """
@@ -117,7 +117,7 @@ end
 
 The optional stage that decides how many mesh threadgroups to dispatch. It
 declares no outputs; what it hands down is a payload, see
-`KernelInterface.ObjectConfig`.
+`Lava.ObjectConfig`.
 """
 struct ObjectShader{F, C<:ObjectConfig} <: ShaderStage
     f::F

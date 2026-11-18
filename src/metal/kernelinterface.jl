@@ -20,7 +20,7 @@ KI.wait_event(d::MetalDevice, ev::Tuple{MTL.MTLSharedEvent,UInt64}) =
     KI.wait_event(metalbackend(d), ev)
 for f in (:functional, :supports_float64, :supports_atomics, :supports_unified,
           :supports_subgroups, :supports_linear_subgroups, :supports_independent_subgroups,
-          :supports_partitionable_subgroups, :shfl_types, :sub_group_reduce_add_types,
+          :supports_partitionable_subgroups,
           :max_work_group_size, :max_work_group_dims, :max_num_groups, :sub_group_size,
           :multiprocessor_count)
     @eval KI.$f(d::MetalDevice) = KI.$f(metalbackend(d))

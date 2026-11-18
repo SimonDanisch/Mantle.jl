@@ -315,8 +315,8 @@ bodytypes(bufs::Type{<:Tuple}) =
 
 """
 A vertex shader that returns `(position = …, varyings…)`. `VID` is whether the
-body takes a leading `KernelInterface.VertexIndex`, decided on the host
-(`KernelInterface.wantsvertexindex`) because a `@generated` function may not call
+body takes a leading `Lava.VertexIndex`, decided on the host
+(`Lava.wantsvertexindex`) because a `@generated` function may not call
 `hasmethod`.
 """
 struct MetalVertexStage{F, Out, VID} end
@@ -326,7 +326,7 @@ MetalVertexStage{F,Out}() where {F,Out} = MetalVertexStage{F,Out,false}()
 
 @generated function (::MetalVertexStage{F,Out,VID})(args::Vararg{Any,N}) where {F,Out,VID,N}
     bufs = unpacked(args, 1:(N - 1))
-    call = VID ? Expr(:call, :(F.instance), :(KI.VertexIndex(KI.vertex_index())), bufs...) :
+    call = VID ? Expr(:call, :(F.instance), :(Lava.VertexIndex(Lava.vertex_index())), bufs...) :
                  Expr(:call, :(F.instance), bufs...)
     # Fields by name, in declaration order; `position` is mirrored into Metal's
     # clip space.
@@ -411,7 +411,7 @@ function stage_signatures(p::Mantle.GraphicsPipeline, ncolor::Int,
     VOut = stage_output_type(p, Val(:vertex))
     vf = Mantle.stagefunction(p.vertex)
     # A body declaring a leading `VertexIndex` is handed one.
-    vid = KI.wantsvertexindex(vf, fieldtypes(bodytypes(vert_bufs)))
+    vid = Lava.wantsvertexindex(vf, fieldtypes(bodytypes(vert_bufs)))
     vfn = MetalVertexStage{typeof(vf), VOut, vid}()
     vert_tt = Tuple{vert_bufs.parameters..., StageOut{VOut}}
     # No colour attachment: a nil `fragmentFunction`; AIR has no empty output struct.
@@ -976,26 +976,26 @@ mtl_loadaction(l::Mantle.LoadOp) = Mantle.discards(l) ? MTL.MTLLoadActionDontCar
                                                         MTL.MTLLoadActionLoad
 mtl_loadaction(::Nothing) = MTL.MTLLoadActionDontCare
 
-# KernelInterface shader builtins as `@device_override`s in Metal's method table;
+# The vocabulary's shader builtins as `@device_override`s in Metal's method table;
 # the host methods error and must stay.
 const METAL_BUILTINS = (:vertex_index, :instance_index, :frag_coord_x, :frag_coord_y,
                         :frag_coord_z, :frag_coord_w, :frag_coord_xy)
 
 for f in METAL_BUILTINS
-    @eval Metal.@device_override KI.$f() = Metal.$f()
+    @eval Metal.@device_override Lava.$f() = Metal.$f()
 end
-Metal.@device_override KI.frag_coord(dim::Integer = 1) = Metal.frag_coord(dim)
+Metal.@device_override Lava.frag_coord(dim::Integer = 1) = Metal.frag_coord(dim)
 
 # `air.dfdx.f32`/`air.dfdy.f32` (`Metal/src/device/intrinsics/graphics.jl`).
-Metal.@device_override KI.dFdx(v::Float32) = Metal.dfdx(v)
-Metal.@device_override KI.dFdy(v::Float32) = Metal.dfdy(v)
+Metal.@device_override Lava.dFdx(v::Float32) = Metal.dfdx(v)
+Metal.@device_override Lava.dFdy(v::Float32) = Metal.dfdy(v)
 
 # `air.discard_fragment`: returns and does not terminate the shader, as
-# `KI.discard` specifies.
-Metal.@device_override KI.discard() = Metal.discard_fragment()
+# `Lava.discard` specifies.
+Metal.@device_override Lava.discard() = Metal.discard_fragment()
 
 # `[[point_size]]`, appended to the vertex output by `stage_return!` when called.
-Metal.@device_override KI.set_point_size!(s::Float32) = Metal.set_point_size!(s)
+Metal.@device_override Lava.set_point_size!(s::Float32) = Metal.set_point_size!(s)
 
 # `emit_vertex!`, `end_primitive!` and `primitive_id_in` have no Metal
 # counterpart: Metal has no geometry stage, and `Mantle.lower_geometry_to_mesh`
@@ -1003,7 +1003,7 @@ Metal.@device_override KI.set_point_size!(s::Float32) = Metal.set_point_size!(s)
 
 # The binding is a slot; the lowering in `Metal/src/compiler/texture.jl` maps it to
 # an entry parameter. `Mantle.FragmentShader`'s `textures` sets how many exist.
-Metal.@device_override KI.sample_texture_2d(binding::UInt32, u::Float32, v::Float32,
+Metal.@device_override Lava.sample_texture_2d(binding::UInt32, u::Float32, v::Float32,
                                             component::UInt32) =
     Metal.sample_texture_2d(binding, u, v, component)
 
@@ -1012,10 +1012,10 @@ Metal.@device_override KI.sample_texture_2d(binding::UInt32, u::Float32, v::Floa
 # too, so compute reprojection matches the rasteriser. A plain `@overlay`, not
 # `@device_override` (a `@consistent_overlay`): Julia would constant-fold calls
 # with the host method, which returns `y` unchanged.
-Base.Experimental.@overlay Metal.method_table KI.clip_y(y::Float32) = -y
+Base.Experimental.@overlay Metal.method_table Lava.clip_y(y::Float32) = -y
 
-@inline flip_clip(p::Vec4f) = Vec4f(p[1], KI.clip_y(p[2]), p[3], p[4])
-@inline flip_clip(p::NTuple{4,Float32}) = (p[1], KI.clip_y(p[2]), p[3], p[4])
+@inline flip_clip(p::Vec4f) = Vec4f(p[1], Lava.clip_y(p[2]), p[3], p[4])
+@inline flip_clip(p::NTuple{4,Float32}) = (p[1], Lava.clip_y(p[2]), p[3], p[4])
 
 """
 The bound texture table on Metal: textures and samplers as lists, since Metal

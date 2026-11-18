@@ -190,8 +190,8 @@ function coopmat_gemm_cm2_sg!(C, A, B, M::Int, N::Int, K::Int; nw::Int = 2)
     dev = caps(backend)
     # Subgroup-scope tiles: needs tensor addressing and the subgroup shape table,
     # not a workgroup-scope shape.
-    KI.supports_tensor_addressing(backend) || return nothing
-    KI.supports(backend, MatrixShape(Float16, Float32, GEMM_TILE, GEMM_TILE, GEMM_TILE,
+    Lava.supports_tensor_addressing(backend) || return nothing
+    Lava.supports(backend, MatrixShape(Float16, Float32, GEMM_TILE, GEMM_TILE, GEMM_TILE,
                                      SubgroupScope())) || return nothing
     nw * 32 <= dev.workgrouplimit ||
         throw(ArgumentError("nw=$nw wants $(nw * 32) invocations, past this " *
@@ -216,7 +216,7 @@ function coopmat_gemm_cm2!(C, A, B, M::Int, N::Int, K::Int; tiling = nothing,
     # context and would put the work on the wrong GPU.
     backend = KernelAbstractions.get_backend(C)
     dev = caps(backend)
-    KI.supports_tensor_addressing(backend) || return nothing
+    Lava.supports_tensor_addressing(backend) || return nothing
     tiling = something(tiling, gemm_cm2_tiling(dev))
     tiling === nothing && return nothing
     BM, BN, BK, NT = tiling

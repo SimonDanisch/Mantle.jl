@@ -26,8 +26,7 @@ Makie = {url = "https://github.com/MakieOrg/Makie.jl", rev = "sd/lava-refactor",
 ComputePipeline = {url = "https://github.com/MakieOrg/Makie.jl", rev = "sd/lava-refactor", subdir = "ComputePipeline"}
 RayMakie = {url = "https://github.com/MakieOrg/Makie.jl", rev = "sd/lava-refactor", subdir = "RayMakie"}
 Metal = {url = "https://github.com/SimonDanisch/Metal.jl", rev = "sd/lava-refactor"}
-KernelInterface = {url = "https://github.com/SimonDanisch/KernelAbstractions.jl", rev = "sd/lava-refactor", subdir = "lib/KernelInterface"}
-Lava = {url = "https://github.com/SimonDanisch/Lava.jl", rev = "sd/lava-refactor"}
+Lava = {url = "https://github.com/SimonDanisch/Lava.jl", rev = "main"}
 
 [compat]
 julia = "1.12"

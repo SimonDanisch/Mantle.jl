@@ -83,7 +83,7 @@ function resolve_shader_pair(pipeline, vert_tt::Type, frag_tt::Type)
     flats = Mantle.flatoutputs(last)
     # A body declaring a leading `VertexIndex` is handed one, as on every backend.
     vf = Mantle.stagefunction(pipeline.vertex)
-    vid = KI.wantsvertexindex(vf, Tuple(vert_tt.parameters))
+    vid = Lava.wantsvertexindex(vf, Tuple(vert_tt.parameters))
     wrapped_vert = VertexWrapper{typeof(vf), flats, vid}()
     wrapped_frag = FragmentWrapper{typeof(Mantle.stagefunction(pipeline.fragment)), vout, flats}()
     return wrapped_vert, vert_tt, wrapped_frag, frag_tt

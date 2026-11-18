@@ -26,7 +26,7 @@ end
     shid = Symbol(:mantle_gemvk_,NROWS,:_,BLOCK,:_,SUB)
     return quote
         # one partial per (subgroup, output column)
-        parts = KI.localmemory(Float32, Val(($(NROWS * nsub),)), Val($(QuoteNode(shid))))
+        parts = KI.localmemory(Float32, Val(($(NROWS * nsub),)))
 
         tid = KI.get_local_id().x - 1
         grp = KI.get_group_id().x - 1
@@ -67,7 +67,7 @@ end
         end
 
         # subgroup first, then across subgroups through shared memory
-        Base.Cartesian.@nexprs $NROWS r -> red_r = sub_group_reduce_add(acc_r)
+        Base.Cartesian.@nexprs $NROWS r -> red_r = KI.sub_group_reduce(+, acc_r)
         @inbounds if lane == 0
             Base.Cartesian.@nexprs $NROWS r -> begin
                 parts[sub * $NROWS + r] = red_r
@@ -127,7 +127,7 @@ end
         end
     end
     return quote
-        parts = KI.localmemory(Float32, Val(($BLOCK,)), Val($(QuoteNode(shid))))
+        parts = KI.localmemory(Float32, Val(($BLOCK,)))
 
         tid = KI.get_local_id().x - 1
         grp = KI.get_group_id().x - 1

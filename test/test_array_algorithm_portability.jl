@@ -13,7 +13,7 @@ removed was the same thing — a capability query routed through a `LavaDevice`:
     workgroup_limit(vk_context(A))   ->   workgrouplimit(A)
     max_shared_memory(vk_context(A)) ->   sharedbudget(A)
 
-Array to context to caps, versus array to backend to `KernelInterface.caps`. Same
+Array to context to caps, versus array to backend to `Lava.caps`. Same
 three fields, and the middle step is the one a Metal backend does not have.
 `test_array_capability_queries.jl` checks on every backend that the array's
 queries answer for its device; this file needs no device.
@@ -28,7 +28,7 @@ This file is the ratchet: the count may fall and may not rise. A new
 """
 
 using Test, Mantle
-import KernelInterface as KI
+import Lava
 
 # ── What moved ────────────────────────────────────────────────────────────────
 #
@@ -44,7 +44,7 @@ import KernelInterface as KI
 # `gemmstrides` for its dense arrays and `splitscratch` for split-k scratch. The
 # cooperative-matrix kernels are written against KernelInterface's `CoopMatrix`
 # and its operations, and `gemm_cm2.jl` against KI's tensor layouts, gated on
-# `KI.supports_tensor_addressing`.
+# `Lava.supports_tensor_addressing`.
 #
 # `coopmat_gemm_available` stays in the Vulkan tree: it is the probe that fills
 # `DeviceCaps.coopmat`, and consumers ask the portable `coopmatgemm(x)`.
@@ -56,7 +56,7 @@ function vulkan_lines(path::AbstractString)
 end
 
 # Where each algorithm stood on 2026-08-27, after the capability queries moved to
-# `KernelInterface.caps`. Zero means the file is portable as far as this measure
+# `Lava.caps`. Zero means the file is portable as far as this measure
 # goes.
 const VULKAN_BUDGET = Dict(
     # `gemm.jl` keeps the `mul!` entry points and `coopmat_gemm_available`, the
@@ -71,15 +71,15 @@ const VULKAN_BUDGET = Dict(
 @testset "the portable array algorithms stay portable" begin
     dir = joinpath(dirname(pathof(Mantle)), "vulkan", "array")
 
-    @testset "Mantle exposes KernelInterface's complete cooperative-matrix surface" begin
-        @test Mantle.CoopMatrix === KI.CoopMatrix
-        @test Mantle.AcceleratedMatrix === KI.AcceleratedMatrix
-        @test Mantle.WorkgroupMatrix === KI.WorkgroupMatrix
+    @testset "Mantle exposes Lava's complete cooperative-matrix surface" begin
+        @test Mantle.CoopMatrix === Lava.CoopMatrix
+        @test Mantle.AcceleratedMatrix === Lava.AcceleratedMatrix
+        @test Mantle.WorkgroupMatrix === Lava.WorkgroupMatrix
         for name in (:coopmat_load, :coopmat_store, :coopmat_muladd,
                      :coopmat_mul, :coopmat_add, :coopmat_zero, :coopmat_undef,
                      :coopmat_convert, :coopmat_length, :coopmat_getcomp,
                      :coopmat_setcomp)
-            @test getfield(Mantle, name) === getfield(KI, name)
+            @test getfield(Mantle, name) === getfield(Lava, name)
         end
     end
 

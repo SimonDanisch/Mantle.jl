@@ -29,7 +29,7 @@ the device's own tile rather than at 16.
 """
 
 using Test, KernelAbstractions
-using KernelInterface: AcceleratedMatrix, Accumulator, coopmat_add, coopmat_mul
+using Lava: AcceleratedMatrix, Accumulator, coopmat_add, coopmat_mul
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 

@@ -1,6 +1,6 @@
 # Sampling a bound texture, and the layout it is bound in.
 #
-# `KernelInterface.sample_texture_2d` names a SLOT, and how a texture reaches the
+# `Lava.sample_texture_2d` names a SLOT, and how a texture reaches the
 # intrinsic is each backend's business (a descriptor set on Vulkan, a lowering
 # onto an argument on Metal). What is asserted here is what a caller can see:
 # which texel a coordinate lands on, that the FILTERING is the sampler's rather

@@ -15,7 +15,7 @@
 # every backend that has a mesh pipeline.
 
 using Test, Mantle
-import KernelInterface as KI
+import Lava
 using Mantle: Vec4f
 using ColorTypes: BGRA
 using ColorTypes.FixedPointNumbers: N0f8
@@ -24,13 +24,13 @@ using ColorTypes.FixedPointNumbers: N0f8
 # if the argument arrives, and the walk has something to classify.
 # `set_mesh_outputs!` first: Vulkan requires it before any output is written.
 function gm_mesh(out, colours)
-    KI.set_mesh_outputs!(out, 3, 1)
+    Lava.set_mesh_outputs!(out, 3, 1)
     @inbounds c = colours[1]
     col = (c[1], c[2], c[3], c[4])
-    KI.set_mesh_vertex!(out, 1, (position = (-1f0, -1f0, 0f0, 1f0), colour = col))
-    KI.set_mesh_vertex!(out, 2, (position = ( 3f0, -1f0, 0f0, 1f0), colour = col))
-    KI.set_mesh_vertex!(out, 3, (position = (-1f0,  3f0, 0f0, 1f0), colour = col))
-    KI.set_mesh_triangle!(out, 1, 1, 2, 3)
+    Lava.set_mesh_vertex!(out, 1, (position = (-1f0, -1f0, 0f0, 1f0), colour = col))
+    Lava.set_mesh_vertex!(out, 2, (position = ( 3f0, -1f0, 0f0, 1f0), colour = col))
+    Lava.set_mesh_vertex!(out, 3, (position = (-1f0,  3f0, 0f0, 1f0), colour = col))
+    Lava.set_mesh_triangle!(out, 1, 1, 2, 3)
     return nothing
 end
 

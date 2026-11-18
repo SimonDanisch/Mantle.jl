@@ -1,6 +1,7 @@
 using Test, Mantle
 using KernelAbstractions
 import KernelInterface as KI
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 # An array can report its own package's backend, which resolves to its device
 # (Metal.jl's `MetalBackend`, AMDGPU.jl's `ROCBackend`); the device compiles.
@@ -12,15 +13,15 @@ KernelAbstractions.@kernel function preparation_group!(out)
 end
 
 @testset "array launches share KA construction and preserve group/order" begin
-    be = KernelAbstractions.CPU()
-    out = zeros(Int32, 64)
+    be = TESTBACKEND
+    out = KernelAbstractions.zeros(be, Int32, 64)
     launches = (Mantle.ArrayLaunch(preparation_group!, (out,), 64, 8),
                 Mantle.ArrayLaunch(preparation_group!, (out,), 64, 16))
     @test Mantle.runlaunches!(be, launches) === nothing
-    @test out == fill(Int32(96), 64)
+    @test Array(out) == fill(Int32(96), 64)
     fill!(out, 0)
     Mantle.runlaunches!(be, (Mantle.ArrayLaunch(preparation_group!, (out,), 64),))
-    @test all(>(0), out)
+    @test all(>(0), Array(out))
 end
 struct PreparationDevice <: Mantle.Device
     launches::Vector{Any}

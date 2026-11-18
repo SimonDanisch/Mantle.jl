@@ -1,4 +1,4 @@
-# `KernelInterface.DeviceCaps` for Metal. A field Metal does not report is `0`
+# `Lava.DeviceCaps` for Metal. A field Metal does not report is `0`
 # ("not known"), never a guess.
 
 """

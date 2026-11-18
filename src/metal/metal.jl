@@ -28,6 +28,7 @@ include("memory.jl")
 include("caps.jl")
 include("kernelinterface.jl")
 include("device_intrinsics.jl")
+include("coopmat.jl")          # the vocabulary's cooperative matrices on `simdgroup_matrix`
 include("ka.jl")
 include("raytracing.jl")
 # After raytracing.jl: needs `MetalTLAS` and `MetalBLAS`.

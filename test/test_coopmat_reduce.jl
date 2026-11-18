@@ -35,9 +35,9 @@ usage.
 """
 
 using Test, Mantle, KernelAbstractions
-import KernelInterface as KI
+import Lava
 include(joinpath(@__DIR__, "testbackend.jl"))
-using KernelInterface: AcceleratedMatrix, Accumulator, CoopMatReduce, coopmat_reduce
+using Lava: AcceleratedMatrix, Accumulator, CoopMatReduce, coopmat_reduce
 const KA = KernelAbstractions
 const RT = Mantle.GEMM_TILE
 
@@ -57,7 +57,7 @@ end
 
 @testset "coopmat_reduce: OpCooperativeMatrixReduceNV" begin
     backend = TESTBACKEND
-    if !KI.supports_coopmat_reduce(backend)
+    if !Lava.supports_coopmat_reduce(backend)
         @info "no cooperative-matrix reductions on this device; skipping" Mantle.devicename(Mantle.Device(backend))
     else
         # One subgroup, at the width a cooperative-matrix kernel runs at.

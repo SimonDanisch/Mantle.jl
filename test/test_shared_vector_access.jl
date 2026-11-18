@@ -17,7 +17,7 @@ const SV4 = NTuple{4, VecElement{Float32}}
 # Stage scalars, read them back as vectors: each of the first 16 work-items one
 # vector at a dynamic index, and the first also the vector at a constant one.
 function shared_vector_read(out, outc, x)
-    sh = KI.localmemory(Float32, Val((SV_WG,)), Val(1))
+    sh = KI.localmemory(Float32, Val((SV_WG,)))
     t = KI.get_local_id().x
     @inbounds sh[t] = x[t]
     KI.barrier()
@@ -43,7 +43,7 @@ end
 # Write vectors of Float32 into UInt32 memory, read it back as scalars: the
 # components are stored as the memory's own type.
 function shared_vector_write(out, x)
-    sh = KI.localmemory(UInt32, Val((SV_WG,)), Val(1))
+    sh = KI.localmemory(UInt32, Val((SV_WG,)))
     t = KI.get_local_id().x
     if t <= SV_WG ÷ 4
         i = 4 * (t - 1)

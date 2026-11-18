@@ -13,25 +13,25 @@
 # tests the KHR path under a flexible-sounding name), and the result is compared
 # against a CPU reference elementwise.
 using Test, Mantle, KernelAbstractions
-import KernelInterface as KI
+import Lava
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
-const AMg = KI.AcceleratedMatrix
+const AMg = Lava.AcceleratedMatrix
 
 @kernel cpu = false unsafe_indices = true function flexdim_mul!(C, @Const(A), @Const(B))
-    a = KI.coopmat_load(AMg{Float16,64,16,KI.MatrixA}, pointer(A), 1, 64)
-    b = KI.coopmat_load(AMg{Float16,16,16,KI.MatrixB}, pointer(B), 1, 16)
-    c = KI.coopmat_muladd(a, b, KI.coopmat_zero(AMg{Float32,64,16,KI.Accumulator}))
+    a = Lava.coopmat_load(AMg{Float16,64,16,Lava.MatrixA}, pointer(A), 1, 64)
+    b = Lava.coopmat_load(AMg{Float16,16,16,Lava.MatrixB}, pointer(B), 1, 16)
+    c = Lava.coopmat_muladd(a, b, Lava.coopmat_zero(AMg{Float32,64,16,Lava.Accumulator}))
     Mantle.copyto!(pointer(C), 1, 64, c)
 end
 
 @testset "coopmat2 flexible dimensions" begin
-    if !Mantle.caps(TESTBACKEND).coopmat || !KI.supports_flexible_coopmat_shapes(TESTBACKEND)
+    if !Mantle.caps(TESTBACKEND).coopmat || !Lava.supports_flexible_coopmat_shapes(TESTBACKEND)
         @info "flexible dimensions unavailable — skipping"
     else
         # The premise. If some device DOES report a 64-row shape, this test is
         # exercising the ordinary KHR path and proves nothing about flexibility.
-        @test !any(s -> s.M == 64 && s.N == 16 && s.K == 16, KI.matrix_shapes(TESTBACKEND))
+        @test !any(s -> s.M == 64 && s.N == 16 && s.K == 16, Lava.matrix_shapes(TESTBACKEND))
 
         back = TESTBACKEND
         # A cooperative matrix is subgroup-scoped, so the launch is exactly one

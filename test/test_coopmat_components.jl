@@ -27,8 +27,8 @@ it is the regression test for that: `prescan_function_for_coopmat_components!`.
 """
 
 using Test, KernelAbstractions
-using KernelInterface: AcceleratedMatrix, Accumulator,
-                       coopmat_length, coopmat_getcomp, coopmat_setcomp
+using Lava: AcceleratedMatrix, Accumulator, coopmat_length, coopmat_getcomp,
+    coopmat_setcomp
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 

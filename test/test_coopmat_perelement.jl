@@ -30,10 +30,11 @@ property of the compiled module, so Lava's suite asserts it on the disassembly
 
 using Test, Mantle, KernelAbstractions
 import KernelInterface as KI
+import Lava
 include(joinpath(@__DIR__, "testbackend.jl"))
 
 const KA = KernelAbstractions
-const AMpe = KI.AcceleratedMatrix
+const AMpe = Lava.AcceleratedMatrix
 const TILEpe = Mantle.GEMM_TILE
 
 # Depends on both indices, and is not symmetric under swapping them.
@@ -47,8 +48,8 @@ rowscale(row::UInt32, col::UInt32, e::Float32,
 
 @kernel cpu=false function pe_rowcol!(C, @Const(A))
     @inbounds begin
-        m = AMpe{Float32,TILEpe,TILEpe,KI.Accumulator}(pointer(A), 1, TILEpe)
-        Mantle.copyto!(pointer(C), 1, TILEpe, KI.coopmat_perelement(rowcolmap, m))
+        m = AMpe{Float32,TILEpe,TILEpe,Lava.Accumulator}(pointer(A), 1, TILEpe)
+        Mantle.copyto!(pointer(C), 1, TILEpe, Lava.coopmat_perelement(rowcolmap, m))
     end
 end
 
@@ -59,9 +60,9 @@ end
         tid <= 2 * TILEpe &&
             (cs[tid] = tid <= TILEpe ? Float32(tid) : Float32(100 + tid - TILEpe))
         @synchronize
-        m = AMpe{Float32,TILEpe,TILEpe,KI.Accumulator}(pointer(A), 1, TILEpe)
+        m = AMpe{Float32,TILEpe,TILEpe,Lava.Accumulator}(pointer(A), 1, TILEpe)
         Mantle.copyto!(pointer(C), 1, TILEpe,
-                     KI.coopmat_perelement(rowscale, m, cs.ptr, base))
+                     Lava.coopmat_perelement(rowscale, m, cs.ptr, base))
     end
 end
 
@@ -75,9 +76,9 @@ end
         tid <= 2 * TILEpe &&
             (cs[tid] = tid <= TILEpe ? Float32(tid) : Float32(100 + tid - TILEpe))
         @synchronize
-        m = AMpe{Float32,TILEpe,TILEpe,KI.Accumulator}(pointer(A), 1, TILEpe)
-        s = AMpe{Float32,TILEpe,TILEpe,KI.Accumulator}(cs, 1 + base, 0, Val(false))
-        Mantle.copyto!(pointer(C), 1, TILEpe, KI.coopmat_mul(m, s))
+        m = AMpe{Float32,TILEpe,TILEpe,Lava.Accumulator}(pointer(A), 1, TILEpe)
+        s = AMpe{Float32,TILEpe,TILEpe,Lava.Accumulator}(cs, 1 + base, 0, Val(false))
+        Mantle.copyto!(pointer(C), 1, TILEpe, Lava.coopmat_mul(m, s))
     end
 end
 
@@ -96,7 +97,7 @@ end
     # and is checked on every backend in `test/test_coopmat_add.jl`; here it is
     # only the reference the per-element callback is compared against below.
 
-    if !KI.supports_coopmat_perelement(TESTBACKEND)
+    if !Lava.supports_coopmat_perelement(TESTBACKEND)
         @info "no VK_NV_cooperative_matrix2 per-element operations; skipping"
     else
         @testset "the callback sees the element's own row and column" begin

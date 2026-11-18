@@ -64,8 +64,8 @@ end
 # `lo` holds each workitem's local id and `hi` holds it negated, so their
 # difference is `2l` if the buffers are distinct and `0` if they alias.
 function twotiles!(out, n::Int, ::Val{WG}) where {WG}
-    lo = KI.localmemory(Float32, Val((WG,)), Val(1))
-    hi = KI.localmemory(Float32, Val((WG,)), Val(2))
+    lo = KI.localmemory(Float32, Val((WG,)))
+    hi = KI.localmemory(Float32, Val((WG,)))
     l = KI.get_local_id().x
     i = KI.get_global_id().x
     @inbounds lo[l] = Float32(l)

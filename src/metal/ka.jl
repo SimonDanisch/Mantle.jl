@@ -228,7 +228,7 @@ one, decided as `stage_signatures` decides it; that entry is dropped.
 function Mantle.vertextouches(dev::MetalDevice, shader, args::Tuple)
     f = Mantle.stagefunction(shader.vertex)
     argT = map(a -> Mantle.devicetype(dev, a), args)
-    lead = KI.wantsvertexindex(f, argT) ? (KI.VertexIndex,) : ()
+    lead = Lava.wantsvertexindex(f, argT) ? (Lava.VertexIndex,) : ()
     return stagetouches(dev, f, args; lead)
 end
 

@@ -1,7 +1,7 @@
 # Lowers a geometry stage onto a mesh pipeline, for backends without one (Metal).
 # One mesh threadgroup of one thread per input primitive: the thread evaluates the
 # vertex body once per input vertex, passing the index as a leading
-# `KernelInterface.VertexIndex` since a zero-argument `vertex_index()` cannot
+# `Lava.VertexIndex` since a zero-argument `vertex_index()` cannot
 # answer per call. The emitter's count is then the threadgroup's, so nothing is
 # padded; `threads > 1` would need a reduction before `set_mesh_outputs!`.
 
@@ -59,7 +59,7 @@ end
 
 # The primitive index is the only builtin the mesh stage reads. `runprimitive`
 # takes it as an argument instead, so the lowering also runs on the host over
-# `KernelInterface.HostMeshOutput` for comparison against the GPU's output.
+# `Lava.HostMeshOutput` for comparison against the GPU's output.
 function (m::GeometryAsMesh)(out, args::Vararg{Any,N}) where {N}
     return primitivewith(m, out, mesh_group_index(), args)
 end
@@ -156,7 +156,7 @@ whether the draw supplies an index buffer; the indexed stage reads it as its las
 argument, so the two are different shaders. The mesh stage's `outputs` are the
 geometry stage's, so the fragment stage and [`fragmentinputs`](@ref) match for
 both pipelines. The vertex body must accept a leading
-`KernelInterface.VertexIndex` (see the top of this file).
+`Lava.VertexIndex` (see the top of this file).
 """
 function lower_geometry_to_mesh(p::GraphicsPipeline; indexed::Bool = false)
     g = p.geometry
@@ -217,7 +217,7 @@ function requirevertexindex(@nospecialize(f), @nospecialize(argtypes::Type))
     wantsvertexindex(f, tt) && return nothing
     error("""
         $f cannot be lowered onto a mesh stage: it does not accept a leading
-        `KernelInterface.VertexIndex`.
+        `Lava.VertexIndex`.
 
         A mesh stage has no `vertex_index()`. One invocation evaluates the vertex
         body once per vertex of its input primitive, at indices IT computes, and a

@@ -1,8 +1,8 @@
 using Test, Mantle, KernelAbstractions
-import KernelInterface as KI
+import Lava
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
-const AMt = KI.AcceleratedMatrix
+const AMt = Lava.AcceleratedMatrix
 
 # `OpCooperativeMatrixLoadTensorNV` end to end: a layout is created, given the
 # tensor's extent, sliced to the block this workgroup owns, and the matrix is
@@ -30,26 +30,26 @@ const TL_N = 64          # tensor extent, and the array is TL_N x TL_N
 const TL_M = 16          # matrix tile
 
 @kernel cpu = false function tensorload_kernel!(out, @Const(src))
-    l  = KI.tensor_layout(Val(2), Val(KI.TENSOR_CLAMP_CONSTANT))
-    l2 = KI.tensor_setdim(l, (Int32(TL_N), Int32(TL_N)))
-    l3 = KI.tensor_slice(l2, (Int32(0), Int32(0)), (Int32(TL_M), Int32(TL_M)))
-    z  = KI.coopmat_zero(AMt{Float32,TL_M,TL_M,KI.Accumulator})
-    m  = KI.tensor_load(z, UInt64(pointer(src)), l3)
+    l  = Lava.tensor_layout(Val(2), Val(Lava.TENSOR_CLAMP_CONSTANT))
+    l2 = Lava.tensor_setdim(l, (Int32(TL_N), Int32(TL_N)))
+    l3 = Lava.tensor_slice(l2, (Int32(0), Int32(0)), (Int32(TL_M), Int32(TL_M)))
+    z  = Lava.coopmat_zero(AMt{Float32,TL_M,TL_M,Lava.Accumulator})
+    m  = Lava.tensor_load(z, UInt64(pointer(src)), l3)
     Mantle.copyto!(pointer(out), 1, TL_M, m)
 end
 
 @kernel cpu = false function tensorphi_kernel!(out, @Const(src), flag::Int32)
-    base = KI.tensor_setdim(
-               KI.tensor_layout(Val(2), Val(KI.TENSOR_CLAMP_CONSTANT)),
+    base = Lava.tensor_setdim(
+               Lava.tensor_layout(Val(2), Val(Lava.TENSOR_CLAMP_CONSTANT)),
                (Int32(TL_N), Int32(TL_N)))
-    l = flag == 1 ? KI.tensor_slice(base, (Int32(0), Int32(0)),      (Int32(TL_M), Int32(TL_M))) :
-                    KI.tensor_slice(base, (Int32(0), Int32(TL_M)),   (Int32(TL_M), Int32(TL_M)))
-    z = KI.coopmat_zero(AMt{Float32,TL_M,TL_M,KI.Accumulator})
-    Mantle.copyto!(pointer(out), 1, TL_M, KI.tensor_load(z, UInt64(pointer(src)), l))
+    l = flag == 1 ? Lava.tensor_slice(base, (Int32(0), Int32(0)),      (Int32(TL_M), Int32(TL_M))) :
+                    Lava.tensor_slice(base, (Int32(0), Int32(TL_M)),   (Int32(TL_M), Int32(TL_M)))
+    z = Lava.coopmat_zero(AMt{Float32,TL_M,TL_M,Lava.Accumulator})
+    Mantle.copyto!(pointer(out), 1, TL_M, Lava.tensor_load(z, UInt64(pointer(src)), l))
 end
 
 @testset "OpCooperativeMatrixLoadTensorNV loads what the layout describes" begin
-    if !KI.supports_tensor_addressing(TESTBACKEND)
+    if !Lava.supports_tensor_addressing(TESTBACKEND)
         @info "device has no coopmat2 tensor addressing — skipping"
     else
         back = TESTBACKEND
@@ -100,7 +100,7 @@ end
 # `OpUndef` instead, which is correct because the edge is only taken where the
 # value is dead.
 @testset "a phi over tensor layouts is typed, not %uint" begin
-    if !KI.supports_tensor_addressing(TESTBACKEND)
+    if !Lava.supports_tensor_addressing(TESTBACKEND)
         @info "device has no coopmat2 tensor addressing — skipping"
     else
         back = TESTBACKEND

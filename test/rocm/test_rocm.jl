@@ -2,7 +2,7 @@
 # Load the supported AMDGPU source described in test/rocm/README.md.
 
 using Test, LinearAlgebra
-import Mantle, AMDGPU, KernelAbstractions, KernelInterface
+import Mantle, Lava, AMDGPU, KernelAbstractions, KernelInterface
 using KernelAbstractions: @kernel, @index, @Const
 const M = Mantle
 const KI = KernelInterface
@@ -332,7 +332,7 @@ end
         @test M.caps(dev).coopmat
         @test M.caps(dev).tile == 16
         @test M.caps(dev).shapes ==
-              [KI.MatrixShape(Float16, Float32, 16, 16, 16, KI.SubgroupScope())]
+              [Lava.MatrixShape(Float16, Float32, 16, 16, 16, Lava.SubgroupScope())]
 
         # The advertised floor has to compile through its real consumer, not
         # merely exist in the capability table.  This takes the vector-packed

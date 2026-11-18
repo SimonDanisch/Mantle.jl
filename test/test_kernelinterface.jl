@@ -31,6 +31,7 @@ while leaving one of the three wrong — the macro-less form is what catches tha
 
 using Test, Mantle
 import KernelInterface as KI
+import Lava
 include(joinpath(@__DIR__, "testbackend.jl"))
 
 # A kernel per index query, each writing what it read so the host can check the
@@ -72,7 +73,7 @@ end
 function ki_subgroup_kernel(sz, lane, nsg, sgid, red)
     i = KI.get_global_id().x
     l = KI.get_sub_group_local_id(Int32)
-    r = KI.sub_group_reduce_add(Float32(l))
+    r = KI.sub_group_reduce(+, Float32(l))
     @inbounds if i <= length(sz)
         sz[i] = KI.get_sub_group_size(Int32)
         lane[i] = l
@@ -92,8 +93,8 @@ const KI_WG = 64
 # second store would land on the first tile; without the barrier the read could
 # see the slot before its owner wrote it.
 function ki_localmem_kernel(outa, outb)
-    a = KI.localmemory(Float32, Val((KI_WG,)), Val(1))
-    b = KI.localmemory(Float32, Val((KI_WG,)), Val(2))
+    a = KI.localmemory(Float32, Val((KI_WG,)))
+    b = KI.localmemory(Float32, Val((KI_WG,)))
     t = KI.get_local_id().x
     g = KI.get_global_id().x
     @inbounds a[t] = Float32(t)
@@ -282,34 +283,24 @@ end
                        [Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
                         Float16, Float32, Float64])
         @test Float32 in types
-        # A SUBSET since KernelInterface 0.4: `shfl_types` lists the types the
-        # backend shuffles natively, and `supports_shuffle` adds every other
-        # primitive type KI's fallbacks move as `UInt32` words. Metal shuffles
-        # eight types natively and Int64 through the fallback (2026-10-16).
-        @test issubset(KI.shfl_types(backend), types)
-        @test Float32 in KI.sub_group_reduce_add_types(backend)
-        # A Float64 SUM is a Float64 computation: listed only where the device
-        # has Float64. A Float64 shuffle is not, KI 0.4 moves it as two words on
-        # any device, so `types` may hold Float64 where the device has none.
-        if !KI.supports_float64(backend)
-            @test !(Float64 in KI.shfl_types(backend))
-            @test !(Float64 in KI.sub_group_reduce_add_types(backend))
-        end
+        # `KI.sub_group_reduce` takes every type `supports_shuffle` does: KI's
+        # fallback reduces with shuffles, and a backend answers `+` of the types it
+        # has an instruction for natively (`test_subgroup_shuffle.jl` runs both).
     end
 
     @testset "cooperative matrices" begin
         # The vocabulary, in KI rather than a package of its own.
         # `matrix_shapes` is the backend hook beside it, and it has to agree
         # with the `DeviceCaps` accessors rather than being a second opinion.
-        shapes = KI.matrix_shapes(backend)
-        @test shapes == (c.coopmat ? c.shapes : KI.MatrixShape[])
+        shapes = Lava.matrix_shapes(backend)
+        @test shapes == (c.coopmat ? c.shapes : Lava.MatrixShape[])
 
         # `bestshape` returns `nothing` rather than a fabricated tile, on a
         # device without matrix hardware and for a type pair it does not list.
-        @test KI.bestshape(backend, Float64, Float64) === nothing
-        best = KI.bestshape(backend, Float16, Float32)
+        @test Lava.bestshape(backend, Float64, Float64) === nothing
+        best = Lava.bestshape(backend, Float16, Float32)
         if c.coopmat && !isempty(shapes)
-            @test best === nothing || (KI.supports(backend, best) && best.acc === Float32)
+            @test best === nothing || (Lava.supports(backend, best) && best.acc === Float32)
         else
             @test best === nothing
         end
@@ -345,7 +336,7 @@ end
                   KI.get_sub_group_size, KI.get_max_sub_group_size,
                   KI.get_num_sub_groups, KI.get_sub_group_id,
                   KI.get_sub_group_local_id, KI.shfl_down, KI.shfl,
-                  KI.sub_group_reduce_add, KI.barrier, KI.sub_group_barrier,
+                  KI.sub_group_reduce, KI.barrier, KI.sub_group_barrier,
                   KI.localmemory, KI._print)
             @test all(m -> m.module === KI, methods(f))
         end
@@ -353,7 +344,7 @@ end
         # reports itself rather than executing.
         @test_throws ErrorException KI.barrier()
         @test_throws ErrorException KI.sub_group_barrier()
-        @test_throws ErrorException KI.localmemory(Float32, (2, 2), 1)
+        @test_throws ErrorException KI.localmemory(Float32, (2, 2))
     end
 
     # Not exercised on the device here: `get_local_size`, `get_global_size`,
