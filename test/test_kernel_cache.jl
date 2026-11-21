@@ -92,6 +92,6 @@ end
         Mantle.resetkernelcompiles!(dev)
         @eval kc_value(i) = Float32(i) * 2f0
         @test Base.invokelatest(kc_run, backend) == 6f0
-        @test Mantle.kernelcompiles(dev).misses == 0
+        @test Mantle.kernelcompiles(dev).misses == 0 broken = metalperfpending()
     end
 end

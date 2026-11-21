@@ -101,16 +101,16 @@ allocate(pool::Pool, dev, kind, ::Type{T}, dims::Integer...; kw...) where {T} =
     allocate(pool, dev, kind, T, Int.(dims); kw...)
 
 """Maximum workgroup invocations for the backend of x."""
-workgrouplimit(x) = caps(KernelAbstractions.get_backend(x)).workgrouplimit
+workgrouplimit(x) = caps(Device(KernelAbstractions.get_backend(x))).workgrouplimit
 
 """Workgroup-memory budget in bytes for the backend of x."""
-sharedbudget(x) = caps(KernelAbstractions.get_backend(x)).sharedbudget
+sharedbudget(x) = caps(Device(KernelAbstractions.get_backend(x))).sharedbudget
 
 """Actual subgroup width for x; reductions must use this device fact."""
-subgroupwidth(x) = caps(KernelAbstractions.get_backend(x)).subgroup
+subgroupwidth(x) = caps(Device(KernelAbstractions.get_backend(x))).subgroup
 
 """Whether the backend of x supports the cooperative-matrix GEMM shape."""
-coopmatgemm(x) = caps(KernelAbstractions.get_backend(x)).coopmat
+coopmatgemm(x) = caps(Device(KernelAbstractions.get_backend(x))).coopmat
 
 """devicearray(backend, data) -> AbstractGPUArray
 

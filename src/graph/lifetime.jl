@@ -151,9 +151,9 @@ end
     Expr(:block, Expr[:(holdleaves!(holder, x[$i])) for i in 1:fieldcount(x)]..., :(nothing))
 end
 
-# The sole fallback: no `::Any` method exists for this `@generated` to collide with
-# during precompile. Short-circuits resolve at codegen time.
-@generated function holdleaves!(holder, x::T) where {T}
+# The walk of a `T`'s fields, for the generated walks below. Short-circuits resolve
+# at codegen time.
+function holdfields_expr(T)
     # An isbits type cannot transitively contain an array, which is mutable.
     isbitstype(T) && return :(nothing)
     (T <: Ptr || T <: Type || T === Nothing || T <: Symbol || T <: AbstractChar ||
@@ -162,6 +162,20 @@ end
     n == 0 && return :(nothing)
     Expr(:block, Expr[:(holdleaves!(holder, getfield(x, $i))) for i in 1:n]..., :(nothing))
 end
+
+# The sole fallback: no `::Any` method exists for this `@generated` to collide with
+# during precompile.
+@generated holdleaves!(holder, x::T) where {T} = holdfields_expr(T)
+
+"""
+    holdfields!(holder, x) -> nothing
+
+Walk `x`'s fields as [`holdleaves!`](@ref) walks a struct's, for an array too, which
+`holdleaves!` holds whole. Holding an array keeps the arrays it wraps alive (a view's
+parent, the slots of Raycore's `StaticMultiTypeSet`), but a holder that needs each
+storage array itself (Metal's, which declares buffers) walks into it with this.
+"""
+@generated holdfields!(holder, x::T) where {T} = holdfields_expr(T)
 
 # A resource without a stamp is untracked and costs one dynamic call.
 @inline function claim!(@nospecialize(obj))

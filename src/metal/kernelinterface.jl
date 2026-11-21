@@ -1,23 +1,80 @@
 # A `MetalDevice` is a KernelInterface backend, as every `Device` is. Metal.jl
 # implements the vocabulary for its `MetalBackend`; the device answers each verb
-# as `metalbackend(d)`, Metal.jl's backend bound to the device's batch, so there
-# is one implementation and a launch goes to the device's queue. Metal.jl defines
-# the device intrinsics itself; redefining them here is a method overwrite, which
-# fails precompilation.
+# as `metalbackend(d)`, so there is one implementation. Metal.jl's backend carries
+# no queue, so the verbs that submit work pass the device's batch (`queue = ...`)
+# or run under `Metal.global_queue!`. Metal.jl defines the device intrinsics
+# itself; redefining them here is a method overwrite, which fails precompilation.
 
-KI.allocate(d::MetalDevice, ::Type{T}, dims::Tuple; unified::Union{Nothing,Bool} = nothing) where {T} =
-    KI.allocate(metalbackend(d), T, dims; unified = something(unified, false))
+function KI.allocate(d::MetalDevice, ::Type{T}, dims::Tuple; unified::Union{Nothing,Bool} = nothing) where {T}
+    # Any integer extents, as `KA.allocate` takes them (Hikari's NanoVDB sizes are `Int32`).
+    dims = Dims(dims)
+    # Metal.jl asserts that a buffer fits `maxBufferLength`; past it, the device is out
+    # of memory for this request, which callers catch as such.
+    checkedbytes(T, dims) > maxalloc(d) && throw(OutOfMemoryError())
+    return KI.allocate(metalbackend(d), T, dims; unified = something(unified, false))
+end
 # As `KA.synchronize(::LavaDevice)`: the device's default channel.
 KI.synchronize(d::MetalDevice) = (flush!(batchqueue(d)); nothing)
-KI.copyto!(d::MetalDevice, dest, src) = KI.copyto!(metalbackend(d), dest, src)
+KI.copyto!(d::MetalDevice, dest, src) =
+    Metal.global_queue!(() -> KI.copyto!(metalbackend(d), dest, src), batchqueue(d))
 KI.versioninfo(io::IO, d::MetalDevice) = KI.versioninfo(io, metalbackend(d))
 KI.supports_shuffle(d::MetalDevice, ::Type{T}) where {T} = KI.supports_shuffle(metalbackend(d), T)
-KI.argconvert(d::MetalDevice, x) = KI.argconvert(metalbackend(d), x)
+"""
+    KI.argconvert(dev::MetalDevice, x)
+
+`x` as a kernel takes it, with every Metal.jl array in it made resident first. A
+converted array is a device address, and what keeps one outside a launch (Raycore's
+type slots and texture tables, a light list) reaches the buffer by that address
+alone, which Metal maps only for a buffer in a residency set. Arrays Mantle fills
+from host data are in the device's set already (`residentarray`); one Metal.jl
+allocated (`resize!`, `similar`) is not, and read zeros.
+"""
+function KI.argconvert(d::MetalDevice, x)
+    Mantle.holdleaves!(ResidentLeaves(residency(d)), x)
+    return KI.argconvert(metalbackend(d), x)
+end
+
+"""
+A holder that `holdleaves!` hands the Metal.jl arrays of an argument. Metal declares
+buffers, not objects, so an array that only wraps others (a view, Raycore's set of
+typed slots) is walked for them instead of held whole, and a host `Array`, which no
+kernel takes, is skipped. A pool region is a leaf: its block is the pool's.
+"""
+abstract type MetalLeaves end
+Mantle.holdleaves!(c::MetalLeaves, a::AbstractArray) = Mantle.holdfields!(c, a)
+Mantle.holdleaves!(c::MetalLeaves, a::Metal.MtlArray) = (Mantle.hold!(c, a); nothing)
+Mantle.holdleaves!(c::MetalLeaves, a::DeviceArray) = (Mantle.hold!(c, a); nothing)
+Mantle.holdleaves!(::MetalLeaves, ::Array) = nothing
+
+# Makes each array of a converted argument resident (`KI.argconvert`).
+struct ResidentLeaves <: MetalLeaves
+    residency::MetalBindings.Residency
+end
+function Mantle.hold!(c::ResidentLeaves, a::Metal.MtlArray)
+    m = a.data[]
+    MetalBindings.resident!(c.residency, m.buffer, m)
+    return a
+end
+Mantle.hold!(::ResidentLeaves, a) = a
+"""
+    KI.kernel_function(dev::MetalDevice, f, tt) -> KI.Kernel
+
+Metal.jl's kernel for `f`, as a kernel of `dev`, which a launch submits to `dev`'s
+queue. Metal.jl's own kernel launches on the queue Metal.jl's task-local
+`global_queue` holds for the calling task: from a task the device never ran on,
+Metal.jl's queue, which none of the device's residency reaches. A kernel then read
+zeros through a stored handle, and nothing ordered it against the device's work.
+"""
 KI.kernel_function(d::MetalDevice, f::F, tt::TT = Tuple{}; kwargs...) where {F,TT} =
-    KI.kernel_function(metalbackend(d), f, tt; kwargs...)
-KI.record_event(d::MetalDevice) = KI.record_event(metalbackend(d))
+    KI.Kernel(d, KI.kernel_function(metalbackend(d), f, tt; kwargs...).kern)
+KI.max_work_group_size(k::KI.Kernel{<:MetalDevice, <:Metal.HostKernel}) = k.kern.maxthreads
+KI.launch(k::KI.Kernel{<:MetalDevice, <:Metal.HostKernel}, groups::Dims{3}, items::Dims{3},
+          args::Tuple; queue = batchqueue(k.backend), kwargs...) =
+    KI.launch(KI.Kernel(metalbackend(k.backend), k.kern), groups, items, args; queue, kwargs...)
+KI.record_event(d::MetalDevice) =
+    Metal.global_queue!(() -> KI.record_event(metalbackend(d)), batchqueue(d))
 KI.wait_event(d::MetalDevice, ev::Tuple{MTL.MTLSharedEvent,UInt64}) =
-    KI.wait_event(metalbackend(d), ev)
+    Metal.global_queue!(() -> KI.wait_event(metalbackend(d), ev), batchqueue(d))
 for f in (:functional, :supports_float64, :supports_atomics, :supports_unified,
           :supports_subgroups, :supports_linear_subgroups, :supports_independent_subgroups,
           :supports_partitionable_subgroups,
@@ -26,8 +83,10 @@ for f in (:functional, :supports_float64, :supports_atomics, :supports_unified,
     @eval KI.$f(d::MetalDevice) = KI.$f(metalbackend(d))
 end
 
-# `Adapt.adapt(dev, x)` uploads to the device.
+# `Adapt.adapt(dev, x)` uploads host arrays to the device, into an array `residentarray`
+# made; device arrays and views of them convert as Metal.jl converts them.
 Adapt.adapt_storage(d::MetalDevice, x) = Adapt.adapt_storage(metalbackend(d), x)
+Adapt.adapt_storage(d::MetalDevice, x::Array) = buffercopy(d, x)
 
 # AcceleratedKernels tunes per backend, and its Metal extension tunes Metal.jl's.
 for f in (:scan_tuning, :reduce_tuning, :predicate_tuning, :findall_tuning, :sort_tuning)
@@ -35,29 +94,25 @@ for f in (:scan_tuning, :reduce_tuning, :predicate_tuning, :findall_tuning, :sor
         AcceleratedKernels.$f(metalbackend(d), T)
 end
 
-# `KI.Kernel(backend, f)` around a plain function, on the device or on Metal.jl's
-# backend (`KA.get_backend` of an `MtlArray`): its argument types are known only
-# at launch, so it compiles for the launch arguments and answers its workgroup
-# limit from the device until then. Per backend type, not over their `Union`: Metal.jl
-# answers `Kernel{MetalBackend}` for its compiled kernels, and only these methods, on a
-# plain function, are more specific.
-for K in (:(KI.Kernel{Metal.MetalBackend, <:Function}), :(KI.Kernel{<:MetalDevice, <:Function}))
-    @eval begin
-        KI.max_work_group_size(k::$K) = KI.max_work_group_size(k.backend)
+# `KI.Kernel(dev, f)` around a plain function: its argument types are known only at
+# launch, so it compiles for the launch arguments and answers its workgroup limit
+# from the device until then. It launches on the device's batch unless the call
+# names a queue. Code holding Metal.jl's backend (`KA.get_backend` of an `MtlArray`)
+# builds the kernel on `Device(backend)`.
+KI.max_work_group_size(k::KI.Kernel{<:MetalDevice, <:Function}) = KI.max_work_group_size(k.backend)
 
-        function KI.launch(k::$K, groups::Dims{3}, items::Dims{3}, args::Tuple; kwargs...)
-            # A top-level `Buffer` or `GPURef` resolves to the array over its region, as in
-            # `dispatch!`; Metal.jl's compiler rejects it whole as a non-bitstype argument.
-            args = argmap(storage, args)
-            tt = Tuple{map(a -> Core.Typeof(KI.argconvert(k.backend, a)), args)...}
-            KI.launch(KI.kernel_function(k.backend, k.kern, tt), groups, items, args; kwargs...)
-        end
-    end
+function KI.launch(k::KI.Kernel{<:MetalDevice, <:Function}, groups::Dims{3}, items::Dims{3},
+                   args::Tuple; queue = batchqueue(k.backend), kwargs...)
+    # A top-level `Buffer` or `GPURef` resolves to the array over its region, as in
+    # `dispatch!`; Metal.jl's compiler rejects it whole as a non-bitstype argument.
+    args = argmap(storage, args)
+    # Typed through Metal.jl's conversion: the launch declares its arguments itself.
+    tt = Tuple{map(a -> Core.Typeof(KI.argconvert(metalbackend(k.backend), a)), args)...}
+    KI.launch(KI.kernel_function(k.backend, k.kern, tt), groups, items, args; queue, kwargs...)
 end
 
 # Mantle's entry points meet Metal.jl's backend as often as the device, since
 # `KA.get_backend` of an `MtlArray` returns it, and answer it as its device.
-caps(b::Metal.MetalBackend) = caps(Device(b))
 waitidle(b::Metal.MetalBackend) = waitidle(Device(b))
 Mantle.devicearray(b::Metal.MetalBackend, data::AbstractArray) = Mantle.devicearray(Device(b), data)
 for f in (:supports_batch_queue, :supports_graphics, :supports_geometry_stage,

@@ -8,10 +8,10 @@ A Metal presentation surface. `drawable` is the frame in flight's target and
 """
 mutable struct MetalLayer{T,D<:MetalDevice}
     device::D
-    layer::MTL.CAMetalLayer
+    layer::MetalBindings.CAMetalLayer
     width::Int
     height::Int
-    drawable::Union{Nothing,MTL.CAMetalDrawable}
+    drawable::Union{Nothing,MetalBindings.CAMetalDrawable}
 end
 
 """
@@ -24,7 +24,8 @@ its extent never disagrees with its drawables.
 """
 function windowsurface(d::MetalDevice, handle::GLFW.Window, ::Type{T}, width::Int, height::Int;
                        vsync::Bool, srgb::Bool) where {T}
-    layer = MTL.CAMetalLayer(d.dev, width, height; format = pixelformat(MetalAPI(), T; srgb), vsync)
+    layer = MetalBindings.CAMetalLayer(d.dev, width, height;
+                                       format = pixelformat(MetalAPI(), T; srgb), vsync)
     nswindow = ccall((:glfwGetCocoaWindow, GLFW.libglfw), Ptr{Cvoid}, (Ptr{Cvoid},), handle.handle)
     nswindow == C_NULL &&
         error("this GLFW window has no NSWindow; GLFW was not built for Cocoa")
@@ -32,9 +33,9 @@ function windowsurface(d::MetalDevice, handle::GLFW.Window, ::Type{T}, width::In
     ns = id{OCObject}(UInt(nswindow))
     view = @objc [ns::id{OCObject} contentView]::id{OCObject}
     @objc [view::id{OCObject} setWantsLayer:true::Bool]::Nothing
-    @objc [view::id{OCObject} setLayer:layer::id{MTL.CAMetalLayer}]::Nothing
+    @objc [view::id{OCObject} setLayer:layer::id{MetalBindings.CAMetalLayer}]::Nothing
     layer.contentsScale = @objc [ns::id{OCObject} backingScaleFactor]::Cdouble
-    layer.drawableSize = MTL.CGSize(Cdouble(width), Cdouble(height))
+    layer.drawableSize = MetalBindings.CGSize(Cdouble(width), Cdouble(height))
     got = layer.drawableSize
     return MetalLayer{T,typeof(d)}(d, layer, round(Int, got.width), round(Int, got.height), nothing)
 end
@@ -61,7 +62,7 @@ Base.eltype(::MetalLayer{T}) where {T} = T
 function fitsurface!(w::MetalLayer, width::Int, height::Int)
     (width, height) == (w.width, w.height) && return false
     w.width, w.height = width, height
-    w.layer.drawableSize = MTL.CGSize(Cdouble(width), Cdouble(height))
+    w.layer.drawableSize = MetalBindings.CGSize(Cdouble(width), Cdouble(height))
     return true
 end
 
@@ -78,7 +79,7 @@ function Mantle.acquire_next_image!(w::MetalLayer)
 end
 
 function nextdrawable(w::MetalLayer)
-    d = something(hostwait(MTL.next_drawable, nothing, w.layer))
+    d = something(hostwait(MetalBindings.next_drawable, nothing, w.layer))
     d === nothing &&
         error("no drawable became available; every one is still in flight. " *
               "Present the frames already recorded before starting another.")
@@ -94,7 +95,7 @@ function Mantle.present_frame!(d::MetalDevice, w::MetalLayer)
     dr = w.drawable
     dr === nothing && return nothing
     cb = framebuffer!(d.dev)
-    MTL.present_drawable!(cb, dr)
+    MetalBindings.present_drawable!(cb, dr)
     commit!(cb)
     w.drawable = nothing
     return nothing
@@ -112,7 +113,7 @@ function Mantle.readback_window(w::MetalLayer{T}) where {T}
     d = nextdrawable(w)
     tex = d.texture
     # The texture's extent, not the window's, so callers can check they agree.
-    return readbackimage(cmd -> MTL.present_drawable!(cmd, d), w.device,
+    return readbackimage(cmd -> MetalBindings.present_drawable!(cmd, d), w.device,
                          tex, T, Int(tex.width), Int(tex.height))
 end
 

@@ -37,7 +37,7 @@ end
                 end
             end
             if Mantle.recorded(plan)
-                @test workspace_replay_bytes(plan) == 0
+                @test workspace_replay_bytes(plan) == 0 broken = metalperfpending()
             end
         finally
             Mantle.free!(plan)

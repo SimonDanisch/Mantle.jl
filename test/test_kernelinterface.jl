@@ -146,12 +146,13 @@ end
 
     # SPIR-V's builtins are 0-based and KI's are 1-based, so every one of these
     # is a `+ 1` that has to be there exactly once.
-    @testset "a plain function launches on the backend its array reports" begin
-        # `KI.get_backend` of an `MtlArray` is Metal.jl's backend, not the device;
-        # a kernel built around a plain function launches there too. On Metal
-        # this was ambiguous with Metal.jl's methods for its compiled kernels.
+    @testset "a plain function launches on the device of the backend its array reports" begin
+        # `KI.get_backend` of an `MtlArray` is Metal.jl's backend, not the device. A
+        # `KI.Kernel` around a plain function is Mantle's, built on the device: Metal.jl's
+        # kernels come from `KI.kernel_function`, so a plain-function kernel on its
+        # backend would be a method of another package's function on its own type.
         a = Mantle.devicearray(backend, zeros(Float32, 5))
-        KI.Kernel(KI.get_backend(a), ki_fill_kernel)(a; ndrange = length(a))
+        KI.Kernel(Mantle.Device(KI.get_backend(a)), ki_fill_kernel)(a; ndrange = length(a))
         KI.synchronize(backend)
         @test Array(a) == ones(Float32, 5)
     end

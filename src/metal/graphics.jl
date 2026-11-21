@@ -35,7 +35,7 @@ end
 
 function apply_attachments!(desc, color_formats, depth_format, blend)
     for (i, fmt) in enumerate(color_formats)
-        att = desc.colorAttachments[i]
+        att = MetalBindings.colorattachment(desc, i)
         att.pixelFormat = fmt
         apply_blend!(att, Mantle.attachmentblend(blend, i,
                      fmt in (MTL.MTLPixelFormatR32Uint, MTL.MTLPixelFormatRG32Uint)))
@@ -44,12 +44,16 @@ function apply_attachments!(desc, color_formats, depth_format, blend)
     return desc
 end
 
+# In a pass with a depth target every pipeline sets a state, `DepthOff` too (compare
+# always, no writes): a render encoder keeps the last state set, so a depth-less draw
+# after a depth-tested one tested and wrote as that one did, and overdrawn text stayed
+# behind the mesh it was meant to cover.
 function depthstate(dev, depth, depth_format)
-    (depth_format === nothing || depth isa Mantle.DepthOff) && return nothing
-    dd = MTL.MTLDepthStencilDescriptor()
+    depth_format === nothing && return nothing
+    dd = MetalBindings.depth_stencil_descriptor()
     dd.depthCompareFunction = mtl_depth_compare(depth)
     dd.depthWriteEnabled = Mantle.depthwrites(depth)
-    return MTL.MTLDepthStencilState(dev, dd)
+    return MetalBindings.depth_stencil_state(dev, dd)
 end
 
 """A 2D texture on Metal. The element type is Mantle's spelling of the format."""
@@ -114,9 +118,9 @@ function blit_into_texture!(t::MetalTexture2D{T}, src::MTL.MTLBuffer, soff::Inte
     # Behind the device's uncommitted batch: commit order is execution order.
     cb = framebuffer!(t.dev)
     MTL.MTLBlitCommandEncoder(cb) do enc
-        MTL.append_copy!(enc, t.tex, MTL.MTLOrigin(0, 0, 0), MTL.MTLSize(w, h, 1),
-                          src, soff, w * sizeof(T), 0)
-        t.tex.mipmapLevelCount > 1 && MTL.append_generate_mipmaps!(enc, t.tex)
+        MetalBindings.append_copy!(enc, t.tex, MTL.MTLOrigin(0, 0, 0), MTL.MTLSize(w, h, 1),
+                                   src, soff, w * sizeof(T), 0)
+        t.tex.mipmapLevelCount > 1 && MetalBindings.append_generate_mipmaps!(enc, t.tex)
     end
     # Waited for, so the caller may reuse its array on return.
     submitwait!(cb)
@@ -133,7 +137,7 @@ function makesampler(d::MetalDevice, filter::Symbol, wrap::Symbol, anisotropy::F
         wrap === :clamp  ? MTL.MTLSamplerAddressModeClampToEdge :
         wrap === :mirror ? MTL.MTLSamplerAddressModeMirrorRepeat :
                            MTL.MTLSamplerAddressModeClampToBorderColor
-    desc = MTL.MTLSamplerDescriptor()
+    desc = MetalBindings.sampler_descriptor()
     desc.minFilter = f
     desc.magFilter = f
     desc.mipFilter = MTL.MTLSamplerMipFilterLinear
@@ -143,7 +147,7 @@ function makesampler(d::MetalDevice, filter::Symbol, wrap::Symbol, anisotropy::F
     # Metal counts the one sample of no anisotropy as 1.
     desc.maxAnisotropy = max(1, round(Int, anisotropy))
     desc.normalizedCoordinates = true
-    return MetalSampler(MTL.MTLSamplerState(d.dev, desc))
+    return MetalSampler(MetalBindings.sampler_state(d.dev, desc))
 end
 
 """
@@ -214,8 +218,8 @@ end
     stage_output_type(pipeline, stage) -> Type
 
 The struct a stage writes. For the vertex stage this is `Mantle.outputtype`, a
-`NamedTuple` type with the clip position prepended, which Metal.jl's
-`stage_outputs` reads directly.
+`NamedTuple` type with the clip position prepended, which
+`MetalStageCompiler.stage_outputs` reads directly.
 """
 stage_output_type(p::Mantle.GraphicsPipeline, ::Val{:vertex}, ncolor::Int = 1) =
     Mantle.outputtype(p.vertex)
@@ -359,7 +363,7 @@ MetalFragmentStage{F,VIn,Out}() where {F,VIn,Out} = MetalFragmentStage{F,VIn,Out
     nv = fieldcount(VIn)
     # Each texture adds a texture and a sampler parameter after the varyings
     # (`texture_markers`). The body takes neither: `sample_texture_2d` reaches
-    # them through the lowering in `Metal/src/compiler/texture.jl`.
+    # them through the lowering in `compiler/texture.jl`.
     ntex = 2 * NT
     nbuf = N - 1 - nv - ntex
     nbuf >= 0 || error("a fragment stage with $nv varyings and $NT textures needs " *
@@ -379,7 +383,7 @@ One `Varying` marker per declared varying, in declaration order. Stages link
 varyings by mangled name; the stable order keeps argument metadata reproducible.
 """
 varying_markers(VIn::Type) =
-    Tuple(Metal.Varying{n, fieldtype(VIn, n)} for n in fieldnames(VIn))
+    Tuple(MetalIntrinsics.Varying{n, fieldtype(VIn, n)} for n in fieldnames(VIn))
 
 """
     texture_markers(n) -> Tuple
@@ -391,7 +395,8 @@ compiler service in `AGCLLVMUserFragmentShader::setupShaderInputs`
 (`XPC_ERROR_CONNECTION_INTERRUPTED` at pipeline creation).
 """
 texture_markers(n::Integer) =
-    (ntuple(_ -> Metal.Texture2DPtr{Float32}, n)..., ntuple(_ -> Metal.SamplerPtr, n)...)
+    (ntuple(_ -> MetalIntrinsics.Texture2DPtr{Float32}, n)...,
+     ntuple(_ -> MetalIntrinsics.SamplerPtr, n)...)
 
 """
 The fragment stage's varyings as a `NamedTuple` type (`Mantle.fragmentinputtype`),
@@ -464,12 +469,12 @@ function compile_pipeline(d::MetalDevice, p::Mantle.GraphicsPipeline,
         vfun, vlib = vstage
         ffun, flib = fstage === nothing ? (nothing, nothing) : fstage
 
-        desc = MTL.MTLRenderPipelineDescriptor()
+        desc = MetalBindings.render_pipeline_descriptor()
         desc.vertexFunction = vfun
         ffun === nothing || (desc.fragmentFunction = ffun)
         # Attachments in pass order, matching `air.render_target <i>`.
         apply_attachments!(desc, color_formats, depth_format, p.blend)
-        state = MTL.MTLRenderPipelineState(dev, desc)
+        state = MetalBindings.render_pipeline_state(dev, desc)
         dstate = depthstate(dev, p.depth, depth_format)
 
         compiled = MetalCompiledGraphicsPipeline(state, dstate, mtl_primitive(p.topology),
@@ -507,13 +512,11 @@ The caller must keep the library: an `MTLFunction` does not keep it alive, and a
 released library makes the pipeline draw nothing.
 """
 function compile_stage_function(dev::MTL.MTLDevice, f, tt::Type, stage::Symbol, name::String)
-    # `always_inline`: textures and samplers are entry parameters
-    # (`lower_texture_bindings!`), so every sampling call must be inlined into the
-    # entry; the optimiser alone does not guarantee it.
-    cfg = Metal.compiler_config(dev; stage, name, always_inline = true)
-    job = Metal.GPUCompiler.CompilerJob(Metal.methodinstance(typeof(f), tt), cfg)
+    # A job of Mantle's stage parameters (`compiler/compiler.jl`), which Metal.jl's
+    # `compile_to_metallib` compiles with the stage passes in its `finish_ir!`.
+    job = MetalStageCompiler.stage_job(dev, f, tt, stage, name)
     key = (dev, stage, name)
-    stages = Metal.GPUCompiler.cached_results(MetalStages, job)
+    stages = GPUCompiler.cached_results(MetalStages, job)
     if stages !== nothing
         compiled = get(stages.stages, key, nothing)
         compiled === nothing || return compiled
@@ -521,7 +524,7 @@ function compile_stage_function(dev::MTL.MTLDevice, f, tt::Type, stage::Symbol, 
     lib = MTL.MTLLibraryFromData(dev, Metal.compile_to_metallib(job).metallib)
     compiled = (MTL.MTLFunction(lib, name), lib)
     # Compiling the job made its `CodeInstance`, so this finds one.
-    stages === nothing && (stages = Metal.GPUCompiler.cached_results(MetalStages, job))
+    stages === nothing && (stages = GPUCompiler.cached_results(MetalStages, job))
     stages.stages[key] = compiled
     return compiled
 end
@@ -606,10 +609,11 @@ Recorded passes report no GPU time (`passend!`).
 """
 function Mantle.gpupasstime!(d::MetalDevice)
     bq = batchqueue(d)
-    # Metal.jl's open batch counts too. Retained, because the batch releases its
-    # borrowed reference when the flush commits it.
+    # Metal.jl's open batch counts too. The batch holds it as a managed wrapper and
+    # drops that wrapper when the flush commits it, so the one kept here is what
+    # keeps the command buffer alive until it is read.
     open_cb = bq.backend.cmdbuf
-    open_cb === nothing || push!(COMMITTED, MTL.retained(open_cb))
+    open_cb === nothing || push!(COMMITTED, open_cb)
     Metal.flush!(bq)
     isempty(COMMITTED) && return 0.0
     total = 0.0
@@ -635,9 +639,9 @@ function Mantle.readback_framebuffer(fb::MetalFramebuffer)
     waitidle(fb.dev)
     # The colorant's layout matches the texel's, so bytes are read directly.
     px = Matrix{eltypeof(fb.color_format)}(undef, fb.width, fb.height)
-    GC.@preserve px MTL.getBytes!(pointer(px), fb.color, fb.width * sizeof(eltype(px)),
-                                   MTL.MTLRegion(MTL.MTLOrigin(0, 0, 0),
-                                                  MTL.MTLSize(fb.width, fb.height, 1)))
+    GC.@preserve px MetalBindings.getbytes!(pointer(px), fb.color, fb.width * sizeof(eltype(px)),
+                                            MTL.MTLRegion(MTL.MTLOrigin(0, 0, 0),
+                                                          MTL.MTLSize(fb.width, fb.height, 1)))
     return px
 end
 
@@ -753,17 +757,17 @@ rebakestages!(args, stages::StageArgs...) =
 `flip_clip` mirrors y, reversing every primitive's winding, and back-face culling
 would otherwise drop the front faces."""
 function setdrawstate!(enc, c)
-    MTL.set_pipeline!(enc, c.state)
-    c.depth_state === nothing || MTL.set_depth_stencil_state!(enc, c.depth_state)
-    MTL.set_cull_mode!(enc, c.cull)
-    MTL.set_front_facing_winding!(enc, MTL.MTLWindingCounterClockwise)
+    MetalBindings.set_pipeline!(enc, c.state)
+    c.depth_state === nothing || MetalBindings.set_depth_stencil_state!(enc, c.depth_state)
+    MetalBindings.set_cull_mode!(enc, c.cull)
+    MetalBindings.set_front_facing_winding!(enc, MTL.MTLWindingCounterClockwise)
     return nothing
 end
 
 function Mantle.begin_render_pass!(d::MetalDevice, targets, loads, depth, depth_load)
-    rp = MTL.MTLRenderPassDescriptor()
+    rp = MetalBindings.render_pass_descriptor()
     for (i, t) in enumerate(targets)
-        att = rp.colorAttachments[i]
+        att = MetalBindings.colorattachment(rp, i)
         att.texture     = metal_texture(t)
         att.loadAction  = mtl_loadaction(loads[i])
         att.storeAction = MTL.MTLStoreActionStore
@@ -780,7 +784,7 @@ function Mantle.begin_render_pass!(d::MetalDevice, targets, loads, depth, depth_
     end
     # This pass's own command buffer; `end_render_pass!` commits it.
     cb  = framebuffer!(d.dev)
-    enc = MTL.MTLRenderCommandEncoder(cb, rp)
+    enc = MetalBindings.render_command_encoder(cb, rp)
     return MetalPassHandle(cb, enc)
 end
 
@@ -791,7 +795,7 @@ resident.
 """
 function bind_stage!(enc, a::StageArgs, setbytes!, stage::MTL.MTLRenderStages)
     for b in a.buffers
-        MTL.use!(enc, b, MTL.ReadUsage, stage)
+        MetalBindings.use!(enc, b, MTL.ReadUsage, stage)
     end
     bindall!(setbytes!, enc, a.device, a.scratch)
     return nothing
@@ -825,10 +829,10 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledDraw, args, cou
     rebakestages!(args, d.vert, d.frag)
     c = d.pipeline
     setdrawstate!(h.encoder, c)
-    bind_stage!(h.encoder, d.vert, MTL.set_vertex_bytes!, MTL.MTLRenderStageVertex)
+    bind_stage!(h.encoder, d.vert, MetalBindings.set_vertex_bytes!, MTL.MTLRenderStageVertex)
     # Metal rejects fragment bindings on a depth-only pipeline.
     c.has_fragment &&
-        bind_stage!(h.encoder, d.frag, MTL.set_fragment_bytes!, MTL.MTLRenderStageFragment)
+        bind_stage!(h.encoder, d.frag, MetalBindings.set_fragment_bytes!, MTL.MTLRenderStageFragment)
     draw_with_count!(h.encoder, c, count, instances, indices)
     return nothing
 end
@@ -843,7 +847,7 @@ the vertex stage's `flip_clip`. The scissor is core's `scissorrect`, at least a
 pixel wide, since Metal refuses an empty one.
 """
 function Mantle.setviewport!(h::MetalPassHandle, x::Real, y::Real, w::Real, hgt::Real)
-    MTL.set_viewport!(h.encoder,
+    MetalBindings.set_viewport!(h.encoder,
         MTL.MTLViewport(Float64(x), Float64(y), Float64(w), Float64(hgt), 0.0, 1.0))
     sx, sy, sw, sh = Mantle.scissorrect(x, y, w, hgt)
     Mantle.setscissor!(h, sx, sy, max(1, sw), max(1, sh))
@@ -851,7 +855,7 @@ function Mantle.setviewport!(h::MetalPassHandle, x::Real, y::Real, w::Real, hgt:
 end
 
 function Mantle.setscissor!(h::MetalPassHandle, x::Integer, y::Integer, w::Integer, height::Integer)
-    MTL.set_scissor!(h.encoder, MTL.MTLScissorRect(UInt(x), UInt(y), UInt(w), UInt(height)))
+    MetalBindings.set_scissor!(h.encoder, MTL.MTLScissorRect(UInt(x), UInt(y), UInt(w), UInt(height)))
     return nothing
 end
 
@@ -880,8 +884,7 @@ buffercopy(d::MetalDevice, data::AbstractArray{T,N}) where {T,N} =
     buffercopy(d, convert(Array{T,N}, data))
 
 function buffercopy(d::MetalDevice, data::Union{Array{T,N},Metal.WrappedMtlArray{T,N}}) where {T,N}
-    S = constraintof(d, Buffers(), T)
-    a = Metal.MtlArray{T,N,S}(undef, size(data))
+    a = residentarray(d, T, size(data))
     copyto!(a, data)
     return a
 end
@@ -919,12 +922,12 @@ resident explicitly: no shader names it.
 function draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Integer,
                           instances::Integer = 1, indices = nothing)
     if indices === nothing
-        MTL.draw_primitives!(enc, c.primitive, 0, n, instances)
+        MetalBindings.draw_primitives!(enc, c.primitive, 0, n, instances)
     else
         ibuf = useindices!(enc, indices, MTL.MTLRenderStageVertex)
-        MTL.draw_indexed_primitives!(enc, c.primitive, n,
-                                      MTL.MTLIndexTypeUInt32, ibuf,
-                                      byteoffset(indices), instances)
+        MetalBindings.draw_indexed_primitives!(enc, c.primitive, n,
+                                               MTL.MTLIndexTypeUInt32, ibuf,
+                                               byteoffset(indices), instances)
     end
     return nothing
 end
@@ -935,7 +938,7 @@ function useindices!(enc, indices, stage)
     ibuf = metal_buffer(indices)
     ibuf === nothing && error("an indexed draw needs a device buffer of indices, got $(typeof(indices))")
     # `stage` is already an `MTLRenderStages`; wrapping it is a `MethodError`.
-    MTL.use!(enc, ibuf, MTL.ReadUsage, stage)
+    MetalBindings.use!(enc, ibuf, MTL.ReadUsage, stage)
     return ibuf
 end
 
@@ -949,11 +952,11 @@ function draw_indirect_with!(enc, c::MetalCompiledGraphicsPipeline, n::Mantle.Co
     buf === nothing && error("a Commands draw needs a device buffer, got $(typeof(n.resource))")
     # Must be made resident although no shader names it: a non-resident indirect
     # buffer yields a garbage vertex count and a command buffer that never completes.
-    MTL.use!(enc, buf, MTL.ReadUsage,
-              MTL.MTLRenderStages(MTL.MTLRenderStageVertex |
-                                   MTL.MTLRenderStageFragment))
+    MetalBindings.use!(enc, buf, MTL.ReadUsage,
+                       MTL.MTLRenderStages(MTL.MTLRenderStageVertex |
+                                           MTL.MTLRenderStageFragment))
     # At the resource's offset: transients are views into the arena.
-    MTL.draw_primitives_indirect!(enc, c.primitive, buf, byteoffset(n.resource))
+    MetalBindings.draw_primitives_indirect!(enc, c.primitive, buf, byteoffset(n.resource))
 end
 
 """The `MTLTexture` behind a render attachment."""
@@ -976,44 +979,54 @@ mtl_loadaction(l::Mantle.LoadOp) = Mantle.discards(l) ? MTL.MTLLoadActionDontCar
                                                         MTL.MTLLoadActionLoad
 mtl_loadaction(::Nothing) = MTL.MTLLoadActionDontCare
 
-# The vocabulary's shader builtins as `@device_override`s in Metal's method table;
-# the host methods error and must stay.
-const METAL_BUILTINS = (:vertex_index, :instance_index, :frag_coord_x, :frag_coord_y,
-                        :frag_coord_z, :frag_coord_w, :frag_coord_xy)
+# The vocabulary's shader builtins, as overlays in the stage method table
+# (`MetalStageCompiler.STAGE_METHODS`): they exist only inside render stages, so
+# compute kernels never see them. The host methods error and must stay. Plain
+# `@overlay`s, not consistent ones: a host method that throws where the overlay
+# returns a value is not consistent with it.
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.vertex_index() =
+    MetalIntrinsics.vertex_index()
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.instance_index() =
+    MetalIntrinsics.instance_index()
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.frag_coord(dim::Integer = 1) =
+    MetalIntrinsics.frag_coord(dim)
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.frag_coord_x() =
+    MetalIntrinsics.frag_coord_x()
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.frag_coord_y() =
+    MetalIntrinsics.frag_coord_y()
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.frag_coord_z() =
+    MetalIntrinsics.frag_coord_z()
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.frag_coord_w() =
+    MetalIntrinsics.frag_coord_w()
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.frag_coord_xy() =
+    MetalIntrinsics.frag_coord_xy()
 
-for f in METAL_BUILTINS
-    @eval Metal.@device_override Lava.$f() = Metal.$f()
-end
-Metal.@device_override Lava.frag_coord(dim::Integer = 1) = Metal.frag_coord(dim)
-
-# `air.dfdx.f32`/`air.dfdy.f32` (`Metal/src/device/intrinsics/graphics.jl`).
-Metal.@device_override Lava.dFdx(v::Float32) = Metal.dfdx(v)
-Metal.@device_override Lava.dFdy(v::Float32) = Metal.dfdy(v)
+# `air.dfdx.f32`/`air.dfdy.f32` (`intrinsics/stages.jl`).
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.dFdx(v::Float32) =
+    MetalIntrinsics.dfdx(v)
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.dFdy(v::Float32) =
+    MetalIntrinsics.dfdy(v)
 
 # `air.discard_fragment`: returns and does not terminate the shader, as
 # `Lava.discard` specifies.
-Metal.@device_override Lava.discard() = Metal.discard_fragment()
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.discard() =
+    MetalIntrinsics.discard_fragment()
 
 # `[[point_size]]`, appended to the vertex output by `stage_return!` when called.
-Metal.@device_override Lava.set_point_size!(s::Float32) = Metal.set_point_size!(s)
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.set_point_size!(s::Float32) =
+    MetalIntrinsics.set_point_size!(s)
 
 # `emit_vertex!`, `end_primitive!` and `primitive_id_in` have no Metal
 # counterpart: Metal has no geometry stage, and `Mantle.lower_geometry_to_mesh`
 # never emits them (`supports_geometry_stage`).
 
-# The binding is a slot; the lowering in `Metal/src/compiler/texture.jl` maps it to
-# an entry parameter. `Mantle.FragmentShader`'s `textures` sets how many exist.
-Metal.@device_override Lava.sample_texture_2d(binding::UInt32, u::Float32, v::Float32,
-                                            component::UInt32) =
-    Metal.sample_texture_2d(binding, u, v, component)
+# The binding is a slot; the lowering in `compiler/texture.jl` maps it to an entry
+# parameter. `Mantle.FragmentShader`'s `textures` sets how many exist.
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.sample_texture_2d(
+        binding::UInt32, u::Float32, v::Float32, component::UInt32) =
+    MetalIntrinsics.sample_texture_2d(binding, u, v, component)
 
-# Metal's clip-space +y is up, Vulkan's (the portable one) down. An overlay, not
-# a method redefinition, so the host answer is unchanged; it applies to compute
-# too, so compute reprojection matches the rasteriser. A plain `@overlay`, not
-# `@device_override` (a `@consistent_overlay`): Julia would constant-fold calls
-# with the host method, which returns `y` unchanged.
-Base.Experimental.@overlay Metal.method_table Lava.clip_y(y::Float32) = -y
-
+# Metal's clip-space +y is up: Lava's `clip_y` flips it (`LavaMetalExt`).
 @inline flip_clip(p::Vec4f) = Vec4f(p[1], Lava.clip_y(p[2]), p[3], p[4])
 @inline flip_clip(p::NTuple{4,Float32}) = (p[1], Lava.clip_y(p[2]), p[3], p[4])
 
@@ -1046,10 +1059,10 @@ function Mantle.use_bindings!(h::MetalPassHandle, _compiled,
                               b::MetalTextureBindings)
     enc = h.encoder
     for (i, tex) in enumerate(b.textures)
-        MTL.set_fragment_texture!(enc, tex, i)
+        MetalBindings.set_fragment_texture!(enc, tex, i)
     end
     for (i, st) in enumerate(b.samplers)
-        MTL.set_fragment_sampler!(enc, st, i)
+        MetalBindings.set_fragment_sampler!(enc, st, i)
     end
     return nothing
 end

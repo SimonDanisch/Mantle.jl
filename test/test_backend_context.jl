@@ -47,7 +47,7 @@ end
     @test KA.get_backend(a) == TESTBACKEND
     @test TESTBACKEND == KA.get_backend(a)
     @test Mantle.Device(KA.get_backend(a)) === dev
-    @test Mantle.caps(KA.get_backend(a)) == Mantle.caps(dev)
+    @test Mantle.caps(Mantle.Device(KA.get_backend(a))) == Mantle.caps(dev)
     @test Mantle.supports_hwtlas(KA.get_backend(a)) == Mantle.supports_hwtlas(dev)
 
     # ── And it still works as a backend: the array's, and the device itself.

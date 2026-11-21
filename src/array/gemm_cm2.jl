@@ -186,7 +186,7 @@ Launch [`gemm_cm2_sg!`](@ref). `nw` subgroups per workgroup, so the workgroup is
 `nw * 32` invocations and covers `64 x (nw * 64)` of `C`.
 """
 function coopmat_gemm_cm2_sg!(C, A, B, M::Int, N::Int, K::Int; nw::Int = 2)
-    backend = KernelAbstractions.get_backend(C)
+    backend = Device(KernelAbstractions.get_backend(C))
     dev = caps(backend)
     # Subgroup-scope tiles: needs tensor addressing and the subgroup shape table,
     # not a workgroup-scope shape.
@@ -214,7 +214,7 @@ function coopmat_gemm_cm2!(C, A, B, M::Int, N::Int, K::Int; tiling = nothing,
                            unroll::Bool = true, clamp::Bool = true)
     # From the array: an unpinned backend resolves its queue through the global
     # context and would put the work on the wrong GPU.
-    backend = KernelAbstractions.get_backend(C)
+    backend = Device(KernelAbstractions.get_backend(C))
     dev = caps(backend)
     Lava.supports_tensor_addressing(backend) || return nothing
     tiling = something(tiling, gemm_cm2_tiling(dev))

@@ -48,7 +48,8 @@ mutable struct LegacyQueue
     mtl::MTL.MTLCommandQueue
     # Metal.jl's batch over `mtl`. Metal.jl's `global_queue` is task-local and
     # residency sets are per queue, so a replay from another task's queue reads
-    # zeros and drops writes silently; `enterrun!` adopts this one for the task.
+    # zeros and drops writes silently; `enterrun!` makes this one the task's
+    # (`adopt!`).
     bq::Metal.ConcreteBatchedQueue
     # `next`: the latest retirement's fence. `completed`: the highest fence known
     # done. A region is reusable when its fence is <= `completed`.
@@ -56,6 +57,9 @@ mutable struct LegacyQueue
     completed::UInt64
     # Encode recorded plans every frame instead of replaying (`encodesrecordings`).
     encodes::Bool
+    # The device's residency set, on `mtl` and every channel: what recordings, argument
+    # memory and acceleration structures reach by address.
+    residency::MetalBindings.Residency
 end
 
 function LegacyQueue(dev::MTL.MTLDevice)
@@ -63,7 +67,8 @@ function LegacyQueue(dev::MTL.MTLDevice)
     mtl.label = "Mantle"
     bq = Metal.BatchedCommandQueue(mtl)
     pinpipeline!(bq)
-    return LegacyQueue(mtl, bq, UInt64(0), UInt64(0), encodesrecordings(dev))
+    residency = MetalBindings.attach!(MetalBindings.Residency(dev), mtl)
+    return LegacyQueue(mtl, bq, UInt64(0), UInt64(0), encodesrecordings(dev), residency)
 end
 
 """
@@ -88,7 +93,7 @@ Keep up to 8 command buffers in flight (Metal.jl defaults to 3), pinned against
 plans. Safe only because `opensubmit!` declares resources with `useResource`;
 without it deeper pipelining overlaps frames and loses accumulations.
 """
-pinpipeline!(bq) = Metal.inflight!(bq, 8)
+pinpipeline!(bq) = (bq.inflight = 8; bq)
 
 """
     metalqueue(mtldevice) -> queue
@@ -109,8 +114,10 @@ end
 MetalDevice(mtldev::MTL.MTLDevice = Metal.device()) = MetalDevice(mtldev, metalqueue(mtldev))
 
 """
-Process-wide Metal validation state, for the report block (`debug.jl`): `reports`,
-`reportlock` and `reporter`. The devices are core's (`runtime/lifecycle.jl`).
+Process-wide Metal state: for the report block (`debug.jl`), `reports`, `reportlock`
+and `reporter`; for `kernelcompiles`, the compile count at the last reset; for
+`adopt!`, the task and queue it last set. The devices are core's
+(`runtime/lifecycle.jl`).
 """
 mutable struct MetalProcess
     reports::Vector{String}
@@ -118,8 +125,11 @@ mutable struct MetalProcess
     # The block given to `MTLSetReportFailureBlock`, rooted here because Metal
     # holds it only by pointer.
     reporter::Any
+    compilebase::Int
+    adoptedtask::Union{Nothing,Task}
+    adoptedqueue::Union{Nothing,Metal.ConcreteBatchedQueue}
 end
-const METAL = MetalProcess(String[], ReentrantLock(), nothing)
+const METAL = MetalProcess(String[], ReentrantLock(), nothing, 0, nothing, nothing)
 
 # A device selected by name or with a debug configuration is not made the process
 # device by core, and so does not adopt the queue (see `adopt!`).
@@ -133,16 +143,28 @@ end
 devices(::MetalAPI) = [DeviceInfo(i, String(d.name), d.hasUnifiedMemory ? :integrated : :discrete, "Metal")
                        for (i, d) in enumerate(Metal.devices())]
 
-# The default device is the one Metal.jl launches on: adopting its queue here, not
-# in the constructor (a second `MetalDevice` would take it from the process device)
-# and not only in `enterrun!` (an upload before the first run would go to the
-# task's own queue, unordered against the replay). Idempotent.
-adopt!(d::MetalDevice) = (Metal.adopt_queue!(d.dev, batchqueue(d)); d)
+# The default device is the one Metal.jl launches on: its queue becomes the calling
+# task's (`Metal.global_queue!`), here when core makes it the process device and at
+# the head of every run (`enterrun!`), so Metal.jl's own launches, copies and MPS
+# calls from that task go into the device's batch. Not in the constructor: a second
+# `MetalDevice` would take the task from the process device. Work another task
+# submitted to its own queue is ordered against this one through Metal.jl's
+# ownership record of the buffers both use (`claimbuffers!`). Idempotent, and the queue
+# is set only when it is not the one `adopt!` set last, on this task: setting it builds a
+# task-local key, an allocation every recorded run would otherwise pay. A queue a task
+# sets itself with `Metal.global_queue!` between two runs of one device stays until a run
+# of another device or on another task.
+function adopt!(d::MetalDevice)
+    t, bq = current_task(), batchqueue(d)
+    METAL.adoptedtask === t && METAL.adoptedqueue === bq && return d
+    Metal.global_queue!(bq)
+    METAL.adoptedtask, METAL.adoptedqueue = t, bq
+    return d
+end
 
 # The Mantle device of Metal.jl's backend, which is what `KA.get_backend` of an
-# `MtlArray` returns; a backend bound to a channel belongs to the device that
-# handed the channel out.
-Device(b::Metal.MetalBackend) = b.queue === nothing ? Device(MetalAPI()) : deviceof(b.queue)
+# `MtlArray` returns.
+Device(::Metal.MetalBackend) = Device(MetalAPI())
 
 # A backend's `==` is "the same device": Raycore refuses to adapt a TLAS to another
 # device's backend, and an `MtlArray` reports Metal.jl's backend for the device it
@@ -156,12 +178,12 @@ pool(d::MetalDevice) = d.pool
 """
     metalbackend(dev) -> Metal.MetalBackend
 
-Metal.jl's backend bound to `dev`'s batch, which the device's KernelInterface
-methods (`metal/kernelinterface.jl`) forward to: a launch goes to `dev`'s queue
-from any task, where an unbound `MetalBackend()` uses the calling task's own
-queue, with a residency set of its own.
+Metal.jl's backend, which the device's KernelInterface methods
+(`metal/kernelinterface.jl`) forward to. It carries no queue: a launch goes to
+`dev`'s queue because those methods pass it (`queue = batchqueue(dev)`), or run
+under `Metal.global_queue!`.
 """
-metalbackend(d::MetalDevice) = Metal.MetalBackend(batchqueue(d))
+metalbackend(::MetalDevice) = Metal.MetalBackend()
 
 # A Metal constraint is a storage mode: an `MTLBuffer` has no usage flags, so
 # nothing else limits sharing. It is a Metal.jl type (`Metal.SharedStorage`, what
@@ -239,6 +261,8 @@ function rawfree(d::MetalDevice, buf::MTL.MTLBuffer)
     # buffer is released when whatever still holds it is collected.
     d.retired && return nothing
     delete!(d.managed, Base.bitcast(UInt, pointer(buf)))
+    # Out of the residency set first: a set holds its allocations.
+    MetalBindings.forget!(residency(d), buf)
     Metal.free(buf)
     return nothing
 end
@@ -289,6 +313,7 @@ awaittoken!(d::MetalDevice, f::UInt64) = awaittoken!(d.queue, f)
 function fence(q::LegacyQueue)
     if quiet(q)
         q.completed = q.next
+        MetalBindings.forget_drained!(q.residency)
         return q.completed
     end
     q.next += UInt64(1)
@@ -297,12 +322,13 @@ end
 
 """
 No open batch, and every command buffer committed to the queue's `MTLCommandQueue`
-has finished (for an `MTL4Queue`, its legacy side). `MTL.all_completed` because
-reading `.status` off `MTL.last_committed` is a dynamic call that allocates.
+has finished (for an `MTL4Queue`, its legacy side). `MetalBindings.all_completed`
+because reading `.status` off `MTL.last_committed` here is a dynamic call that
+allocates.
 """
 function quiet(q)
     Metal.has_open_batch(batchqueue(q)) && return false
-    return MTL.all_completed(cmdqueue(q))
+    return MetalBindings.all_completed(cmdqueue(q))
 end
 
 passed(q::LegacyQueue, f) = UInt64(f) <= q.completed
@@ -324,6 +350,7 @@ function waitidle(q::LegacyQueue)
     upto = q.next
     Metal.synchronize(q.bq)
     q.completed = max(q.completed, upto)
+    MetalBindings.forget_drained!(q.residency)
     return nothing
 end
 
@@ -337,7 +364,7 @@ end
 the batch, which ends and releases it."""
 struct LegacySubmission
     bq::Metal.ConcreteBatchedQueue
-    enc::MTL.MTLComputeCommandEncoderRef
+    enc::MTL.MTLComputeCommandEncoder
 end
 
 """The compute encoder a submission records into."""
@@ -354,17 +381,17 @@ function opensubmit!(q::LegacyQueue, ::MTL.MTLDevice, bufs)
     # bytes, and with 8 in flight a 4-sample frame comes out as the 1-sample image.
     # Core derives no cross-frame ordering; Metal gets it from this plus the
     # in-order queue.
-    MTL.use!(enc, bufs, MTL.ReadWriteUsage)
+    MetalBindings.use_resources!(enc, bufs, MTL.ReadWriteUsage)
     return LegacySubmission(q.bq, enc)
 end
 
 function executesegment!(q::LegacyQueue, s::LegacySubmission, rec, seg)
     q.encodes && return encodecommands!(s.enc, rec, seg.first:seg.last)
     if seg.slot < 0
-        MTL.execute_commands!(s.enc, rec.icb, seg.first:seg.last)
+        MetalBindings.execute_commands!(s.enc, rec.icb, seg.first:seg.last)
     else
-        MTL.execute_commands_indirect!(s.enc, rec.icb, rec.rangebuf,
-                                       rec.rangeoff + 8 * seg.slot)
+        MetalBindings.execute_commands!(s.enc, rec.icb, rec.rangebuf,
+                                        rec.rangeoff + 8 * seg.slot)
     end
     return nothing
 end
@@ -379,7 +406,7 @@ Legacy declares the next piece's resources on the encoder (hazard tracking, see
 nextpiece!(d::MetalDevice, s, ids) = nextpiece!(d.queue, s, ids)
 
 nextpiece!(::LegacyQueue, s::LegacySubmission, ids) =
-    (MTL.use!(s.enc, ids, MTL.ReadWriteUsage); nothing)
+    (MetalBindings.use_resources!(s.enc, ids, MTL.ReadWriteUsage); nothing)
 
 """
     suspendsubmit!(dev, sub)
@@ -397,18 +424,17 @@ suspendsubmit!(q::LegacyQueue, ::LegacySubmission) = (Metal.end_encoder!(q.bq); 
 closesubmit!(d::MetalDevice, s) = closesubmit!(d.queue, s)
 
 function closesubmit!(q::LegacyQueue, s::LegacySubmission)
-    # An indirect execution leaves the pipeline binding undefined, and
-    # `set_pipeline!` skips a set it believes current: the next launch would run
-    # whatever pipeline the recording left.
-    s.bq.backend.last_pipeline = nothing
     # Otherwise the integrated profiler drops an unlabeled recorded submission,
     # even though it contains the renderer's compute work.
     if MTL.profile_metadata[] !== nothing
         Metal.note_operation!(s.bq, (kind = :recorded, name = "Mantle recording"))
     end
-    Metal.note_recorded!(s.bq, 0, nothing)
     # Commit only: `replay!` holds `submission_lock` here and waits for a free
-    # in-flight slot after releasing it.
+    # in-flight slot after releasing it. Committing ends the encoder, and
+    # `end_encoder!` drops Metal.jl's cached pipeline binding: an indirect execution
+    # (or an encoded frame's own `set_function!`) leaves the binding other than
+    # Metal.jl believes, and `kernel_encoder!` skips a set it believes current, so
+    # the next launch would run whatever pipeline the recording left.
     Metal.commit_batch!(s.bq)
     # Nothing signals, so the token is the retirement counter (see `LegacyQueue`).
     return fence(q)
@@ -448,11 +474,12 @@ mutable struct MTL4Queue
     bq::Metal.ConcreteBatchedQueue
     # How a failed submission is reported: MTL4 command buffers carry no error,
     # so without it a fault is a `waitfor` that never returns.
-    feedback::MTL.MTL4Feedback
-    # `mtl`'s residency set, also given to this queue; `adopt!` makes Metal.jl
-    # use it too. A replay reaching memory outside it reads zeros and drops writes
-    # silently, and `MTL_SHADER_VALIDATION=1` hides that by making all resident.
-    resset::Union{Nothing,MTL.MTLResidencySet}
+    feedback::MetalBindings.MTL4Feedback
+    # The device's residency set, attached to `mtl` and to this queue and declared
+    # by each command buffer. A replay reaching memory outside it reads zeros and
+    # drops writes silently, and `MTL_SHADER_VALIDATION=1` hides that by making all
+    # resident.
+    residency::MetalBindings.Residency
     # For `submissions`: MTL4 command buffers committed, and the empty bridge
     # buffers on `mtl` that only carry a signal or wait between the queues.
     commits::Int
@@ -465,36 +492,46 @@ function MTL4Queue(dev::MTL.MTLDevice)
     q = MTL.MTL4CommandQueue(dev, MTL.MTL4CommandQueueDescriptor())
     mtl = MTL.MTLCommandQueue(dev)
     mtl.label = "Mantle"
-    # `BatchedCommandQueue` installs `mtl`'s residency set; asking afterwards
-    # returns that one.
     bq = Metal.BatchedCommandQueue(mtl)
     pinpipeline!(bq)
-    resset = Metal.can_use_residency_sets(dev) ?
-        Metal.install_queue_residency!(mtl, dev) : nothing
-    # On the queue here, and on each command buffer in `opensubmit!`, as the API asks.
-    resset === nothing || MTL.add_residency_set!(q, resset)
+    # On both queues here, and on each command buffer in `opensubmit!`, as the API asks.
+    residency = MetalBindings.Residency(dev)
+    MetalBindings.attach!(residency, mtl)
+    MetalBindings.attach!(residency, q)
     return MTL4Queue(q,
                      [MTL.MTL4CommandAllocator(dev) for _ in 1:n],
                      [MTL.MTL4CommandBuffer(dev) for _ in 1:n],
                      zeros(UInt64, n), 0,
                      Vector{id{MTL.MTL4CommandBuffer}}(undef, 1),
                      MTL.MTLSharedEvent(dev), UInt64(0), mtl, bq,
-                     MTL.MTL4Feedback(), resset, 0, 0)
+                     MetalBindings.MTL4Feedback(), residency, 0, 0)
 end
 
 batchqueue(q::MTL4Queue) = q.bq
 
 cmdqueue(q::MTL4Queue) = q.mtl
 
+"""
+    residency(dev) -> MetalBindings.Residency
+
+The device's residency set, attached to the queue's `MTLCommandQueue` (and to an
+`MTL4Queue`'s own queue), which every allocation reached only by address or
+`gpuResourceID` has to be in: recorded commands, argument tables, kernel scratch and
+ray-traced structures.
+"""
+residency(d::MetalDevice) = residency(d.queue)
+residency(q::MTL4Queue) = q.residency
+residency(q::LegacyQueue) = q.residency
+
 # Launches and blits still go through Metal.jl's batch (see `ownflush!`).
 ownflush!(q::MTL4Queue, ::MTL.MTLDevice, own::Bool) =
-    (Metal.own_flushes!(q.bq, own); nothing)
+    (q.bq.autoflush = !own; nothing)
 
 """An MTL4 submission: a ring slot, its command buffer and its unmanaged encoder,
 whose one reference `opensubmit!` takes and `closesubmit!` gives back."""
 struct MTL4Submission
     cb::MTL.MTL4CommandBuffer
-    enc::MTL.MTL4ComputeCommandEncoderRef
+    enc::MetalBindings.MTL4ComputeCommandEncoderRef
     slot::Int
 end
 
@@ -525,7 +562,7 @@ argtable(d::MetalDevice, args, store::MTL.MTLBuffer) = argtable(d.queue, d, args
 
 function argtable(::MTL4Queue, d::MetalDevice, args, store::MTL.MTLBuffer)
     nslots = maximum(a -> a.index, args; init = 0)
-    t = MTL.MTL4ArgumentTable(d.dev; buffers = max(nslots, 1), initialize = true)
+    t = MetalBindings.argument_table(d.dev, max(nslots, 1))
     for a in args
         buf = a.buffer === nothing ? store : a.buffer
         off = a.buffer === nothing ? a.offset : a.bufoffset
@@ -545,20 +582,20 @@ function encodeplan!(s::MTL4Submission, rec)
     enc = s.enc
     for c in rec.encoded
         c.barrier && MTL.barrierAfterEncoderStages!(enc, MTL.MTLStageDispatch, MTL.MTLStageDispatch)
-        MTL.set_argument_table!(enc, c.table)
-        MTL.set_function!(enc, c.pipeline)
+        MetalBindings.set_argument_table!(enc, c.table)
+        MetalBindings.set_pipeline!(enc, c.pipeline)
         if c.slotoff >= 0
             # Device-sized: the grid is the three words core's prepare wrote into
             # the slot, before this command's barrier.
-            MTL.dispatch_threadgroups_indirect!(enc, rec.argstore, c.slotoff, c.threads)
+            MetalBindings.dispatch_threadgroups!(enc, rec.argstore, c.slotoff, c.threads)
         elseif c.gridoff < 0
-            MTL.dispatchThreadgroups!(enc, c.groups, c.threads)
+            MetalBindings.dispatch_threadgroups!(enc, c.groups, c.threads)
         else
             # Gated: `gridoff` counts 4-byte words; a closed gate leaves three
             # zeros, which runs no threadgroups.
-            MTL.dispatch_threadgroups_indirect!(enc, rec.gridbuf,
-                                                rec.gridoff + 4 * c.gridoff,
-                                                c.threads)
+            MetalBindings.dispatch_threadgroups!(enc, rec.gridbuf,
+                                                 rec.gridoff + 4 * c.gridoff,
+                                                 c.threads)
         end
     end
     return nothing
@@ -570,10 +607,10 @@ function argtable(::LegacyQueue, d::MetalDevice, args, store::MTL.MTLBuffer)
                             a.index) for a in args])
 end
 
-bufferbarrier!(enc::MTL.MTLComputeCommandEncoderRef) =
-    @objc [enc::id{MTL.MTLComputeCommandEncoderRef} memoryBarrierWithScope:MTL.MTLBarrierScopeBuffers::MTL.MTLBarrierScope]::Nothing
+bufferbarrier!(enc::MTL.MTLComputeCommandEncoder) =
+    MetalBindings.memory_barrier!(enc, MTL.MTLBarrierScopeBuffers)
 
-function encodecommands!(enc::MTL.MTLComputeCommandEncoderRef, rec, commands::UnitRange{Int})
+function encodecommands!(enc::MTL.MTLComputeCommandEncoder, rec, commands::UnitRange{Int})
     for c in view(rec.encoded, commands)
         c.barrier && bufferbarrier!(enc)
         MTL.set_function!(enc, c.pipeline)
@@ -583,8 +620,8 @@ function encodecommands!(enc::MTL.MTLComputeCommandEncoderRef, rec, commands::Un
         if c.gridoff < 0
             MTL.dispatchThreadgroups!(enc, c.groups, c.threads)
         else
-            MTL.dispatchThreadgroupsIndirect!(enc, rec.gridbuf, rec.gridoff + 4 * c.gridoff,
-                                              c.threads)
+            MetalBindings.dispatch_threadgroups!(enc, rec.gridbuf, rec.gridoff + 4 * c.gridoff,
+                                                 c.threads)
         end
     end
     return nothing
@@ -614,23 +651,6 @@ refusereplay(::LegacyQueue) = throw(ArgumentError(
     "so replaying it would run every ungated pass and silently discard every " *
     "iteration of every `repeat!`. Record the plan on the device that runs it."))
 
-# Unreached and untested while `canreplay(::MTL4Queue)` is `false`; kept for a
-# driver that fixes the stall, where it is one send per segment against three per
-# dispatch. Encode-shaped recordings leave execution ranges zero, so re-record.
-function executesegment!(::MTL4Queue, s::MTL4Submission, rec, seg)
-    if seg.slot < 0
-        MTL.execute_commands!(s.enc, rec.icb, seg.first:seg.last)
-        return nothing
-    end
-    # Before: the dispatch that wrote this range has landed. After: the next
-    # segment sees what the iteration wrote.
-    MTL.barrierAfterEncoderStages!(s.enc, MTL.MTLStageDispatch, MTL.MTLStageDispatch)
-    MTL.execute_commands_indirect!(s.enc, rec.icb, rec.rangebuf,
-                                   rec.rangeoff + 8 * seg.slot)
-    MTL.barrierAfterEncoderStages!(s.enc, MTL.MTLStageDispatch, MTL.MTLStageDispatch)
-    return nothing
-end
-
 function opensubmit!(q::MTL4Queue, dev::MTL.MTLDevice, bufs)
     # Residency must be complete before this call: MTL4 has no `useResource`, and
     # a set a command buffer already declared does not pick up later allocations
@@ -646,8 +666,8 @@ function opensubmit!(q::MTL4Queue, dev::MTL.MTLDevice, bufs)
     MTL.reset!(alloc)
     cb = q.cbs[q.slot]
     MTL.beginCommandBuffer!(cb, alloc)
-    enc = MTL.MTL4ComputeCommandEncoderRef(cb)
-    q.resset === nothing || MTL.use_residency_set!(cb, q.resset)
+    enc = MetalBindings.MTL4ComputeCommandEncoderRef(cb)
+    MetalBindings.use_residency!(cb, q.residency)
     return MTL4Submission(cb, enc, q.slot)
 end
 
@@ -658,28 +678,19 @@ nextpiece!(::MTL4Queue, s::MTL4Submission, ids) = (MTL.barrierAfterEncoderStages
 
 Close what is pending on the legacy queue and return the timeline value it will
 signal (`0` if nothing is pending), for the next MTL4 submission to wait on: Metal
-orders command buffers only within a queue. Work Metal.jl already committed
-(`maybe_autoflush!`) gets an empty command buffer behind it carrying the signal.
+orders command buffers only within a queue. The open batch is committed first, and
+the batch's work, or work Metal.jl already committed (`maybe_autoflush!`), gets an
+empty command buffer behind it carrying the signal.
 """
 function flushlegacy!(q::MTL4Queue)
-    bq = q.bq
-    # A signal cannot be encoded while an encoder is open.
-    Metal.end_encoder!(bq)
-    cb = bq.backend.cmdbuf
-    if cb === nothing
-        quiet(q) && return UInt64(0)
-        f = (q.next += UInt64(1))
-        # Unmanaged and committed directly, as the bridge in `closesubmit!`.
-        behind = MTL.MTLCommandBufferRef(q.mtl)
-        MTL.encode_signal!(behind, q.event, f)
-        MTL.commit_with_queue_key!(behind, pointer(q.mtl))
-        Metal.ObjectiveC.release(behind)
-        q.bridges += 1
-        return f
-    end
+    Metal.has_open_batch(q.bq) && Metal.flush!(q.bq)
+    quiet(q) && return UInt64(0)
     f = (q.next += UInt64(1))
-    MTL.encode_signal!(cb, q.event, f)
-    Metal.flush!(bq)
+    # Committed directly, as the bridge in `closesubmit!`.
+    behind = MTL.MTLCommandBuffer(q.mtl)
+    MTL.encode_signal!(behind, q.event, f)
+    MTL.commit_with_queue_key!(behind, pointer(q.mtl))
+    q.bridges += 1
     return f
 end
 
@@ -696,7 +707,7 @@ function closesubmit!(q::MTL4Queue, s::MTL4Submission)
     w = iszero(fl) ? prev : fl
     iszero(w) || MTL.wait_event!(q.q, q.event, w)
     q.batch[1] = pointer(s.cb)
-    MTL.commit!(q.q, q.batch, q.feedback)
+    MetalBindings.commit!(q.q, q.batch, q.feedback)
     q.commits += 1
     f = (q.next += UInt64(1))
     MTL.signal_event!(q.q, q.event, f)
@@ -705,11 +716,12 @@ function closesubmit!(q::MTL4Queue, s::MTL4Submission)
     # later legacy work (an `Array(x)` readback, the next uploads) runs after this
     # submission. Safe to commit directly since `flushlegacy!` just closed the
     # batch. `commit_with_queue_key!` skips `commit!`'s submission hook, which
-    # would allocate a queue wrapper to flush a closed batch.
-    bridge = MTL.MTLCommandBufferRef(q.mtl)
+    # would make a queue wrapper to flush a closed batch and wait for an in-flight
+    # slot while `replay!` holds `submission_lock`. Managed and not released here:
+    # Metal.jl's submission record keeps the wrapper and reads its status later.
+    bridge = MTL.MTLCommandBuffer(q.mtl)
     MTL.encode_wait!(bridge, q.event, f)
     MTL.commit_with_queue_key!(bridge, pointer(q.mtl))
-    Metal.ObjectiveC.release(bridge)
     q.bridges += 1
     return f
 end
@@ -762,7 +774,7 @@ function awaittoken!(q::MTL4Queue, f::UInt64)
     while true
         r = hostwait(blockon, w -> q.event.signaledValue >= w.target, w)
         (r === nothing || something(r)) && return true
-        why = MTL.failure(q.feedback)
+        why = MetalBindings.failure(q.feedback)
         why === nothing || error("Mantle: a Metal 4 submission failed, so the timeline " *
             "stopped at $(q.event.signaledValue) and value $target will never arrive. " *
             "The driver says: $why")
@@ -798,7 +810,7 @@ be reused while it still reads. Owning the flush is a promise to flush, which
 ownflush!(d::MetalDevice, own::Bool) = ownflush!(d.queue, d.dev, own)
 
 ownflush!(q::LegacyQueue, ::MTL.MTLDevice, own::Bool) =
-    (Metal.own_flushes!(q.bq, own); nothing)
+    (q.bq.autoflush = !own; nothing)
 
 """
     closeframe!(dev) -> UInt64
@@ -842,7 +854,8 @@ cmdqueue(q::LegacyQueue) = q.mtl
 Run one segment of a recording (encoded instead when the queue `encodes`). A
 gated segment's range is written by a dispatch and read by the command processor
 at the execute, which no barrier bit orders: legacy infers the hazard from
-`useResource`, MTL4 needs a barrier on either side.
+`useResource`. Legacy queues only: an MTL4 queue cannot replay (`canreplay`) and
+encodes every recording (`encodeplan!`).
 """
 executesegment!(d::MetalDevice, sub, rec, seg) = executesegment!(d.queue, sub, rec, seg)
 
@@ -869,7 +882,8 @@ capacity(d::MetalDevice) = Int(d.dev.recommendedMaxWorkingSetSize)
 waitidle(d::MetalDevice) = (waitidle(d.queue); foreach(Metal.synchronize, d.channels); nothing)
 
 # Both queues, the MTL4 one through the timeline so the pool sees what passed.
-waitidle(q::MTL4Queue) = (waitfor(q, q.next); Metal.synchronize(q.bq); nothing)
+waitidle(q::MTL4Queue) = (waitfor(q, q.next); Metal.synchronize(q.bq);
+                          MetalBindings.forget_drained!(q.residency); nothing)
 
 # `supports_graphics` is in `graphics.jl`.
 
@@ -882,6 +896,8 @@ supports_batch_queue(::MetalDevice) = true
 function newchannel(d::MetalDevice)
     mtl = MTL.MTLCommandQueue(d.dev)
     mtl.label = "Mantle channel"
+    # Launches on a channel reach recordings and acceleration structures by address too.
+    MetalBindings.attach!(residency(d), mtl)
     bq = Metal.BatchedCommandQueue(mtl)
     pinpipeline!(bq)
     return bq
@@ -915,7 +931,8 @@ function oneshot!(f, bq::Metal.BatchedCommandQueue; tag = nothing)
 end
 
 Mantle.emitkernel!(e::MetalImmediate, f, args...; ndrange, workgroup_size) =
-    KI.Kernel(Metal.MetalBackend(e.bq), f)(args...; ndrange, workgroupsize = prod(workgroup_size))
+    KI.Kernel(deviceof(e.bq), f)(args...; ndrange, workgroupsize = prod(workgroup_size),
+                                 queue = e.bq)
 
 """Nothing is retired onto a Metal channel (arrays go back through Metal.jl,
 regions through the pool), so there is nothing to destroy."""
@@ -955,7 +972,44 @@ function tryallocate(d::MetalDevice, ::Type{T}, dims::Dims{N}) where {T,N}
         err isa OutOfMemoryError || rethrow()
         return nothing
     end
-    ref = GPUArrays.DataRef(m -> Metal.free(m.buffer), Metal.Managed(buf))
+    return residentarray(d, buf, T, dims)
+end
+
+"""
+    hostzero!(a) -> a
+
+Zero a shared array the GPU has not used yet through its host mapping. `fill!` would
+be a kernel launch into the open batch, and making a recording would cost the next
+run a submission of its own.
+"""
+hostzero!(a::Metal.MtlArray{T,N,Metal.SharedStorage}) where {T,N} =
+    (fill!(unsafe_wrap(Array, a), zero(T)); a)
+
+"""
+    residentarray(dev, T, dims) -> MtlArray
+
+An array in a buffer of its own, in the device's residency set until it is freed. A
+kernel may reach an array by an address stored elsewhere (a texture table, Raycore's
+`store_texture`) rather than as an argument its launch declares, and Metal maps only
+memory a launch declares or a residency set holds: an undeclared array reads zeros.
+The arrays Mantle fills with host data (`devicearray`, `Adapt.adapt`) and the ones it
+allocates outside the pool are made here; scratch from `KI.allocate` is Metal.jl's.
+"""
+residentarray(d::MetalDevice, ::Type{T}, dims::Dims) where {T} =
+    residentarray(d, MTL.MTLBuffer(d.dev, max(checkedbytes(T,dims),4); storage = Metal.SharedStorage),
+                  T, dims)
+
+function residentarray(d::MetalDevice, buf::MTL.MTLBuffer, ::Type{T}, dims::Dims{N}) where {T,N}
+    r = residency(d)
+    MetalBindings.resident!(r, buf)
+    # Freed, the buffer stays in the set until the device has finished what was
+    # submitted before (`forget_drained!` in `waitidle` and a quiet `fence`): a
+    # recorded replay in flight reaches it through the set alone. The set holds the
+    # buffer, so Metal.jl's release does not free it before then.
+    ref = GPUArrays.DataRef(Metal.Managed(buf)) do m
+        MetalBindings.forget_after_drain!(r, m.buffer)
+        Metal.free(m.buffer)
+    end
     a = MtlArray{T,N}(ref, dims)
     # The array took its own reference; this one was only for building it.
     GPUArrays.unsafe_free!(ref)

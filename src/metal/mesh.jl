@@ -1,10 +1,12 @@
-# KernelInterface's mesh verbs lowered to Metal.jl's `air.set_*_mesh` intrinsics.
+# KernelInterface's mesh verbs lowered to the `air.set_*_mesh` intrinsics
+# (`intrinsics/mesh.jl`).
 # KernelInterface slots and indices are 1-based, AIR's 0-based; the conversion
 # happens only here. A vertex is a NamedTuple with `position` first; the other
 # fields go to numbered slots in the mesh stage's output declaration order, which
 # must match `air_mesh_vertex_info` or the fragment stage reads the wrong field.
-# `@device_override`, not plain methods, so the host methods over
-# `HostMeshOutput` stay intact.
+# Overlays in the stage method table (`MetalStageCompiler.STAGE_METHODS`), not
+# plain methods, so the host methods over `HostMeshOutput` stay intact and compute
+# kernels never see them.
 
 """
     mesh_field_index(V, name) -> Int32
@@ -20,14 +22,14 @@ is skipped: it is `air.position`, which has no index.
 end
 
 # Splits the vertex by name at compile time, so the per-vertex write has no lookup.
-@generated function write_mesh_vertex!(out::Metal.MeshPtr{V,P,NV,NP,T},
+@generated function write_mesh_vertex!(out::MetalIntrinsics.MeshPtr{V,P,NV,NP,T},
                                         slot::Int32, v::NamedTuple) where {V,P,NV,NP,T}
     calls = Expr[]
     hasfield(v, :position) ||
         error("a mesh vertex needs a `position`; got $(fieldnames(v))")
     # `flip_clip` as in `MetalVertexStage`: Mantle's clip space is Vulkan's
     # (+y down), Metal's is mirrored.
-    push!(calls, :(Metal.set_position_mesh(out, slot,
+    push!(calls, :(MetalIntrinsics.set_position_mesh(out, slot,
                        flip_clip(mesh_vec4(Base.getfield(v, :position))))))
     # Portable shaders write `Flat` outputs per vertex, as on Vulkan, but AIR
     # has no flat mesh vertex data: flat varyings are per-primitive data
@@ -37,7 +39,7 @@ end
         n === :position && continue
         if hasfield(V, n)
             # Field before slot for the data intrinsics, unlike `set_position_mesh`.
-            push!(calls, :(Metal.set_vertex_data_mesh(
+            push!(calls, :(MetalIntrinsics.set_vertex_data_mesh(
                 out, $(mesh_field_index(V, n)), slot,
                 mesh_component(Base.getfield(v, $(QuoteNode(n)))))))
         elseif hasfield(P, n)
@@ -52,7 +54,7 @@ end
         # data, as on Vulkan. Exact only when each primitive owns its vertices;
         # stages sharing vertices must use `set_mesh_primitive_data!`.
         vpp = mesh_verts_per_primitive(T)
-        writes = [:(Metal.set_primitive_data_mesh(
+        writes = [:(MetalIntrinsics.set_primitive_data_mesh(
                         out, $(mesh_field_index(P, n)), prim,
                         mesh_component(Base.getfield(v, $(QuoteNode(n))))))
                   for n in flat]
@@ -66,9 +68,9 @@ end
     return Expr(:block, Expr(:meta, :inline), calls..., :(return nothing))
 end
 
-@generated function write_mesh_primitive!(out::Metal.MeshPtr{V,P,NV,NP,T},
+@generated function write_mesh_primitive!(out::MetalIntrinsics.MeshPtr{V,P,NV,NP,T},
                                            slot::Int32, d::NamedTuple) where {V,P,NV,NP,T}
-    calls = Expr[:(Metal.set_primitive_data_mesh(
+    calls = Expr[:(MetalIntrinsics.set_primitive_data_mesh(
                        out, $(mesh_field_index(P, n)), slot,
                        mesh_component(Base.getfield(d, $(QuoteNode(n))))))
                  for n in fieldnames(d)]
@@ -86,51 +88,52 @@ end
 # julia.gpu.state_getter` at shader compile).
 @inline mesh_component(x) = ntuple(i -> Float32(@inbounds x[i]), Val(length(x)))
 
-# No `@inline` before `@device_override`: it registers an ordinary method instead
-# of an overlay, which fails at shader compile with a `MethodError`.
-Metal.@device_override Lava.set_mesh_vertex!(out::Metal.MeshPtr, slot::Integer,
-                                           v::NamedTuple) =
+# No `@inline` before the overlay macro: it registers an ordinary method instead of
+# an overlay, which fails at shader compile with a `MethodError`.
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.set_mesh_vertex!(
+        out::MetalIntrinsics.MeshPtr, slot::Integer, v::NamedTuple) =
     write_mesh_vertex!(out, Int32(slot) - Int32(1), v)
 
-Metal.@device_override Lava.set_mesh_primitive_data!(out::Metal.MeshPtr, slot::Integer,
-                                                   d::NamedTuple) =
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.set_mesh_primitive_data!(
+        out::MetalIntrinsics.MeshPtr, slot::Integer, d::NamedTuple) =
     write_mesh_primitive!(out, Int32(slot) - Int32(1), d)
 
 # AIR has one flat index list: zero-based primitive `p` of arity `k` starts at `k*p`.
 # Indices are `UInt8`; `MeshConfig` enforces `MAX_MESH_VERTICES = 256`, so the
 # truncation here is safe.
 
-@inline function write_mesh_indices!(out::Metal.MeshPtr, base::Int32, idx::Vararg{Int32,N}) where {N}
+@inline function write_mesh_indices!(out::MetalIntrinsics.MeshPtr, base::Int32,
+                                     idx::Vararg{Int32,N}) where {N}
     ntuple(Val(N)) do k
-        Metal.set_index_mesh(out, base + Int32(k) - Int32(1),
-                             unsafe_trunc(UInt8, idx[k] - Int32(1)))
+        MetalIntrinsics.set_index_mesh(out, base + Int32(k) - Int32(1),
+                                       unsafe_trunc(UInt8, idx[k] - Int32(1)))
     end
     return nothing
 end
 
-Metal.@device_override Lava.set_mesh_triangle!(out::Metal.MeshPtr, slot::Integer,
-                                             i0::Integer, i1::Integer, i2::Integer) =
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.set_mesh_triangle!(
+        out::MetalIntrinsics.MeshPtr, slot::Integer, i0::Integer, i1::Integer, i2::Integer) =
     write_mesh_indices!(out, (Int32(slot) - Int32(1)) * Int32(3),
-                         Int32(i0), Int32(i1), Int32(i2))
+                        Int32(i0), Int32(i1), Int32(i2))
 
-Metal.@device_override Lava.set_mesh_line!(out::Metal.MeshPtr, slot::Integer,
-                                         i0::Integer, i1::Integer) =
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.set_mesh_line!(
+        out::MetalIntrinsics.MeshPtr, slot::Integer, i0::Integer, i1::Integer) =
     write_mesh_indices!(out, (Int32(slot) - Int32(1)) * Int32(2), Int32(i0), Int32(i1))
 
-Metal.@device_override Lava.set_mesh_point!(out::Metal.MeshPtr, slot::Integer,
-                                          i0::Integer) =
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.set_mesh_point!(
+        out::MetalIntrinsics.MeshPtr, slot::Integer, i0::Integer) =
     write_mesh_indices!(out, Int32(slot) - Int32(1), Int32(i0))
 
 # Metal takes only the primitive count; the vertex bound is in the object type.
 # A threadgroup declaring zero primitives is discarded with its side effects.
-Metal.@device_override Lava.set_mesh_outputs!(out::Metal.MeshPtr, ::Integer,
-                                            nprimitives::Integer) =
-    Metal.set_primitive_count_mesh(out, Int32(nprimitives))
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.set_mesh_outputs!(
+        out::MetalIntrinsics.MeshPtr, ::Integer, nprimitives::Integer) =
+    MetalIntrinsics.set_primitive_count_mesh(out, Int32(nprimitives))
 
 # Metal.jl's thread intrinsics are already 1-based.
-Metal.@device_override Lava.mesh_thread_index() =
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.mesh_thread_index() =
     Int32(Metal.thread_index_in_threadgroup())
-Metal.@device_override Lava.mesh_group_index() =
+Base.Experimental.@overlay MetalStageCompiler.STAGE_METHODS Lava.mesh_group_index() =
     Int32(Metal.threadgroup_position_in_grid().x)
 
 # `set_mesh_groups!` is absent on purpose: Metal.jl emits no `air.object` stage,
@@ -153,8 +156,8 @@ function mesh_object_of(p::Mantle.MeshPipeline)
     V = NamedTuple{(:position, smooth...),
                    Tuple{NTuple{4,Float32}, (vals[n] for n in smooth)...}}
     P = NamedTuple{flat, Tuple{(vals[n] for n in flat)...}}
-    return Metal.MeshObject{V, P, cfg.max_vertices, cfg.max_primitives,
-                            mesh_topology_symbol(cfg.topology)}
+    return MetalIntrinsics.MeshObject{V, P, cfg.max_vertices, cfg.max_primitives,
+                                      mesh_topology_symbol(cfg.topology)}
 end
 
 """
@@ -250,13 +253,13 @@ function compile_pipeline(d::MetalDevice, p::Mantle.MeshPipeline,
         mfun, mlib = mstage
         ffun, flib = fstage
 
-        desc = MTL.MTLMeshRenderPipelineDescriptor()
+        desc = MetalBindings.mesh_render_pipeline_descriptor()
         desc.meshFunction = mfun
         desc.fragmentFunction = ffun
         apply_attachments!(desc, color_formats, depth_format, p.blend)
         # From `MeshConfig`: Metal refuses a mismatch with the shader's width.
         desc.maxTotalThreadsPerMeshThreadgroup = cfg.threads
-        state = MTL.MTLRenderPipelineState(dev, desc)
+        state = MetalBindings.render_pipeline_state(dev, desc)
 
         dstate = depthstate(dev, p.depth, depth_format)
 
@@ -304,8 +307,8 @@ function loweredmesh(d::MetalCompiledGeometryDraw, indexed::Bool)
 end
 
 """`groups` mesh threadgroups of `threads` threads each."""
-drawmesh!(enc, groups, threads) = MTL.draw_mesh_threadgroups!(enc, MTL.MTLSize(groups, 1, 1),
-    MTL.MTLSize(1, 1, 1), MTL.MTLSize(threads, 1, 1))
+drawmesh!(enc, groups, threads) = MetalBindings.draw_mesh_threadgroups!(enc,
+    MTL.MTLSize(groups, 1, 1), MTL.MTLSize(1, 1, 1), MTL.MTLSize(threads, 1, 1))
 
 """What `compile_draw` returns for a `MeshPipeline` and `record_draw!` binds: the
 pipeline and both stages' baked arguments, which outlive the pass. The draw count
@@ -343,8 +346,8 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledMeshDraw, args,
     rebakestages!(args, d.mesh, d.frag)
     c = d.pipeline
     setdrawstate!(h.encoder, c)
-    bind_stage!(h.encoder, d.mesh, MTL.set_mesh_bytes!, MTL.MTLRenderStageMesh)
-    bind_stage!(h.encoder, d.frag, MTL.set_fragment_bytes!, MTL.MTLRenderStageFragment)
+    bind_stage!(h.encoder, d.mesh, MetalBindings.set_mesh_bytes!, MTL.MTLRenderStageMesh)
+    bind_stage!(h.encoder, d.frag, MetalBindings.set_fragment_bytes!, MTL.MTLRenderStageFragment)
     drawmesh!(h.encoder, groups, c.threads)
     return nothing
 end
@@ -397,16 +400,16 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledGeometryDraw, a
 
     enc = h.encoder
     setdrawstate!(enc, c)
-    bind_stage!(enc, d.mesh, MTL.set_mesh_bytes!, MTL.MTLRenderStageMesh)
+    bind_stage!(enc, d.mesh, MetalBindings.set_mesh_bytes!, MTL.MTLRenderStageMesh)
     if ix !== nothing
         useindices!(enc, indices, MTL.MTLRenderStageMesh)
         # `scratchsize` covered only the stage's own arguments, so grow the
         # scratch to fit the index argument.
         length(d.mesh.scratch) < sizeof(typeof(ix)) &&
             resize!(d.mesh.scratch, sizeof(typeof(ix)))
-        bind_arg!(MTL.set_mesh_bytes!, enc, ix, length(d.mesh.device) + 1, d.mesh.scratch)
+        bind_arg!(MetalBindings.set_mesh_bytes!, enc, ix, length(d.mesh.device) + 1, d.mesh.scratch)
     end
-    bind_stage!(enc, d.frag, MTL.set_fragment_bytes!, MTL.MTLRenderStageFragment)
+    bind_stage!(enc, d.frag, MetalBindings.set_fragment_bytes!, MTL.MTLRenderStageFragment)
 
     groups = Mantle.primitivecount(d.pipeline.topology, count)
     # No primitives (e.g. a one-point `lines`) draws nothing; Metal refuses a

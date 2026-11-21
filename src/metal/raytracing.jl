@@ -6,18 +6,11 @@
 # [`MetalInstanceDescriptor`](@ref)s (`instancerecord` in `hwtlas.jl`).
 
 # Metal cannot infer residency for a structure a kernel names only by its
-# `gpuResourceID`, and a non-resident structure makes rays miss silently. Through
-# Metal.jl's per-queue residency set rather than `add_allocation!`: the set holds
-# strong references, and only allocations Metal.jl tracks leave it when freed
-# (`forget_resident!`).
-function make_resident!(d::MetalDevice, resources...)
-    Metal.install_queue_residency!(cmdqueue(d), d.dev)
-    for r in resources
-        r === nothing && continue
-        Metal.make_persistently_resident!(r, d.dev)
-    end
-    return nothing
-end
+# `gpuResourceID`, and a non-resident structure makes rays miss silently. Through the
+# device's residency set, attached to its queues (`residency`), so a trace launched on
+# any of them sees the structures. A structure leaves the set when its wrapper is
+# collected (`MetalBindings.Residency`).
+make_resident!(d::MetalDevice, resources) = (MetalBindings.resident!(residency(d), resources); nothing)
 
 """
     MetalInstanceDescriptor
@@ -108,15 +101,11 @@ end
 """
     newstructure(dev, bytes) -> MTLAccelerationStructure
 
-An empty acceleration structure that leaves the residency set when collected.
-The set holds strong references ([`make_resident!`](@ref)), so without this a
-structure would never be freed. The finalizer is on the structure, not its
-`MetalBLAS`, because a TLAS keeps structures alive without their `MetalBLAS`.
+An empty acceleration structure. The residency set holds strong references
+([`make_resident!`](@ref)), and a structure leaves it when this wrapper is collected,
+not its `MetalBLAS`, because a TLAS keeps structures alive without their `MetalBLAS`.
 """
-function newstructure(d::MetalDevice, bytes::Integer)
-    accel = MTL.alloc_acceleration_structure(d.dev, bytes)
-    return finalizer(Metal.forget_resident!, accel)
-end
+newstructure(d::MetalDevice, bytes::Integer) = MetalBindings.acceleration_structure(d.dev, bytes)
 
 """
 Build `desc` into a new structure with scratch that is freed as soon as the build has run.
@@ -127,7 +116,7 @@ function buildstructure(d::MetalDevice, desc, sizes)
                             storage = Metal.PrivateStorage)
     try
         withaccelencoder(d) do enc
-            MTL.build!(enc, accel, desc, scratch)
+            MetalBindings.build!(enc, accel, desc, scratch)
         end
     finally
         Metal.free(scratch)
@@ -141,7 +130,7 @@ failed. Synchronous because builds are setup, outside the graph's timeline.
 """
 function withaccelencoder(f, d::MetalDevice)
     cb = MTL.MTLCommandBuffer(cmdqueue(d))
-    enc = MTL.MTLAccelerationStructureCommandEncoder(cb)
+    enc = MetalBindings.acceleration_structure_encoder(cb)
     try
         f(enc)
     finally
@@ -170,12 +159,12 @@ A primitive structure over the geometry `geo` names, keeping `inputs`. `refittab
 sets `MTLAccelerationStructureUsageRefit`, without which Metal rejects a refit.
 """
 function newblas(d::MetalDevice, geo, refittable::Bool, inputs::Vector{Any})
-    desc = MTL.MTLPrimitiveAccelerationStructureDescriptor()
+    desc = MetalBindings.descriptor(MTL.MTLPrimitiveAccelerationStructureDescriptor)
     # `NSArray`, not a typed `Vector`: `@objcwrapper` types are no Julia subtype
     # hierarchy, so `convert` refuses the concrete descriptor.
     desc.geometryDescriptors = NSArray([geo])
     refittable && (desc.usage = MTL.MTLAccelerationStructureUsageRefit)
-    sizes = MTL.accelerationStructureSizes(d.dev, desc)
+    sizes = MetalBindings.acceleration_structure_sizes(d.dev, desc)
     accel = buildstructure(d, desc, sizes)
     # `max(…, 1)`: a zero-length `MTLBuffer` is rejected.
     keep = MTL.MTLBuffer(d.dev, max(sizes.refitScratchBufferSize, 1);
@@ -184,7 +173,7 @@ function newblas(d::MetalDevice, geo, refittable::Bool, inputs::Vector{Any})
 end
 
 function buildnative!(ctx::MetalAccelBuildContext, input::TriangleInput, allow_update::Bool)
-    geo = MTL.MTLAccelerationStructureTriangleGeometryDescriptor()
+    geo = MetalBindings.descriptor(MTL.MTLAccelerationStructureTriangleGeometryDescriptor)
     geo.vertexBuffer, geo.vertexBufferOffset = boundbuffer(pointer(input.vertices))
     geo.vertexStride = sizeof(NTuple{3,Float32})
     geo.indexBuffer, geo.indexBufferOffset = boundbuffer(pointer(input.indices))
@@ -195,7 +184,7 @@ end
 
 # `AABB` is two `Point3f`: `MTLAxisAlignedBoundingBox`'s layout, 24 bytes a box.
 function buildnative!(ctx::MetalAccelBuildContext, input::BoxInput, allow_update::Bool)
-    geo = MTL.MTLAccelerationStructureBoundingBoxGeometryDescriptor()
+    geo = MetalBindings.descriptor(MTL.MTLAccelerationStructureBoundingBoxGeometryDescriptor)
     geo.boundingBoxBuffer, geo.boundingBoxBufferOffset = boundbuffer(pointer(input.boxes))
     geo.boundingBoxStride = sizeof(AABB)
     geo.boundingBoxCount = length(input.boxes)
@@ -208,24 +197,24 @@ function buildnative!(ctx::MetalAccelBuildContext, input::InstanceInput, allow_u
     d = ctx.into
     # Concretely typed: `NSArray` takes a `Vector{<:ObjectiveC.Object}`.
     handles = MTL.MTLAccelerationStructure[b.handle for b in input.blases]
-    desc = MTL.MTLInstanceAccelerationStructureDescriptor()
+    desc = MetalBindings.descriptor(MTL.MTLInstanceAccelerationStructureDescriptor)
     desc.instanceDescriptorType = MTL.MTLAccelerationStructureInstanceDescriptorTypeUserID
     desc.instanceDescriptorBuffer, desc.instanceDescriptorBufferOffset = boundbuffer(pointer(input.records))
     desc.instanceCount = input.n
     desc.instancedAccelerationStructures = NSArray(handles)
     allow_update && (desc.usage = MTL.MTLAccelerationStructureUsageRefit)
-    sizes = MTL.accelerationStructureSizes(d.dev, desc)
+    sizes = MetalBindings.acceleration_structure_sizes(d.dev, desc)
     accel = buildstructure(d, desc, sizes)
     keep = MTL.MTLBuffer(d.dev, max(sizes.refitScratchBufferSize, 1);
                          storage = Metal.PrivateStorage)
     # Non-resident structures are not mapped for the dispatch: every ray misses silently.
-    make_resident!(d, accel, handles...)
+    make_resident!(d, (accel, handles...))
     return MetalTLAS(accel, desc, handles, input.records, keep, allow_update, input.n)
 end
 
 function refitnative!(ctx::MetalAccelBuildContext, as::Union{MetalBLAS,MetalTLAS})
     withaccelencoder(ctx.into) do enc
-        MTL.refit!(enc, as.handle, as.desc, as.handle, as.scratch)
+        MetalBindings.refit!(enc, as.handle, as.desc, as.handle, as.scratch)
     end
     return as
 end

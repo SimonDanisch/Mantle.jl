@@ -384,7 +384,7 @@ end
              (:gemv!, :LinearAlgebra), (:gemv!, :Metal),
              (:kernelinterpreter, :Lava),
              (:maybe_collect, :Metal), (:offset, :LLVM),
-             (:overlaps, :GeometryBasics), (:register!, :LLVM), (:run!, :LLVM),
+             (:overlaps, :GeometryBasics), (:overlaps, :Metal), (:register!, :LLVM), (:run!, :LLVM),
              (:storage, :GPUArrays), (:workgroupsize, :KernelAbstractions)]
     @test setdiff(shadows, known) == Tuple{Symbol,Symbol}[]
 end

@@ -207,7 +207,7 @@ divided by `N`.
 function fft!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{ComplexF32};
               inverse::Bool = false, skew::Bool = FFT_SKEW,
               group::Union{Nothing,Int} = nothing)
-    be = get_backend(src)
+    be = Device(get_backend(src))
     N,T,lead,nb,nbatch = fft_config(dst,src,caps(be);skew,group)
     nbatch == 0 && return dst
     kilaunch!(be,fft_kernel!,fft_args(dst,src,N,lead,inverse,skew,nb)...;
@@ -466,7 +466,7 @@ the power-of-two kernel only.
 """
 function fftany!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{ComplexF32};
                  inverse::Bool = false, skew::Bool = FFT_SKEW)
-    be = get_backend(src)
+    be = Device(get_backend(src))
     runlaunches!(be, fftany_launches(dst, src, caps(be); inverse, skew))
     return dst
 end

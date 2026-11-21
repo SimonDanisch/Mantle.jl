@@ -74,6 +74,26 @@ end
     @test count(ok) == 8
 end
 
+@testset "a stored handle to a resized array reads its data" begin
+    # `resize!` gives the array new storage from the array library itself, not
+    # from Mantle: on Metal a buffer Metal.jl allocated, in no residency set until
+    # the conversion puts it there. Raycore's type slots grow this way when a
+    # second mesh adds lights of a type the scene has already.
+    be = TESTBACKEND
+    n = 4096
+    data = Float32.(1:n)
+    src = Mantle.devicearray(be, data[1:n ÷ 2])
+    resize!(src, n)
+    copyto!(src, n ÷ 2 + 1, data, n ÷ 2 + 1, n - n ÷ 2)
+    table = Mantle.devicearray(be, [KI.argconvert(be, src)])
+    out = KA.zeros(be, Float32, n)
+    GC.@preserve src begin
+        stored_read!(be, 256)(out, table, Int32(n); ndrange = n)
+        KA.synchronize(be)
+        @test Array(out) == data
+    end
+end
+
 @testset "converting the same array again is the same handle" begin
     # `store_texture` converts one array per texture and a scene has many, so the
     # conversion runs repeatedly on one device. Converting the same array twice

@@ -918,8 +918,6 @@ function Mantle.caps(d::ROCmDevice)
     )
 end
 
-Mantle.caps(b::AMDGPU.ROCBackend) = Mantle.caps(Mantle.Device(b))
-
 # ── KernelInterface ──────────────────────────────────────────────────────────
 #
 # A `ROCmDevice` is a KernelInterface backend, as every `Device` is. AMDGPU.jl

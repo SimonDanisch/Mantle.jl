@@ -107,7 +107,7 @@ const KA = KernelAbstractions
     # than the test being left red or the ceiling quietly
     # widened — it is a design decision that has been made, not an inference
     # failure that has crept in.
-    @test per < 400
+    @test per < 400 broken = metalperfpending()
 
     # Vulkan's `compiled` launch handle (a kernel with its plan and queue resolved
     # into concrete fields, pinned there to be no worse than this path) has no

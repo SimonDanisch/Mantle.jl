@@ -10,13 +10,13 @@
 # walked per run instead.
 
 """
-A plan's argument memory: one persistently resident shared buffer the plan owns.
-Shared because `emitupdate!` writes `GPURef` values through the host pointer
-between runs. Returns `(buffer, gpuaddress, hostpointer)`.
+A plan's argument memory: one shared buffer the plan owns, in the device's residency
+set until the buffer is collected. Shared because `emitupdate!` writes `GPURef` values
+through the host pointer between runs. Returns `(buffer, gpuaddress, hostpointer)`.
 """
 function Mantle.argbytes(d::MetalDevice, nbytes::Int)
     buf = MTL.MTLBuffer(d.dev, max(nbytes, 256); storage = Metal.SharedStorage)
-    Metal.make_persistently_resident!(buf)
+    MetalBindings.resident!(residency(d), buf)
     ptr = convert(Ptr{UInt8}, MTL.contents(buf))
     return buf, UInt64(buf.gpuAddress), ptr
 end
@@ -63,7 +63,7 @@ command processor sees it from the next `execute`, not the one that wrote it, so
     unsafe_store!(p, UInt32(1), 3)
     icb = unsafe_load(reinterpret(Core.LLVMPtr{UInt64,Metal.AS.Device}, p + 16))
     if icb != UInt64(0)
-        Metal.concurrent_dispatch_threadgroups!(
+        MetalIntrinsics.concurrent_dispatch_threadgroups!(
             reinterpret(Core.LLVMPtr{Nothing,Metal.AS.Device}, icb),
             unsafe_load(p, 7), (groups, UInt32(1), UInt32(1)),
             (unsafe_load(p, 8), UInt32(1), UInt32(1)))
@@ -74,7 +74,8 @@ end
 """
 Retire a plan's outgoing argument memory (after a refit) without freeing it under
 a frame in flight. It is outside the pool, so it becomes a root of `dev`'s open
-batch and is released when that command buffer completes.
+batch and is released when that command buffer completes; collecting it takes it out
+of the residency set.
 """
 function Mantle.retire!(::Pool, dev::MetalDevice, buf::MTL.MTLBuffer)
     # `dev`'s batch, not `Metal.global_queue` or the process device: the root must
@@ -173,16 +174,16 @@ boundbuffer(p::Metal.MtlPtr) = (p.buffer, Int(p.offset))
 
 Each argument's binding slot and byte offset from `argoff`, done once at compile.
 Slots come from [`Mantle.eachpassedarg`](@ref); offsets are `argalign`ed so any can
-back an indirect command. Buffer arguments are made persistently resident.
+back an indirect command. Buffer arguments are added to `dev`'s residency set.
 """
-function recorded_args(adapted::Tuple, argoff::Int)
+function recorded_args(dev::MetalDevice, adapted::Tuple, argoff::Int)
     out = RecordedArg[]
     off = argoff
     Mantle.eachpassedarg(adapted) do slot, a, passing
         if passing isa Mantle.DeviceAllocation
             buf, bufoff = boundbuffer(a)
             checkresident(buf)
-            Metal.make_persistently_resident!(buf)
+            MetalBindings.resident!(residency(dev), buf)
             push!(out, RecordedArg(slot, 0, 0, buf, bufoff))
         else
             n = sizeof(typeof(a))
@@ -230,17 +231,12 @@ end
 """
 The kernel state a recorded dispatch carries, built once (a launch builds one per
 launch). Its seed is chosen once, so Metal's device RNG repeats its stream every frame.
+The buffers the state points to (scratch and relocation table) are reached by address
+only, so they join the device's residency set.
 """
 function recorded_state(d::MetalDevice, kernel::Metal.HostKernel)
-    buf, buf_addr = Metal.malloc_buffer_and_gpu_address(d.dev)
-    exc, exc_addr = Metal.exception_info_buffer_and_gpu_address(d.dev)
-    reloc = kernel.reloc_table
-    reloc === nothing || Metal.make_persistently_resident!(reloc)
-    return Metal.KernelState(rand(UInt32),
-        reinterpret(Core.LLVMPtr{UInt8, Metal.AS.Device}, buf_addr),
-        reinterpret(Core.LLVMPtr{UInt8, Metal.AS.Device}, exc_addr),
-        reinterpret(Core.LLVMPtr{UInt64, Metal.AS.Device},
-                    reloc === nothing ? UInt64(0) : UInt64(reloc.gpuAddress)))
+    MetalBindings.resident!(residency(d), Metal.kernel_resources(kernel))
+    return Metal.KernelState(kernel; seed = rand(UInt32))
 end
 
 """
@@ -275,7 +271,7 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
         kernel = recordedkernel(Metal.mtlconvert(d.kernel), args, entry)
         threads, groups = Mantle.ki_launch_extents(KI.Kernel(metalbackend(dev), kernel), nd, d.group)
         state = recorded_state(dev, kernel)
-        recargs, nbytes = recorded_args((state, d.kernel, args...), argoff)
+        recargs, nbytes = recorded_args(dev, (state, d.kernel, args...), argoff)
         return MetalRecordedDispatch(kernel, recargs, args, raw, dev, d.args, (), state,
                                      groups, threads, entry, argoff, nbytes, indirect,
                                      d.ndrange)
@@ -291,7 +287,7 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
                                        obj, nd, Mantle.callgroup(obj, d.group))
     adapted = (Metal.mtlconvert(shape.ctx), args...)
     state = recorded_state(dev, kernel)
-    recargs, nbytes = recorded_args((state, obj.f, adapted...), argoff)
+    recargs, nbytes = recorded_args(dev, (state, obj.f, adapted...), argoff)
     return MetalRecordedDispatch(kernel, recargs, adapted, raw, dev, d.args, (adapted[1],), state,
                                  Mantle.groupcount(shape), Mantle.groupthreads(shape),
                                  entry, argoff, nbytes, indirect, d.ndrange)
@@ -452,7 +448,7 @@ end
 Collects, through `holdleaves!`, the use record of each Metal.jl array a plan's
 arguments reach, once each.
 """
-struct ManagedLeaves
+struct ManagedLeaves <: MetalLeaves
     records::Vector{Metal.Managed}
 end
 function Mantle.hold!(c::ManagedLeaves, a::Metal.MtlArray)
@@ -478,7 +474,8 @@ function argmanaged(pl::Mantle.Plan)
     return c.records
 end
 
-# The recording's Objective-C objects die with it; the argument memory is the plan's.
+# The recording's Objective-C objects die with it, and leave the device's residency
+# set when collected (`MetalBindings.Residency`); the argument memory is the plan's.
 Mantle.release!(::MetalRecording) = nothing
 
 """
@@ -556,7 +553,7 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan,
     let why = norecordreason(pl)
         why === nothing || throw(ArgumentError("record!: " * why))
     end
-    Metal.can_use_residency_sets(d.dev) || throw(ArgumentError(
+    MetalBindings.has_residency_set(residency(d)) || throw(ArgumentError(
         "record!: this device has no residency sets, and every buffer a recorded " *
         "command reaches is reached by address — without one nothing it reads is " *
         "resident. Run the plan without recording it."))
@@ -587,30 +584,26 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan,
         "$(first(passes) - 1) passes."))
     # `ray_tracing` always: in a buffer that did not declare it every traced ray
     # misses silently, and whether a kernel traces is not visible from the dispatch.
-    desc = MTL.MTLIndirectCommandBufferDescriptor(; max_kernel_buffers = max(nslots, 1),
-                                                  ray_tracing = true)
+    desc = MetalBindings.indirect_command_buffer_descriptor(; max_kernel_buffers = max(nslots, 1),
+                                                            ray_tracing = true)
     # Shared because the host encodes the commands: API validation
     # (`MTL_DEBUG_LAYER=1`) refuses CPU access to a `Private` one. `max(.., 1)`
     # since a calls-only plan has no commands; `encode!` still bounds by `ncommands`.
-    icb = MTL.MTLIndirectCommandBuffer(d.dev, desc, max(ncommands, 1);
-                                       storage = MTL.MTLResourceStorageModeShared)
-    # Resident for the recording's life: on MTL4 nothing else makes it resident,
-    # and reading an unmapped indirect command buffer faults the queue.
-    Metal.make_persistently_resident!(icb, d.dev)
+    icb = MetalBindings.indirect_command_buffer(d.dev, desc, max(ncommands, 1);
+                                                storage = MTL.MTLResourceStorageModeShared)
     # One 256-byte slot per argument: the range reset takes three, each range
     # writer its slots, the prepares `prepbytes`. Sized once.
     aux = MTL.MTLBuffer(d.dev, max(256 * (4 + RANGE_WRITER_SLOTS * nwriters) + prepbytes, 256);
                         storage = Metal.SharedStorage)
-    Metal.make_persistently_resident!(aux)
-    ranges = Metal.MtlVector{UInt32}(undef, max(2 * nwriters, 2))
-    fill!(ranges, UInt32(0))
+    # Resident for the recording's life: on MTL4 nothing else makes the indirect
+    # command buffer resident, and reading an unmapped one faults the queue.
+    MetalBindings.resident!(residency(d), (icb, aux))
+    ranges = hostzero!(Metal.MtlVector{UInt32,Metal.SharedStorage}(undef, max(2 * nwriters, 2)))
     # Three words per command covers every dispatch being gated. One element on a
     # replaying queue, where nothing reads them; kept so the type stays concrete.
     ngrid = encodes(d.queue) && nwriters > 0 ? 3 * ncommands : 1
-    grids = Metal.MtlVector{UInt32}(undef, ngrid)
-    templ = Metal.MtlVector{UInt32}(undef, ngrid)
-    fill!(grids, UInt32(0))
-    fill!(templ, UInt32(0))
+    grids = hostzero!(Metal.MtlVector{UInt32,Metal.SharedStorage}(undef, ngrid))
+    templ = hostzero!(Metal.MtlVector{UInt32,Metal.SharedStorage}(undef, ngrid))
     return MetalRecorder(d, pl, icb, ncommands, 0, false, MetalEncodedCommand[],
                          MetalSegment[], Pair{Int,Any}[], 1, nothing, -1,
                          aux, convert(Ptr{UInt8}, MTL.contents(aux)), 0,
@@ -734,14 +727,14 @@ function encode!(e::MetalRecorder, pipeline::MTL.MTLComputePipelineState,
     e.cursor += 1
     e.cursor <= e.ncommands || error("record!: the recording is longer than the " *
                                      "$(e.ncommands) commands it was sized for")
-    cmd = MTL.indirect_compute_command(e.icb, e.cursor)
-    MTL.set_pipeline!(cmd, pipeline)
+    cmd = MetalBindings.indirect_compute_command(e.icb, e.cursor)
+    MetalBindings.set_pipeline!(cmd, pipeline)
     for a in args
         buf = a.buffer === nothing ? store : a.buffer
         off = a.buffer === nothing ? a.offset : a.bufoffset
-        MTL.set_kernel_buffer!(cmd, buf, off, a.index)
+        MetalBindings.set_kernel_buffer!(cmd, buf, off, a.index)
     end
-    MTL.dispatch_threadgroups!(cmd, groups, threads)
+    MetalBindings.dispatch_threadgroups!(cmd, groups, threads)
     # Also captured for encoding, for a queue that does not replay; the addresses
     # are fixed, so the table is built once.
     if encodes(e.dev.queue)
@@ -762,7 +755,7 @@ function encode!(e::MetalRecorder, pipeline::MTL.MTLComputePipelineState,
     # MTL4 honours a command's barrier bit despite having no hazard tracking, so
     # an execute need not be split at barriers.
     if e.barrier
-        MTL.set_barrier!(cmd)
+        MetalBindings.set_barrier!(cmd)
         e.barrier = false
     end
     return cmd
@@ -797,7 +790,7 @@ function auxcommand!(e::MetalRecorder, f, adapted::Tuple, name::String;
                      groups::Integer = 1, threads::Integer = 1, pack::Bool = true)
     kernel = recordedkernel(f, adapted, name)
     state = recorded_state(e.dev, kernel)
-    args, nbytes = recorded_args((state, f, adapted...), e.auxcursor)
+    args, nbytes = recorded_args(e.dev, (state, f, adapted...), e.auxcursor)
     e.auxcursor += Mantle.argalign(nbytes)
     e.auxcursor <= Int(e.aux.length) || error(
         "record!: the recording's auxiliary memory holds $(Int(e.aux.length)) bytes and " *
@@ -1078,8 +1071,14 @@ function ensureresident!(d::MetalDevice, rec::MetalRecording)
     push!(rec.resources, rec.gridbuf)
     push!(rec.resources, rec.templ.data[].buffer)
     # Residency is granted here, on rebuild only: granting per submission left the
-    # GPU idle most of a small frame.
-    foreach(Metal.make_persistently_resident!, rec.resources)
+    # GPU idle most of a small frame. The arrays the commands reach first, so that
+    # each leaves the set once its use record is collected (Metal.jl's buffers have
+    # no finalizer to end the membership). That removal names the membership it
+    # ends: a pool block the pool forgot and freed before, and a later buffer at its
+    # address, keep theirs.
+    r = residency(d)
+    foreach(m -> MetalBindings.resident!(r, m.buffer, m), rec.argmanaged)
+    MetalBindings.resident!(r, rec.resources)
     resize!(rec.residentids, length(rec.resources))
     @inbounds for i in eachindex(rec.resources)
         rec.residentids[i] = Base.pointer(rec.resources[i])

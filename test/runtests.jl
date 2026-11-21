@@ -937,6 +937,7 @@ foreachbackend(joinpath(@__DIR__, "test_recorded_plan_runs.jl"))
 foreachbackend(joinpath(@__DIR__, "test_hostwait.jl"))
 foreachbackend(joinpath(@__DIR__, "test_pool_on_device.jl"))
 foreachbackend(joinpath(@__DIR__, "test_stored_device_array.jl"))
+foreachbackend(joinpath(@__DIR__, "test_wrapped_array_args.jl"))
 
 # ── the window tests, in their own process, on a clock ────────────────────────
 #
@@ -1033,7 +1034,9 @@ global METAL_TESTS = joinpath(@__DIR__, "metal")
 if _METAL_OK
     @testset "Metal backend" begin
         for f in ("test_kernelinterface_metal.jl", "test_array_uploads_metal.jl", "test_hwtlas_memory_metal.jl",
-                  "test_mtl4_hostwait.jl", "test_recorded_profile.jl", "test_recorded_inlines.jl")
+                  "test_mtl4_hostwait.jl", "test_recorded_profile.jl", "test_recorded_inlines.jl",
+                  "test_graphics_metal.jl", "test_indirect_metal.jl", "test_mtl4_metal.jl",
+                  "test_linalg_metal.jl", "test_residency_metal.jl")
             @testset "$f" begin
                 include(joinpath(METAL_TESTS, f))
             end

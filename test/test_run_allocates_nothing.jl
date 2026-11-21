@@ -59,7 +59,7 @@ end
         per_run = allocations_per_run(pl)
         # …and the run still ran: 300 cycles of +1 from 0.
         @test all(==(300f0), Array(Mantle.storage(a)))
-        @test per_run == 0
+        @test per_run == 0 broken = metalperfpending()
         # A device that times its passes measured every one of them; one without
         # timestamps keeps a single submission and has nothing to measure.
         isfinite(budget) && Mantle.timestamps(dev) && @test !any(isnan, pl.passcost)
@@ -86,7 +86,7 @@ end
     per_run = allocations_per_run(pl)
     @test all(==(1500f0), Array(Mantle.storage(a)))
     @test length(pl.recording.batches) == 1
-    @test per_run == 0
+    @test per_run == 0 broken = metalperfpending()
     Mantle.free!(pl)
 end
 
@@ -98,7 +98,7 @@ end
 @testset "run! of a recorded plan allocates nothing when its wait reaches a worker" begin
     dev = Mantle.Device(TESTBACKEND)
     pl = spinplan(dev, spinsteps(dev, 0.01))
-    @test allocations_per_run(pl) == 0
+    @test allocations_per_run(pl) == 0 broken = metalperfpending()
     Mantle.free!(pl)
 end
 

@@ -10,25 +10,29 @@ function dropped_hwtlas(be)
     return nothing
 end
 
-resident_allocations() = sum(s -> Int(s.allocationCount), values(Metal.queue_residency_sets); init = 0)
+# The device's residency set holds what its acceleration structures reach by address.
+resident_allocations(be) = Int(Mantle.residency(be).set.allocationCount)
 
-function settle()
-    Metal.synchronize()
+# Collected wrappers leave the set at the next drain: a recorded replay in flight may
+# still reach their memory by address (`MetalBindings.forget_after_drain!`).
+function settle(be)
+    Mantle.waitidle(be)
     GC.gc(true); GC.gc(true)
-    Metal.trim_residency!()
+    Mantle.waitidle(be)
+    Mantle.MetalBindings.trim!(Mantle.residency(be))
 end
 
 @testset "Metal: a dropped HWTLAS gives its memory back" begin
     be = Mantle.Device(Mantle.MetalAPI())
     dev = Metal.device()
     dropped_hwtlas(be)
-    settle()
-    resident, allocated = resident_allocations(), dev.currentAllocatedSize
+    settle(be)
+    resident, allocated = resident_allocations(be), dev.currentAllocatedSize
 
     for _ in 1:4
         dropped_hwtlas(be)
     end
-    settle()
-    @test resident_allocations() == resident
+    settle(be)
+    @test resident_allocations(be) == resident
     @test dev.currentAllocatedSize == allocated
 end

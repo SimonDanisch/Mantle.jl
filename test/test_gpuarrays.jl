@@ -69,11 +69,17 @@ const LAVAPIPE_CRASH_SKIP = Set([
 
 # The device name is the one portable thing that says which driver this is; it
 # skips groups that take the process down with them, and gates nothing else.
+#
+# Metal.jl's arrays in shared storage, which Mantle's buffers on Metal are, live in
+# memory the host maps, and Metal.jl lets the host index them whatever `allowscalar`
+# says (its documented behaviour), so the group's checks that scalar indexing throws do
+# not hold for them.
 function effective_skip()
     skip = copy(SKIP)
     if occursin("llvmpipe", lowercase(Mantle.devicename(Mantle.Device(TESTBACKEND))))
         union!(skip, LAVAPIPE_CRASH_SKIP)
     end
+    nameof(AT) === :MtlArray && push!(skip, "indexing scalar")
     return skip
 end
 

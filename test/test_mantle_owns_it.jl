@@ -177,7 +177,9 @@ end
 # are native facts the heuristic cannot see are listed with the reason, per file, so a
 # new pure method anywhere still fails.
 
-const DRIVER_TOKENS = r"\b(VK\.|vk[A-Z_]|VK_|MTL\.|MTLm\.|Metal\.|@objc)\b"
+# `MetalBindings`, `MetalIntrinsics`, `MetalStageCompiler` and `MetalLinalg` are the
+# Metal backend's own calls into the driver, which Metal.jl does not wrap.
+const DRIVER_TOKENS = r"\b(VK\.|vk[A-Z_]|VK_|MTL\.|MTLm\.|Metal\.|@objc|MetalBindings\.|MetalIntrinsics\.|MetalStageCompiler\.|MetalLinalg\.)"
 # Reviewed 2026-10-28.
 const PURE_BOOKKEEPING_ALLOWED = Set{Tuple{Symbol,String}}([
     (:validationmessages!, "src/metal/debug.jl"),   # drains what Metal's report-failure block collected
@@ -317,7 +319,7 @@ end
     else
         d = Mantle.Device(Mantle.MetalAPI())
         # The second entry point: Metal.jl's backend, which an array reports.
-        Mantle.caps(Mantle.KA.get_backend(Mantle.devicearray(d, Float32, 4)))
+        Mantle.caps(Mantle.Device(Mantle.KA.get_backend(Mantle.devicearray(d, Float32, 4))))
         # A second cache not existing at all is the passing state.
         second = isdefined(Mantle, :_DEVICE) ? getglobal(Mantle, :_DEVICE)[] : nothing
         second === nothing && (second = d)

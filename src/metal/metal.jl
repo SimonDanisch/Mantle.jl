@@ -22,21 +22,24 @@ using Metal.ObjectiveC.Foundation: NSString, NSBlock
 const OCObject = Metal.ObjectiveC.Object
 const MTL = Metal.MTL
 
+include("bindings/bindings.jl")
+include("intrinsics/intrinsics.jl")
 include("device.jl")
 include("debug.jl")
 include("memory.jl")
 include("caps.jl")
 include("kernelinterface.jl")
 include("device_intrinsics.jl")
-include("coopmat.jl")          # the vocabulary's cooperative matrices on `simdgroup_matrix`
+include("linalg/linalg.jl")
 include("ka.jl")
 include("raytracing.jl")
 # After raytracing.jl: needs `MetalTLAS` and `MetalBLAS`.
 include("hwtlas.jl")
 
+include("compiler/compiler.jl")
 include("graphics.jl")
 
-# After graphics.jl: needs `Metal.MeshPtr` and the AIR intrinsics.
+# After graphics.jl: needs its stage wrappers and the stage compiler.
 include("mesh.jl")
 # After graphics.jl: needs its `nativeformat` table.
 include("images.jl")
@@ -49,21 +52,33 @@ include("record.jl")
 # No pipeline thread: Metal.jl compiles on the calling thread. Core's exit hook
 # retires every device (`retireall!`).
 function Mantle.initbackend!(::MetalAPI)
+    building = ccall(:jl_generating_output, Cint, ()) != 0
+    # Metal.jl's `__init__` loads CoreGraphics and MetalPerformanceShadersGraph, but
+    # returns before that while a package image is built, and a dependent's workload
+    # that reaches a GEMM stopped at "Couldn't find class MPSGraph". QuartzCore holds
+    # `CAMetalLayer` (`window.jl`), which Metal.jl never loads.
+    frameworks = building ? ("CoreGraphics", "MetalPerformanceShadersGraph", "QuartzCore") : ("QuartzCore",)
+    foreach(loadframework, frameworks)
     register_backend!(; name = :metal, priority = 90) do
         # `functional` answers false while a package image is built, because Metal.jl's
         # `__init__` stops early there. A workload has the device all the same, and
         # without it every runner's workload was skipped and its first call compiled.
-        building = ccall(:jl_generating_output, Cint, ()) != 0
         (building ? !isempty(Metal.devices()) : Metal.functional()) ? Device(MetalAPI()) : nothing
     end
     return nothing
 end
+
+"""Load a system framework, so that the Objective-C classes it defines resolve."""
+loadframework(name::AbstractString) =
+    (Libdl.dlopen("/System/Library/Frameworks/$name.framework/$name"); nothing)
 
 # `staged_gemm_tile` is core's (`array/gemm.jl`); a method here would be an
 # overwrite. Metal devices decline the staged GEMM by their 8x8 `caps` tile.
 
 # Forwarded so the count is real: core's default `(; hits = 0, misses = 0)` would
 # read as "nothing compiled".
-kernelcompiles(::MetalDevice) = Metal.compile_stats()
-resetkernelcompiles!(::MetalDevice) = (Metal.reset_compile_stats!(); nothing)
+# Metal.jl counts the kernels and stages it compiled (`Metal.compilations`, not
+# public), not the launches its cache answered, so `hits` stays 0.
+kernelcompiles(::MetalDevice) = (; hits = 0, misses = Metal.compilations[] - METAL.compilebase)
+resetkernelcompiles!(::MetalDevice) = (METAL.compilebase = Metal.compilations[]; nothing)
 kerneloverlays(::MetalDevice) = Metal.method_table

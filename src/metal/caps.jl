@@ -1,6 +1,9 @@
 # `Lava.DeviceCaps` for Metal. A field Metal does not report is `0`
 # ("not known"), never a guess.
 
+# Julia's type for Metal's `bfloat`.
+using BFloat16s: BFloat16
+
 """
     simd_width(d) -> Int
 
@@ -9,7 +12,7 @@ rather than assumed to be 32.
 """
 function simd_width(d::MetalDevice)
     kernel = Metal.@metal launch = false caps_probe()
-    return Int(kernel.pipeline.threadExecutionWidth)
+    return kernel.exec_width
 end
 
 # Empty kernel, compiled only to read the pipeline's SIMD width and threadgroup limit.
@@ -24,7 +27,7 @@ device's per-dimension `maxThreadsPerThreadgroup`.
 """
 function max_threads(d::MetalDevice)
     kernel = Metal.@metal launch = false caps_probe()
-    return Int(kernel.pipeline.maxTotalThreadsPerThreadgroup)
+    return kernel.maxthreads
 end
 
 """
@@ -36,9 +39,8 @@ The cooperative-matrix tiles: `simdgroup_matrix` is 8×8×8 only (Vulkan's is
 function matrixshapes(::MetalDevice)
     shapes = MatrixShape[]
     # The types `Metal.simdgroup_load` has methods for; a shape Metal.jl cannot
-    # emit fails to compile at first use. `Metal.BFloat16` because BFloat16s.jl
-    # is Metal.jl's dependency, not Mantle's.
-    for ab in (Float16, Float32, Metal.BFloat16)
+    # emit fails to compile at first use.
+    for ab in (Float16, Float32, BFloat16)
         push!(shapes, MatrixShape(ab, Float32, 8, 8, 8, SubgroupScope()))
     end
     return shapes
@@ -61,7 +63,7 @@ function caps(d::MetalDevice)
         w,                                      # coopmatsubgroup, same group
         Int(mtl.maxThreadgroupMemoryLength),    # sharedbudget
         max_threads(d),                         # workgrouplimit
-        Metal.num_gpu_cores(),                  # cores: the IORegistry's gpu-core-count
+        KI.multiprocessor_count(d),             # cores: the IORegistry's gpu-core-count
         0,                                      # warps: Metal does not report it
         NTuple{4,Int}[],                        # wggran: no workgroup-scope matrices
         matrixshapes(d),

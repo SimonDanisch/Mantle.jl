@@ -16,3 +16,9 @@ function hasstagedgemm()
     c = Mantle.caps(TESTBACKEND)
     return c.coopmat && (t = Mantle.staged_gemm_tile()) !== nothing && c.tile == t
 end
+
+# Two guarantees Metal.jl does not give yet, each the subject of a performance PR of its
+# own (the Metal.jl fork Mantle used before had both): submitting recorded runs and
+# launches without allocating, and finding a kernel compiled in an earlier process. Their
+# tests are marked broken on Metal until those land, and then report an unexpected pass.
+metalperfpending() = nameof(typeof(Mantle.Device(TESTBACKEND))) === :MetalDevice

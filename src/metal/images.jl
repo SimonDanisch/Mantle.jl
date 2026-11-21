@@ -44,7 +44,7 @@ end
 function Mantle.makeimage(dev::MetalDevice, ::Type{T}, width::Int, height::Int,
                           srgb::Bool, usage::MTL.MTLTextureUsage, source) where {T}
     desc = image_descriptor(T, width, height, srgb, usage)
-    sa = MTL.heap_texture_size_and_align(dev.dev, desc)
+    sa = MetalBindings.heap_texture_size_and_align(dev.dev, desc)
     req = (; size = Int(sa.size), alignment = Int(sa.align), desc)
     return MetalTransientImage{T}(width, height, desc.pixelFormat, usage, nothing, req,
                                   typemax(Int), 0, nothing, nothing, source)
@@ -54,7 +54,7 @@ function Mantle.remakeimage!(dev::MetalDevice, t::MetalTransientImage{T}) where 
     desc = image_descriptor(T, t.width, t.height, false, t.usage)
     # `t.format` already encodes `srgb`, which the transient does not keep.
     desc.pixelFormat = t.format
-    sa = MTL.heap_texture_size_and_align(dev.dev, desc)
+    sa = MetalBindings.heap_texture_size_and_align(dev.dev, desc)
     t.req = (; size = Int(sa.size), alignment = Int(sa.align), desc)
     t.image = nothing
     return t
@@ -69,7 +69,7 @@ same `MTLTexture`, so shared render-pass code can bind `target_view`. Throws
 """
 function Mantle.materialize!(::MetalDevice, t::MetalTransientImage, heap::MTL.MTLHeap, offset::Int)
     t.memory = heap                     # the texture outlives the call; the heap must too
-    tex = MTL.MTLTexture(heap, t.req.desc, offset)
+    tex = MetalBindings.heap_texture(heap, t.req.desc, offset)
     tex === nothing && throw(OutOfMemoryError())
     t.image = tex
     t.view = tex
@@ -88,8 +88,8 @@ function readbackimage(f, dev::MetalDevice, tex, ::Type{T}, width::Int, height::
     buf = MTL.MTLBuffer(dev.dev, row * height; storage = Metal.SharedStorage)
     cmd = framebuffer!(dev.dev)
     MTL.MTLBlitCommandEncoder(cmd) do enc
-        MTL.append_copy!(enc, buf, 0, row, 0, tex,
-                         MTL.MTLOrigin(0, 0, 0), MTL.MTLSize(width, height, 1))
+        MetalBindings.append_copy!(enc, buf, 0, row, 0, tex,
+                                   MTL.MTLOrigin(0, 0, 0), MTL.MTLSize(width, height, 1))
     end
     f(cmd)
     submitwait!(cmd)
@@ -123,8 +123,8 @@ function Mantle.copy_target!(d::MetalDevice, dst, src::MetalTransientImage{T}; r
     # Core checked that `dst` holds the pixels (`checkcopy`).
     x, y, w, h = region === nothing ? (0, 0, src.width, src.height) : region
     MTL.MTLBlitCommandEncoder(cmd) do enc
-        MTL.append_copy!(enc, buf, byteoffset(dst), w * sizeof(T), 0, tex,
-                         MTL.MTLOrigin(x, y, 0), MTL.MTLSize(w, h, 1))
+        MetalBindings.append_copy!(enc, buf, byteoffset(dst), w * sizeof(T), 0, tex,
+                                   MTL.MTLOrigin(x, y, 0), MTL.MTLSize(w, h, 1))
     end
     # One command buffer per copy, committed here (see `framebuffer!`).
     commit!(cmd)
