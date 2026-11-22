@@ -562,8 +562,6 @@ if _VULKAN_OK
     check_workspace_retirement(Mantle.Device(Mantle.VulkanAPI()))
     include(joinpath(@__DIR__, "vulkan", "test_flush_report.jl"))
     check_flush_report(Mantle.Device(Mantle.VulkanAPI()))
-    include(joinpath(@__DIR__, "vulkan", "test_live_buffers.jl"))
-    check_live_buffers(Mantle.Device(Mantle.VulkanAPI()))
     include(joinpath(@__DIR__, "vulkan", "test_pipeline_creation.jl"))
     check_pipeline_creation(Mantle.Device(Mantle.VulkanAPI()))
     include(joinpath(@__DIR__, "vulkan", "test_recording_trim.jl"))
@@ -938,6 +936,7 @@ foreachbackend(joinpath(@__DIR__, "test_hostwait.jl"))
 foreachbackend(joinpath(@__DIR__, "test_pool_on_device.jl"))
 foreachbackend(joinpath(@__DIR__, "test_stored_device_array.jl"))
 foreachbackend(joinpath(@__DIR__, "test_wrapped_array_args.jl"))
+foreachbackend(joinpath(@__DIR__, "test_live_buffers.jl"))
 
 # ── the window tests, in their own process, on a clock ────────────────────────
 #

@@ -20,6 +20,18 @@ precompile_constructor_signatures(::Type{<:Device}) = ()
 # The backend owns its array wrappers, iteration context and interpreter.
 kernel_precompile_abi(::Type{<:Device}, group::Int) = nothing
 
+"""
+    precompile_kernelinterpreter(D, kernel, tt, group) -> interpreter
+
+The interpreter a device of type `D` infers `kernel` with, for argument types `tt` and a
+`group`-thread workgroup: what a consumer's device-free precompile workload, built from
+[`kernel_precompile_abi`](@ref), infers through. A device type without such an ABI
+has no interpreter that works without a device.
+"""
+precompile_kernelinterpreter(::Type{D}, kernel, tt, group::Int) where {D<:Device} =
+    throw(ArgumentError("$D describes no device-free kernel ABI (`kernel_precompile_abi` " *
+                        "is `nothing`), so no kernel is inferred for it without a device"))
+
 function precompile_statements()
     signatures = Any[]
     for device in precompile_device_types()

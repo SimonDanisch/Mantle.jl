@@ -611,7 +611,7 @@ const BACKEND_VOCABULARY = (
     :Device, :batchqueue, :capacity, :caps, :maxalloc, :pool,
     # Core answers these for `SubmitChannel`; a backend answers for its own channel
     # type (Metal.jl's `BatchedCommandQueue`).
-    :todevice, :reclaim!,
+    :todevice, :reclaim!, :drain!,
     :bestshape,
     :rawalloc, :rawfree, :constraintof, :mergeconstraints, :compatible, :materialize!,
     :alignment, :bufferusage, :extrausage, :imageusage, :devicearray, :deviceview,
@@ -641,6 +641,8 @@ const BACKEND_VOCABULARY = (
     :supports_tessellation, :supports_mesh_pipeline, :supports_batch_queue,
     :supports_procedural_traversal, :supports_hwtlas, :supports_float64, :supports_int64_atomics,
     :supportspredicate,                       # only whether fixed-size gated work can be discarded
+    # What a device holds from its driver and may use (runtime/accounting.jl).
+    :ledger, :probe_device_memory_budget, :save_pipeline_cache!, :trim_gpu_pool!,
     # Device lifecycle, validation and allocation probes (runtime/lifecycle.jl).
     :debugenv, :validating, :validationmessages!, :submissions, :retired, :tryallocate,
     :devices, :makedevice, :remakedevice, :adopt!,
@@ -668,7 +670,7 @@ const BACKEND_VOCABULARY = (
     :argument_usage,
     # A native constructor behind an inference barrier states its signature, and a
     # backend describes its kernel ABI for consumers' device-free precompile workloads.
-    :precompile_constructor_signatures, :kernel_precompile_abi,
+    :precompile_constructor_signatures, :kernel_precompile_abi, :precompile_kernelinterpreter,
     # An image shared with another API; core refuses, a backend that can makes one.
     :ExternalImage,
     # Properties required from backend-specific compiled dispatches.

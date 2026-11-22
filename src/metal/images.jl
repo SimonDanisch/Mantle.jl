@@ -85,17 +85,22 @@ Waits for completion and returns the texels with tight rows (`width * sizeof(T)`
 """
 function readbackimage(f, dev::MetalDevice, tex, ::Type{T}, width::Int, height::Int) where {T}
     row = width * sizeof(T)
-    buf = MTL.MTLBuffer(dev.dev, row * height; storage = Metal.SharedStorage)
-    cmd = framebuffer!(dev.dev)
-    MTL.MTLBlitCommandEncoder(cmd) do enc
-        MetalBindings.append_copy!(enc, buf, 0, row, 0, tex,
-                                   MTL.MTLOrigin(0, 0, 0), MTL.MTLSize(width, height, 1))
+    buf = newbuffer(dev, row * height)
+    try
+        cmd = framebuffer!(dev.dev)
+        MTL.MTLBlitCommandEncoder(cmd) do enc
+            MetalBindings.append_copy!(enc, buf, 0, row, 0, tex,
+                                       MTL.MTLOrigin(0, 0, 0), MTL.MTLSize(width, height, 1))
+        end
+        f(cmd)
+        submitwait!(cmd)
+        out = Matrix{T}(undef, width, height)
+        unsafe_copyto!(pointer(out), convert(Ptr{T}, buf), length(out))
+        return out
+    finally
+        # Waited for above.
+        freebuffer(dev, buf)
     end
-    f(cmd)
-    submitwait!(cmd)
-    out = Matrix{T}(undef, width, height)
-    unsafe_copyto!(pointer(out), convert(Ptr{T}, buf), length(out))
-    return out
 end
 
 """

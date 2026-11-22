@@ -57,6 +57,9 @@ mutable struct ROCmDevice <: Mantle.Device
     blocking::Bool
     caps::Union{Nothing,DeviceCaps}
     accesses::Mantle.AccessCache
+    # Buffers Mantle allocates outside the pool. Arrays from `KI.allocate` are
+    # AMDGPU.jl's and not in it yet.
+    ledger::Mantle.BufferLedger
 end
 
 """
@@ -92,7 +95,7 @@ function ROCmDevice(dev::AMDGPU.HIPDevice = AMDGPU.device())
     stream = dev == AMDGPU.device() ? AMDGPU.HIPStream() :
              AMDGPU.device!(AMDGPU.HIPStream, dev)
     d = ROCmDevice(dev, stream, C_NULL, Pool(), UInt64(0), UInt64(0), true, nothing,
-                   Mantle.AccessCache())
+                   Mantle.AccessCache(), Mantle.BufferLedger())
     adopt!(d)
     d.blaslt = hipblaslt_handle()
     return d
@@ -198,6 +201,19 @@ Mantle.rawfree(d::ROCmDevice, mg::Managed) = (adopt!(d); AMDGPU.pool_free(mg); n
 """Free device memory now (`hipMemGetInfo`), the bound the placer checks an arena against."""
 Mantle.capacity(::ROCmDevice) = AMDGPU.free()
 Mantle.maxalloc(d::ROCmDevice) = Int(AMDGPU.HIP.properties(d.dev).totalGlobalMem)
+
+Mantle.ledger(d::ROCmDevice) = d.ledger
+
+# One heap, the device's. `hipMemGetInfo` reports the device's free bytes, other
+# processes' use included.
+function Mantle.probe_device_memory_budget(d::ROCmDevice)
+    adopt!(d)
+    free, total = AMDGPU.info()
+    return [(heap = 0, device_local = true, size = total, budget = total, usage = total - free)]
+end
+
+# HIP loads code objects; there is no driver pipeline cache to write.
+Mantle.save_pipeline_cache!(::ROCmDevice) = nothing
 
 # ── the timeline ─────────────────────────────────────────────────────────────
 

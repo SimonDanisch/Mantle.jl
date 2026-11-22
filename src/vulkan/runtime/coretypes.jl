@@ -71,15 +71,10 @@ mutable struct MemoryPolicy
     # Whether `maybe_collect` runs, and its cached heap size.
     eager_gc::Bool
     stats::MemoryStats
-    # Dedicated buffers only; pooled bytes are `reserved(pool(ctx))`, and
-    # `gpu_live_bytes` adds both. Atomic because `destroy_buffer!` can run off
-    # the allocating thread.
-    live_bytes::Threads.Atomic{Int}
-    # Dedicated buffers from allocation until destruction. Channels of one device
-    # can be owned by different threads, so every access holds `livelock`;
-    # finalizers never touch it.
-    live_buffers::Set{VkManagedBuffer}
-    livelock::ReentrantLock
+    # Dedicated buffers from allocation until destruction; pooled bytes are
+    # `reserved(pool(ctx))`, and core's `gpu_live_bytes` adds both. Its counters are
+    # atomic because `destroy_buffer!` can run off the allocating thread.
+    ledger::BufferLedger
 end
 
 # A compiled kernel and this device's pipeline for it (`DeviceCaches.linked`).

@@ -33,6 +33,8 @@ mutable struct MetalDevice{Q} <: Device
     channels::Vector{Metal.ConcreteBatchedQueue}
     # Commits of released channels, so `submissions` stays monotone.
     releasedsubmits::Int
+    # The buffers Mantle allocates outside the pool (`newbuffer`), until `freebuffer`.
+    ledger::BufferLedger
 end
 
 """
@@ -109,7 +111,8 @@ metalqueue(dev::MTL.MTLDevice) = LegacyQueue(dev)
 function MetalDevice(mtldev::MTL.MTLDevice, q, debug::DebugConfig = DebugConfig())
     checkdebug(mtldev, debug)
     return MetalDevice(mtldev, q, Pool(), nothing, AccessCache(), CompilationCache{Any,Any}(),
-                       Dict{UInt,Metal.Managed}(), debug, false, Metal.ConcreteBatchedQueue[], 0)
+                       Dict{UInt,Metal.Managed}(), debug, false, Metal.ConcreteBatchedQueue[], 0,
+                       BufferLedger())
 end
 MetalDevice(mtldev::MTL.MTLDevice = Metal.device()) = MetalDevice(mtldev, metalqueue(mtldev))
 
@@ -878,6 +881,18 @@ bound the placer checks against, not a reservation.
 """
 capacity(d::MetalDevice) = Int(d.dev.recommendedMaxWorkingSetSize)
 
+# One heap: Apple GPUs share the system memory. Metal's budget for the process is
+# `recommendedMaxWorkingSetSize`, and `currentAllocatedSize` is what the process holds.
+function Mantle.probe_device_memory_budget(d::MetalDevice)
+    mtl::MTL.MTLDevice = d.dev
+    budget = Int(mtl.recommendedMaxWorkingSetSize)
+    return [(heap = 0, device_local = true, size = budget, budget,
+             usage = Int(mtl.currentAllocatedSize))]
+end
+
+# Mantle keeps no driver pipeline cache on Metal, so there is nothing to write.
+Mantle.save_pipeline_cache!(::MetalDevice) = nothing
+
 """Wait for everything submitted to the device: its queue and every channel."""
 waitidle(d::MetalDevice) = (waitidle(d.queue); foreach(Metal.synchronize, d.channels); nothing)
 
@@ -938,6 +953,12 @@ Mantle.emitkernel!(e::MetalImmediate, f, args...; ndrange, workgroup_size) =
 regions through the pool), so there is nothing to destroy."""
 reclaim!(::Metal.BatchedCommandQueue) = 0
 
+"""
+Core's `drain!` on Metal.jl's queue: release what its completed command buffers held
+(their roots, the arrays their launches used), without waiting for the others.
+"""
+drain!(bq::Metal.BatchedCommandQueue) = (Metal.drain_cleanups!(bq); nothing)
+
 # Its committed command buffers still count towards `submissions`.
 closechannel!(d::MetalDevice, bq::Metal.BatchedCommandQueue) =
     (d.releasedsubmits += MTL.committed(bq.queue); nothing)
@@ -972,7 +993,46 @@ function tryallocate(d::MetalDevice, ::Type{T}, dims::Dims{N}) where {T,N}
         err isa OutOfMemoryError || rethrow()
         return nothing
     end
+    allocated!(d.ledger, buf.length)
     return residentarray(d, buf, T, dims)
+end
+
+Mantle.ledger(d::MetalDevice) = d.ledger
+
+"""
+    newbuffer(dev, bytes; storage = Metal.SharedStorage) -> MTLBuffer
+
+A buffer of `dev`'s own outside its pool, in its [`ledger`](@ref) until
+[`freebuffer`](@ref) releases it. Through `Metal.alloc`, which pads to whole words,
+collects garbage under memory pressure and retries an out-of-memory once.
+"""
+function newbuffer(d::MetalDevice, bytes::Integer; storage = Metal.SharedStorage)
+    # `Int`: Metal's sizes are `NSUInteger`, and `Metal.alloc` adds the size to its
+    # `Int` statistics atomically, which throws for a `UInt64`.
+    buf = Metal.alloc(d.dev, Int(bytes); storage)
+    allocated!(d.ledger, buf.length)
+    return buf
+end
+
+"""Release a buffer [`newbuffer`](@ref) made, and take it out of the ledger."""
+function freebuffer(d::MetalDevice, buf::MTL.MTLBuffer)
+    freed!(d.ledger, buf.length)
+    Metal.free(buf)
+    return nothing
+end
+
+"""
+    ownedarray(dev, buf, T, dims) -> MtlArray
+
+An array over a buffer [`newbuffer`](@ref) made, which releases it through
+[`freebuffer`](@ref) when the array is freed or collected.
+"""
+function ownedarray(d::MetalDevice, buf::MTL.MTLBuffer, ::Type{T}, dims::Dims{N}) where {T,N}
+    ref = GPUArrays.DataRef(m -> freebuffer(d, m.buffer), Metal.Managed(buf))
+    a = MtlArray{T,N}(ref, dims)
+    # The array took its own reference; this one was only for building it.
+    GPUArrays.unsafe_free!(ref)
+    return a
 end
 
 """
@@ -993,22 +1053,23 @@ kernel may reach an array by an address stored elsewhere (a texture table, Rayco
 `store_texture`) rather than as an argument its launch declares, and Metal maps only
 memory a launch declares or a residency set holds: an undeclared array reads zeros.
 The arrays Mantle fills with host data (`devicearray`, `Adapt.adapt`) and the ones it
-allocates outside the pool are made here; scratch from `KI.allocate` is Metal.jl's.
+allocates outside the pool are made here; scratch from `KI.allocate` is an
+[`ownedarray`](@ref), made resident when a launch converts it (`KI.argconvert`).
 """
 residentarray(d::MetalDevice, ::Type{T}, dims::Dims) where {T} =
-    residentarray(d, MTL.MTLBuffer(d.dev, max(checkedbytes(T,dims),4); storage = Metal.SharedStorage),
-                  T, dims)
+    residentarray(d, newbuffer(d, checkedbytes(T, dims)), T, dims)
 
+# `buf` is one `newbuffer` or `tryallocate` made, in the device's ledger.
 function residentarray(d::MetalDevice, buf::MTL.MTLBuffer, ::Type{T}, dims::Dims{N}) where {T,N}
     r = residency(d)
     MetalBindings.resident!(r, buf)
     # Freed, the buffer stays in the set until the device has finished what was
     # submitted before (`forget_drained!` in `waitidle` and a quiet `fence`): a
     # recorded replay in flight reaches it through the set alone. The set holds the
-    # buffer, so Metal.jl's release does not free it before then.
+    # buffer, so this release does not free it before then.
     ref = GPUArrays.DataRef(Metal.Managed(buf)) do m
         MetalBindings.forget_after_drain!(r, m.buffer)
-        Metal.free(m.buffer)
+        freebuffer(d, m.buffer)
     end
     a = MtlArray{T,N}(ref, dims)
     # The array took its own reference; this one was only for building it.

@@ -79,23 +79,9 @@ function overbudget(ctx::LavaDevice, memtype::Integer, bytes::Integer)
 end
 overbudget(heap::NamedTuple, bytes::Integer) = heap.usage + bytes > heap.budget
 
-"""
-    trim_gpu_pool!(ctx = Device(VulkanAPI()); invalidate_recordings = false) -> (blocks, bytes)
-
-Return every empty pool block to the driver now, after an unconditional
-`quiesce_before_reclaim!` (flush, full GC, drain): until then a buffer held by a
-submission or retired but not destroyed keeps its block live. For "this batch is
-done, give the memory back" and before reading a VRAM figure; the automatic
-`autotrim!` is rate-limited, runs only on allocation and only once
-`Mantle.reclaimable` sees something to return.
-
-`invalidate_recordings = true` also waits for all queues and discards the
-recorded commands of live arena plans, which otherwise keep their blocks; the
-plans and their resources stay valid and record again on the next `run!`.
-Returns `(0, 0)` while a recording is open, the device is lost or a collection
-is already running.
-"""
-function trim_gpu_pool!(ctx::LavaDevice = Device(VulkanAPI()); invalidate_recordings::Bool=false)
+# Core's `trim_gpu_pool!`, through Vulkan's channels: each holds positional frames an
+# open recording owns, and retires on its own.
+function trim_gpu_pool!(ctx::LavaDevice; invalidate_recordings::Bool=false)
     bq = ctx.default_bq
     if invalidate_recordings
         # Never sweep an open recording's positional hold frame.
@@ -105,20 +91,14 @@ function trim_gpu_pool!(ctx::LavaDevice = Device(VulkanAPI()); invalidate_record
         flush!(bq)
         foreach(flush!,ctx.channels)
         waitidle(ctx)
-        seen=IdDict{Any,Nothing}()
-        for arena in values(pool(ctx).arenas), plan in tenants!(arena)
-            plan isa Plan && recorded(plan) || continue
-            haskey(seen,plan) && continue
-            seen[plan]=nothing
-            invalidate!(plan)
-        end
+        invalidaterecorded!(pool(ctx))
     end
     quiesce_before_reclaim!(bq) || return (0, 0)
     if invalidate_recordings
         foreach(drain!,ctx.channels)
         reclaim!(pool(ctx),ctx;wait=true)
     end
-    return reclaim_empty_pool_blocks!(bq)
+    return trimcounted!(pool(ctx), ctx)
 end
 
 """
@@ -235,7 +215,8 @@ function vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
     # a recording pins the pool: the allocation then fails with the OOM below
     # instead of freeing a block a replay would later fault on.
     if quiesce_before_reclaim!(bq)
-        n_blocks, bytes_freed = reclaim_empty_pool_blocks!(bq)
+        dev = deviceof(bq)
+        n_blocks, bytes_freed = trimcounted!(pool(dev), dev)
         if n_blocks > 0
             @info "Lava: reclaimed empty pool blocks on OOM retry" blocks=n_blocks MiB=(bytes_freed >> 20)
         end
@@ -344,10 +325,7 @@ function try_vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
     address = VK.get_buffer_device_address(dev, addr_info)
 
     result = VkManagedBuffer(buf, memory, address, mapped_ptr, Int(nbytes), nothing, Stamp{UInt64}(), BUF_STATE_ALIVE, ctx)
-    let p = mempolicy(ctx)
-        @lock p.livelock push!(p.live_buffers, result)
-        Threads.atomic_add!(p.live_bytes, nbytes)
-    end
+    allocated!(ledger(ctx), result.size)
     return result
 end
 
@@ -422,15 +400,12 @@ function destroy_buffer!(buf::VkManagedBuffer)
     end
 
     ctx = buf.ctx::LavaDevice
-    let p = mempolicy(ctx)
-        @lock p.livelock delete!(p.live_buffers, buf)
-    end
     # A lost device, which includes every device at exit
     # (core's exit hook, `retireall!`), gets no Vulkan calls: only poison the handle.
     if device_lost(ctx)
         buf.mapped_ptr = Ptr{UInt8}(0)
         buf.address = BDA_POISON
-        Threads.atomic_sub!(mempolicy(ctx).live_bytes, buf.size)
+        freed!(ledger(ctx), buf.size)
         buf.size = 0
         return
     end
@@ -446,7 +421,7 @@ function destroy_buffer!(buf::VkManagedBuffer)
                      sprint(showerror, ex) * "\n")
     end
     buf.address = BDA_POISON
-    Threads.atomic_sub!(mempolicy(ctx).live_bytes, buf.size)
+    freed!(ledger(ctx), buf.size)
     buf.size = 0
 end
 
@@ -500,8 +475,7 @@ more and takes the dedicated path (`bda_alignment_for`).
 """
 const POOL_ALIGN = 256
 
-MemoryPolicy() = MemoryPolicy(false, true, MemoryStats(),
-                              Threads.Atomic{Int}(0), Set{VkManagedBuffer}(), ReentrantLock())
+MemoryPolicy() = MemoryPolicy(false, true, MemoryStats(), BufferLedger())
 
 """
     mempolicy(ctx) -> MemoryPolicy
@@ -520,22 +494,8 @@ Byte offset of `buf` in its pool block, 0 when it owns its memory. Derived from
 @inline pool_offset(buf::VkManagedBuffer) =
     buf.region === nothing ? 0 : offset(buf.region::Region)
 
-"""Every block this device has, across the arenas they were cut for."""
-poolblocks(ctx::LavaDevice) =
-    collect(Iterators.flatten(values(pool(ctx).blocks)))
-
-"""
-    gpu_live_bytes(ctx = Device(VulkanAPI())) -> Int
-    live_buffer_count(ctx = Device(VulkanAPI())) -> Int
-
-Bytes this device holds from the driver (pool blocks plus dedicated buffers),
-and the number of dedicated buffers. Pooled regions are not counted separately:
-they cost nothing beyond their block.
-"""
-gpu_live_bytes(ctx::LavaDevice = Device(VulkanAPI())) =
-    reserved(pool(ctx)) + mempolicy(ctx).live_bytes[]
-live_buffer_count(ctx::LavaDevice = Device(VulkanAPI())) =
-    (p = mempolicy(ctx); @lock p.livelock length(p.live_buffers))
+# The dedicated buffers, from `vk_alloc` to `destroy_buffer!`.
+ledger(ctx::LavaDevice) = mempolicy(ctx).ledger
 
 """
     destroy_pool!(ctx)
@@ -626,22 +586,6 @@ end
 """The driver's two out-of-memory codes; an over-budget `device_memory` throws the device one."""
 isoutofmemory(err::VK.VulkanError) =
     err.code == VK.ERROR_OUT_OF_DEVICE_MEMORY || err.code == VK.ERROR_OUT_OF_HOST_MEMORY
-
-"""
-    reclaim_empty_pool_blocks!(bq::SubmitChannel{<:VulkanQueue}) -> (n_blocks::Int, bytes::Int)
-
-Return every block with an empty `live` ledger to the driver (`Mantle.trim!`)
-and report how many and how many bytes. Callers must run
-`quiesce_before_reclaim!` first. Not finalizer-safe.
-"""
-function reclaim_empty_pool_blocks!(bq::SubmitChannel{<:VulkanQueue})
-    ctx = deviceof(bq)
-    sp = pool(ctx)
-    before = reserved(sp)
-    nbefore = length(poolblocks(ctx))
-    trim!(sp, ctx)
-    return (nbefore - length(poolblocks(ctx)), before - reserved(sp))
-end
 
 """Largest download read straight out of mapped BAR memory; see `copy_buffer!`."""
 const BAR_DIRECT_READ_BYTES = 4096

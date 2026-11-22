@@ -99,13 +99,13 @@ no process reads a partial blob. Merge the latest file while holding a process
 lock: an older device or Julia session must not erase another writer's compiles.
 No-op on a lost device.
 """
-function save_pipeline_cache!(ctx)
+function save_pipeline_cache!(ctx::LavaDevice)
     ctx.device_lost && return nothing
     isdefined(ctx, :pipeline_cache) || return nothing
     return save_pipeline_cache!(ctx, lava_pipeline_cache_path(ctx.device_name, ctx.driver_version))
 end
 
-function save_pipeline_cache!(ctx, path::String)
+function save_pipeline_cache!(ctx::LavaDevice, path::String)
     ctx.device_lost && return nothing
     isdefined(ctx, :pipeline_cache) || return nothing
     try

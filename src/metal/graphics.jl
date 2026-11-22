@@ -95,9 +95,15 @@ function Mantle.copytexels!(t::MetalTexture2D{T}, data::AbstractMatrix{T}) where
     # `collect` for anything without a dense host pointer (views, adjoints).
     rows = data isa Matrix{T} ? data : collect(data)
     nbytes = length(rows) * sizeof(T)
-    staging = GC.@preserve rows MTL.MTLBuffer(t.dev.dev, nbytes, pointer(rows);
-                                               storage = Metal.SharedStorage)
-    blit_into_texture!(t, staging, 0)
+    staging = newbuffer(t.dev, nbytes)
+    try
+        GC.@preserve rows unsafe_copyto!(convert(Ptr{UInt8}, MTL.contents(staging)),
+                                         convert(Ptr{UInt8}, pointer(rows)), nbytes)
+        blit_into_texture!(t, staging, 0)
+    finally
+        # The blit was waited for.
+        freebuffer(t.dev, staging)
+    end
     return t
 end
 

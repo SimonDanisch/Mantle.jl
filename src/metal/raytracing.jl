@@ -48,9 +48,11 @@ mutable struct MetalTLAS <: AccelStructure
     scratch::MTL.MTLBuffer
     refittable::Bool
     count::Int
+    # The device it was built on, whose ledger holds `scratch`.
+    device::MetalDevice
     freed::Bool
-    function MetalTLAS(handle, desc, blases, instances, scratch, refittable, count)
-        t = new(handle, desc, blases, instances, scratch, refittable, count, false)
+    function MetalTLAS(handle, desc, blases, instances, scratch, refittable, count, device)
+        t = new(handle, desc, blases, instances, scratch, refittable, count, device, false)
         return finalizer(unsafe_free!, t)
     end
 end
@@ -79,13 +81,13 @@ mutable struct MetalBLAS <: AccelStructure
 end
 
 # Free the `MTLBuffer`s a structure owns, which are unmanaged, and its inputs, once: an
-# explicit release and the finalizer both come here. `Metal.free` defers past the work
-# using a buffer and is finalizer-safe. The structure itself leaves the residency set
+# explicit release and the finalizer both come here. `Metal.free` (in `freebuffer`)
+# defers past the work using a buffer and is finalizer-safe. The structure itself leaves the residency set
 # when collected (`newstructure`), as a trace of an older structure may still hold it.
 function unsafe_free!(b::MetalBLAS)
     b.freed && return nothing
     b.freed = true
-    Metal.free(b.scratch)
+    freebuffer(b.device, b.scratch)
     foreach(unsafe_free!, b.inputs)
     return nothing
 end
@@ -93,7 +95,7 @@ end
 function unsafe_free!(t::MetalTLAS)
     t.freed && return nothing
     t.freed = true
-    Metal.free(t.scratch)
+    freebuffer(t.device, t.scratch)
     unsafe_free!(t.instances)
     return nothing
 end
@@ -112,14 +114,13 @@ Build `desc` into a new structure with scratch that is freed as soon as the buil
 """
 function buildstructure(d::MetalDevice, desc, sizes)
     accel = newstructure(d, sizes.accelerationStructureSize)
-    scratch = MTL.MTLBuffer(d.dev, max(sizes.buildScratchBufferSize, 1);
-                            storage = Metal.PrivateStorage)
+    scratch = newbuffer(d, sizes.buildScratchBufferSize; storage = Metal.PrivateStorage)
     try
         withaccelencoder(d) do enc
             MetalBindings.build!(enc, accel, desc, scratch)
         end
     finally
-        Metal.free(scratch)
+        freebuffer(d, scratch)
     end
     return accel
 end
@@ -166,9 +167,8 @@ function newblas(d::MetalDevice, geo, refittable::Bool, inputs::Vector{Any})
     refittable && (desc.usage = MTL.MTLAccelerationStructureUsageRefit)
     sizes = MetalBindings.acceleration_structure_sizes(d.dev, desc)
     accel = buildstructure(d, desc, sizes)
-    # `max(…, 1)`: a zero-length `MTLBuffer` is rejected.
-    keep = MTL.MTLBuffer(d.dev, max(sizes.refitScratchBufferSize, 1);
-                         storage = Metal.PrivateStorage)
+    # `newbuffer` pads a zero length to a word: Metal rejects an empty buffer.
+    keep = newbuffer(d, sizes.refitScratchBufferSize; storage = Metal.PrivateStorage)
     return MetalBLAS(accel, desc, keep, refittable, inputs, d)
 end
 
@@ -205,11 +205,10 @@ function buildnative!(ctx::MetalAccelBuildContext, input::InstanceInput, allow_u
     allow_update && (desc.usage = MTL.MTLAccelerationStructureUsageRefit)
     sizes = MetalBindings.acceleration_structure_sizes(d.dev, desc)
     accel = buildstructure(d, desc, sizes)
-    keep = MTL.MTLBuffer(d.dev, max(sizes.refitScratchBufferSize, 1);
-                         storage = Metal.PrivateStorage)
+    keep = newbuffer(d, sizes.refitScratchBufferSize; storage = Metal.PrivateStorage)
     # Non-resident structures are not mapped for the dispatch: every ray misses silently.
     make_resident!(d, (accel, handles...))
-    return MetalTLAS(accel, desc, handles, input.records, keep, allow_update, input.n)
+    return MetalTLAS(accel, desc, handles, input.records, keep, allow_update, input.n, d)
 end
 
 function refitnative!(ctx::MetalAccelBuildContext, as::Union{MetalBLAS,MetalTLAS})

@@ -97,6 +97,7 @@ include("runtime/api.jl")
 include("memory/array.jl")    # names `Device`, from api.jl
 # `trydevicearray` needs the array API above.
 include("runtime/lifecycle.jl")
+include("runtime/accounting.jl")   # needs `Pool`, `Device` and `retired` above
 include("runtime/dispatch.jl")
 include("phases.jl")
 include("graph/types.jl")
@@ -232,6 +233,9 @@ export pixelbytes
 export LoadOp, Clear, Keep, Discard
 export Device, Resource, Graph, Plan, Transient, Window, screenshot
 export DeviceInfo, devices, defaultdevice!
+# What a device holds and may use (`runtime/accounting.jl`), for every device alike.
+public live_buffer_count, gpu_live_bytes, gpu_memory_usage, probe_device_memory_budget,
+    save_pipeline_cache!, trim_gpu_pool!, precompile_kernelinterpreter
 export DebugConfig, debugenv, validating, validationmessages!, submissions, retired,
     trydevicearray
 export DeviceCaps, caps

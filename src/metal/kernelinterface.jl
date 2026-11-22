@@ -5,13 +5,22 @@
 # or run under `Metal.global_queue!`. Metal.jl defines the device intrinsics
 # itself; redefining them here is a method overwrite, which fails precompilation.
 
+"""
+    KI.allocate(dev::MetalDevice, T, dims; unified = false) -> MtlArray
+
+A Metal.jl array in a buffer of the device's own, in its [`ledger`](@ref) until the
+array is freed: in Metal.jl's default storage mode (its `default_storage` preference),
+or shared with the host when `unified`.
+"""
 function KI.allocate(d::MetalDevice, ::Type{T}, dims::Tuple; unified::Union{Nothing,Bool} = nothing) where {T}
     # Any integer extents, as `KA.allocate` takes them (Hikari's NanoVDB sizes are `Int32`).
     dims = Dims(dims)
-    # Metal.jl asserts that a buffer fits `maxBufferLength`; past it, the device is out
+    bytes = checkedbytes(T, dims)
+    # Metal asserts that a buffer fits `maxBufferLength`; past it, the device is out
     # of memory for this request, which callers catch as such.
-    checkedbytes(T, dims) > maxalloc(d) && throw(OutOfMemoryError())
-    return KI.allocate(metalbackend(d), T, dims; unified = something(unified, false))
+    bytes > maxalloc(d) && throw(OutOfMemoryError())
+    storage = something(unified, false) ? Metal.SharedStorage : Metal.DefaultStorageMode
+    return ownedarray(d, newbuffer(d, bytes; storage), T, dims)
 end
 # As `KA.synchronize(::LavaDevice)`: the device's default channel.
 KI.synchronize(d::MetalDevice) = (flush!(batchqueue(d)); nothing)
