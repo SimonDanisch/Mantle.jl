@@ -170,7 +170,18 @@ but must be named: it is an `isbitstype` primitive, and a GPUCompiler device arr
 reads as `NOTOUCH`.
 """
 carries(@nospecialize(T)) = carries(T, 0)
-rawpointer(@nospecialize(T)) = T <: Ptr || T <: Core.LLVMPtr
+rawpointer(@nospecialize(T)) = T <: Ptr || T <: Core.LLVMPtr || devicepointer(T)
+
+"""
+    devicepointer(T) -> Bool
+
+Whether `T` is a backend's device pointer that is neither a `Ptr` nor a
+`Core.LLVMPtr`: an address the backend encodes as an integer, such as WebGPU's
+heap offset (`Lava.HeapPtr`). The walk follows it as it follows a `Ptr`, and
+integers computed from it are addresses ([`pointerlike`](@ref)), so the heap word
+its intrinsics take leads back to the argument.
+"""
+devicepointer(@nospecialize(T)) = false
 function carries(@nospecialize(T), depth::Int)
     depth > 8 && return true                    # deep enough to be unknowable
     T === Union{} && return false
@@ -976,8 +987,11 @@ function intrinsic_usage(name::Symbol)
     # An outlined lookup can pass scalar provenance from a captured table into
     # sqrt. LLVM's scalar square root has no memory access, on every backend.
     name in (Symbol("llvm.sqrt.f32"), Symbol("llvm.sqrt.f64")) && return NOTOUCH
-    u = intrinsic_usage(VulkanAPI(), name)
-    return u === nothing ? intrinsic_usage(MetalAPI(), name) : u
+    for api in (VulkanAPI(), MetalAPI(), WebGPUAPI())
+        u = intrinsic_usage(api, name)
+        u === nothing || return u
+    end
+    return nothing
 end
 intrinsic_usage(@nospecialize(name)) = nothing
 intrinsic_usage(::Backend, name::Symbol) = nothing

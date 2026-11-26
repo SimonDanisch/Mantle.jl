@@ -375,38 +375,10 @@ function Base.append!(a::LavaArray{T,1}, items::AbstractVector) where T
     return a
 end
 
-# GPUArrays' `norm` captures variables in `Core.Box` closures, which fail to
-# compile for the GPU; the reductions here capture only isbits values.
-
 import LinearAlgebra
 
-function LinearAlgebra.norm(v::LavaArray{T}, p::Real=2) where T
-    RT = typeof(float(LinearAlgebra.norm(zero(T))))
-    isempty(v) && return zero(RT)
-    # `Base.count`: the bare name is Mantle's resource element `count`.
-    p == 0 && return convert(RT, Base.count(!iszero, v))
-    p == Inf && return convert(RT, maximum(abs, v))
-    p == -Inf && return convert(RT, minimum(abs, v))
-    # Other p-norms need transcendental math that is inaccurate on some Vulkan
-    # drivers (RDNA3.5), so they run on the host.
-    (p != 1 && p != 2) && return convert(RT, LinearAlgebra.norm(Array(v), p))
-    # Float16/Float32 and their complex types accumulate in Float64, which cannot overflow.
-    if RT === Float32 || RT === Float16
-        p == 1 && return RT(sum(x -> Float64(abs(x)), v; init = 0.0))
-        return RT(sqrt(sum(x -> Float64(abs(x))^2, v; init = 0.0)))
-    end
-    p == 1 && return convert(RT, sum(abs, v; init = 0.0))
-    maxabs = convert(Float64, maximum(abs, v))
-    (iszero(maxabs) || isinf(maxabs)) && return convert(RT, maxabs)
-    # Unscaled when the sum of squares can neither overflow nor underflow.
-    isfinite(length(v) * maxabs^2) && !iszero(maxabs^2) &&
-        return convert(RT, sqrt(sum(abs2, v; init = 0.0)))
-    # Rescaled by `maxabs`, dividing by `sqrt(maxabs)` twice: drivers lower `x / m`
-    # to `x * (1/m)`, and for `m` near `floatmax` that reciprocal is subnormal and
-    # flushed to zero (lavapipe, RADV).
-    sm = sqrt(maxabs)
-    return convert(RT, maxabs * sqrt(sum(x -> ((abs(x) / sm) / sm)^2, v; init = 0.0)))
-end
+# Core's, which a WebGPU array uses too.
+LinearAlgebra.norm(v::LavaArray, p::Real=2) = devicenorm(v, p)
 
 # Two methods, matching GPUArrays' `NTuple` and general signatures to avoid ambiguity.
 """

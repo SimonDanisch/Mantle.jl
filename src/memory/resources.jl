@@ -258,6 +258,17 @@ storage(s::GPURef) = deviceview(s.dev, s.store)
 Base.Array(b::Buffer{T,1}) where {T} = download(b.dev, b.store)[1:b.len]
 Base.Array(b::Buffer) = download(b.dev, b.store)
 
+"""Read a one-element buffer on the host, reporting pending device errors."""
+function readscalar(b::Buffer{T,1}) where {T}
+    length(b) == 1 || throw(ArgumentError("readscalar requires a one-element buffer"))
+    return readscalar(b.dev, b.store)
+end
+
+function readscalar(dev::Device, a::DeviceArray)
+    KA.synchronize(dev)
+    return first(download(dev, a))
+end
+
 update!(b::Buffer{T,N}, data::AbstractVector) where {T,N} = update!(b, 1:length(data), data)
 function update!(b::Buffer{T,N}, r::AbstractUnitRange, data::AbstractVector) where {T,N}
     last(r) <= b.capacity ||

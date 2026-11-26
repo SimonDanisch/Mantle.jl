@@ -312,58 +312,9 @@ end
 @noinline launchwith!(e, f::F, ka_ctx, args::Tuple, block_dims, ws_3d, tlas, readonly) where {F} =
     ka_launch!(e, f, (f, ka_ctx, args...), block_dims, ws_3d, tlas, readonly)
 
-# Vulkan dispatches are at most 3-D: `pad_to_3d` maps the block grid onto
-# `ctx.max_wg_dims`, splitting large dimensions across Y and Z. Extra workgroups
-# write out of bounds in kernels that index auxiliary arrays by workgroup id
-# without checks (AK's `_accumulate_block!`), so splits use exact factors where
-# they exist.
-
-# A divisor of `n` within 3 of `max_dim`, else the smallest divisor in
-# `cld(n, max_dim):max_dim`, else `max_dim`, which over-dispatches.
-function find_split_factor(n::Int, max_dim::Int)
-    for d in (max_dim, max_dim-1, max_dim-2, max_dim-3)
-        d > 0 && n % d == 0 && return d
-    end
-    lo = cld(n, max_dim)
-    for x in lo:min(n, max_dim)
-        n % x == 0 && return x
-    end
-    return max_dim
-end
-
-function pad_to_3d(ctx::LavaDevice, t::NTuple{1,<:Integer})
-    n = Int(t[1])
-    max_x, max_y, _ = ctx.max_wg_dims
-    n <= max_x && return (n, 1, 1)
-    x = find_split_factor(n, max_x)
-    y = min(cld(n, x), max_y)
-    z = cld(n, x * y)
-    # Unsafe for kernels that index by workgroup id without bounds checks.
-    x * y * z == n || @warn "pad_to_3d: over-dispatching $n as ($x, $y, $z) = $(x*y*z) workgroups" maxlog=1
-    return (x, y, z)
-end
-function pad_to_3d(ctx::LavaDevice, t::NTuple{2,<:Integer})
-    x, y = Int(t[1]), Int(t[2])
-    max_x, max_y, _ = ctx.max_wg_dims
-    if x <= max_x && y <= max_y
-        return (x, y, 1)
-    end
-    return pad_to_3d(ctx, (x * y,))
-end
-function pad_to_3d(::LavaDevice, t::NTuple{3,<:Integer})
-    (Int(t[1]), Int(t[2]), Int(t[3]))
-end
-# N > 3: drop trailing unit axes and flatten only if a non-unit axis remains past
-# the third. This keeps the common `(W, H, C, 1)` grid 1:1 with the dispatch,
-# which `directdispatch` needs to index without dividing.
-function pad_to_3d(ctx::LavaDevice, t::NTuple{N,<:Integer}) where N
-    n = N
-    while n > 3 && Int(t[n]) == 1
-        n -= 1
-    end
-    n > 3 && return pad_to_3d(ctx, (Int(prod(t)),))
-    return pad_to_3d(ctx, ntuple(i -> Int(t[i]), n))
-end
+# Vulkan dispatches are at most 3-D: core's `pad_to_3d` maps the block grid onto
+# the device's `max_wg_dims`.
+pad_to_3d(ctx::LavaDevice, t::Tuple) = pad_to_3d(ctx.max_wg_dims, t)
 
 # Per device, because a `LaunchPlan` holds a `VkPipeline`. The `DataType` key
 # makes the lookup a pointer compare.

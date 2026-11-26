@@ -34,9 +34,11 @@ UnsafeAtomics = "013be700-e6cd-48c3-b4a1-df204f14c38f"
 
 [weakdeps]
 AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
+Bonito = "824d6782-a2ef-11e9-3a09-e5662e0c26f8"
 
 [extensions]
 MantleROCmExt = "AMDGPU"
+MantleWebGPUExt = "Bonito"
 
 [sources]
 Lava = {url = "https://github.com/SimonDanisch/Lava.jl", rev = "main"}
@@ -47,6 +49,7 @@ Raycore = {url = "https://github.com/JuliaGeometry/Raycore.jl", rev = "master"}
 [compat]
 AMDGPU = "2"
 AcceleratedKernels = "0.5.13"
+Bonito = "5"
 Adapt = "4.7"
 Atomix = "1.5"
 BFloat16s = "0.5, 0.6"

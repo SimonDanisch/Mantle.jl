@@ -664,8 +664,8 @@ const BACKEND_VOCABULARY = (
     # only for its own allocation handles.
     :passedas,
     # What an `llvmcall`'s external symbol does to its pointer; `nothing` means
-    # undeclared, which the walk refuses.
-    :intrinsic_usage,
+    # undeclared, which the walk refuses. A pointer type that is not a `Ptr`.
+    :intrinsic_usage, :devicepointer,
     # Library callable types declare their own argument accesses.
     :argument_usage,
     # A native constructor behind an inference barrier states its signature, and a
@@ -687,6 +687,7 @@ const BACKEND_VOCABULARY = (
     :openrecording, :closerecording!, :emithead!, :emitloophead!, :emitbarriers!,
     :withpredicate, :scopesprepared,
     :emitupdate!, :emitdispatch!, :emitcopy!, :emitreadback!, :nativebuffercopy, :readbackbinding, :samereadback,
+    :readbackdata,
     :beginrender!, :drawcompiled!, :endrender!,
     :readstamps,
     :emitkernel!, :emitpreparebarrier!, :workgroupsize, :indirectslot, :writegroups!, :slotgrid,

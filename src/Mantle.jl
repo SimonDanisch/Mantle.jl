@@ -115,6 +115,7 @@ include("array/gemm.jl")
 include("array/gemm_tensile.jl") # rocBLAS's RDNA3 kernel, default for aligned fp16 shapes
 include("array/gemm_cm2.jl")
 include("array/fft.jl")
+include("array/norm.jl")
 
 include("graphics/state.jl")
 include("graphics/resources.jl")   # needs RenderTarget (state.jl) and Window (runtime/api.jl)
@@ -189,7 +190,7 @@ export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
 export supports_graphics, supports_geometry_stage, supports_tessellation, supports_batch_queue, use_bindings!
 export supports_procedural_traversal, supports_hwtlas, supports_float64, supports_int64_atomics
 export batchqueue
-export defaultbackend, availablebackends, eachbackend, register_backend!
+export defaultbackend, availablebackends, eachbackend, register_backend!, webgpudevice
 export devicearray
 export bind_textures
 

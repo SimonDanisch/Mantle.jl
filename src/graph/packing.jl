@@ -126,7 +126,7 @@ function devptroffsets!(offs::Vector{Int}, S::Type, base::Int, depth::Int)
     for i in 1:fieldcount(S)
         F = fieldtype(S, i)
         off = base + Int(fieldoffset(S, i))
-        if F <: Core.LLVMPtr || F <: Ptr
+        if F <: Core.LLVMPtr || F <: Ptr || devicepointer(F)
             push!(offs, off)
         elseif isstructtype(F) && isbitstype(F)
             devptroffsets!(offs, F, off, depth + nestinglevels(F))
@@ -138,14 +138,17 @@ end
 """
     devicepointeroffsets(T) -> NTuple{N,Int}
 
-Byte offsets of the device pointers (`Core.LLVMPtr` or `Ptr`) inside isbits `T`,
-resolved at specialisation; empty for non-isbits types.
+Byte offsets of the device pointers (`Core.LLVMPtr`, `Ptr` or a backend's
+[`devicepointer`](@ref), each 8 bytes) inside isbits `T`; empty for non-isbits
+types. Worked out per call, which is per packed argument of a recording. Not a
+generated function: a generator runs in the world it was defined in and would not
+see a `devicepointer` method a backend's extension adds.
 """
-@generated function devicepointeroffsets(::Type{T}) where {T}
+function devicepointeroffsets(::Type{T}) where {T}
     offs = Int[]
     isbitstype(T) && isstructtype(T) &&
         devptroffsets!(offs, T, 0, nestinglevels(T))
-    return :($(Tuple(offs)))
+    return Tuple(offs)
 end
 
 """

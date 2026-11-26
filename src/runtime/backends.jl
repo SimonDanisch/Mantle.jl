@@ -91,3 +91,15 @@ availablebackends() = Symbol[e.name for e in BACKEND_PROBES if e.probe() !== not
 Return every usable registered backend, in priority order, for portable tests
 and workloads. Empty when none is usable."""
 eachbackend() = [b for b in (e.probe() for e in BACKEND_PROBES) if b !== nothing]
+
+"""
+    webgpudevice(page; power = "high-performance", memory = 2^30) -> Device
+    webgpudevice(; power, memory) -> Device
+
+A device on the WebGPU of a web page: `page` is the page's `Bonito.Session` (an
+Electron window or a browser tab); without one, the device opens an Electron
+window of its own. `power` picks the adapter (`"high-performance"` or
+`"low-power"`); `memory` is the bytes of device memory, every array lives in it.
+Implemented by Mantle's WebGPU extension, which loads with Bonito.
+"""
+function webgpudevice end

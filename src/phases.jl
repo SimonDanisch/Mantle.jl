@@ -716,6 +716,10 @@ function run!(::Barriers, c)
                     u in waits || push!(waits, u)
                 end
             end
+            # A hazard like any other, so the backend's rule decides it: a backend
+            # that orders every access itself (WebGPU, one HIP stream) needs none.
+            kind = resourcekind(c.graph.transients[newi])
+            filter!(w -> needs_transition(be, kind, w, to), waits)
             isempty(waits) && continue
             push!(needed, Transition(0, first(waits), waits, to))
             if coalesce

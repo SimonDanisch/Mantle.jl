@@ -166,12 +166,21 @@ function materializereadback!(s::ReadbackSnapshot)
     lock(s.lock) do
         s.data === nothing || return s.data
         waitfor!(s.dev, s.token)
-        # An owning copy, never a borrowed pointer into the next run's staging.
-        s.data = copy(hostview(s.dev, s.buffer.store))
+        s.data = readbackdata(s.dev, s.buffer.store)
         s.buffer = nothing
         return s.data
     end
 end
+
+"""
+    readbackdata(device, store::DeviceArray) -> Array
+
+A finished readback's staging as an owning host array, never a borrowed pointer
+into the next run's staging. The default copies [`hostview`](@ref); a backend
+whose staging the host maps only on request (WebGPU's `mapAsync`) maps it here.
+Called after the run that wrote it has passed.
+"""
+readbackdata(dev, store::DeviceArray) = copy(hostview(dev, store))
 function Base.isready(f::ReadbackFuture)
     (@atomic f.assigned) || return false
     f.failure === nothing || return true
