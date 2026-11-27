@@ -10,9 +10,8 @@ here rewrite the kernel into the stage between the two (`stage_passes!`).
 module MetalStageCompiler
 
 using GPUCompiler
-using GPUCompiler: AbstractCompilerParams, CompilerConfig, CompilerJob, MetalCompilerTarget
+using GPUCompiler: CompilerConfig, CompilerJob, MetalCompilerTarget
 using LLVM, LLVM.IR, LLVM.Build
-import GPUToolbox
 import Metal
 using Metal: MTL
 using ..MetalIntrinsics: VertexID, InstanceID, FragCoord, Varying, Texture2DPtr, SamplerPtr,
@@ -34,7 +33,7 @@ Base.Experimental.@MethodTable(STAGE_METHODS)
 The compiler parameters of a render stage job: which AIR program it becomes,
 `:vertex`, `:fragment` or `:mesh`.
 """
-struct MetalStageParams <: AbstractCompilerParams
+struct MetalStageParams <: Metal.AbstractMetalCompilerParams
     stage::Symbol
     function MetalStageParams(stage::Symbol)
         stage in (:vertex, :fragment, :mesh) ||
@@ -44,6 +43,7 @@ struct MetalStageParams <: AbstractCompilerParams
 end
 
 const MetalStageJob = CompilerJob{MetalCompilerTarget,MetalStageParams}
+const MetalDeviceJob = CompilerJob{MetalCompilerTarget,<:Metal.AbstractMetalCompilerParams}
 
 include("stages.jl")    # vertex and fragment: outputs, inputs, builtins, metadata
 include("mesh.jl")      # the mesh object's metadata
@@ -57,42 +57,19 @@ GPUCompiler.runtime_module(::MetalStageJob) = Metal
 
 # The stage overlays first, then exactly the stack a Metal.jl kernel compiles
 # against, so device code behaves the same in a stage as in a kernel.
-GPUCompiler.method_tables(::MetalStageJob) =
-    (STAGE_METHODS, Metal.method_table, GPUToolbox.Overlays.float64_overrides,
-     GPUToolbox.Overlays.int128_overrides, GPUToolbox.Overlays.throw_overrides)
+GPUCompiler.method_tables(job::MetalStageJob) =
+    (STAGE_METHODS, invoke(GPUCompiler.method_tables, Tuple{MetalDeviceJob}, job)...)
 
-# Exception sites report through the `KernelState`, and a graphics stage has none:
-# nothing binds one, and a buffer for it would take slot 0 and shift every buffer
-# the caller does bind. GPUCompiler's default `kernel_state_type` (`Nothing`) keeps
-# `kernel_state_to_reference!` from prepending the parameter in the first place.
+# Graphics pipelines bind their own arguments, with no slot for Metal's kernel state.
+GPUCompiler.kernel_state_type(::MetalStageJob) = Nothing
 GPUCompiler.uses_exception_sites(::MetalStageJob) = false
-
-function GPUCompiler.finish_module!(@nospecialize(job::MetalStageJob), mod::LLVM.Module,
-                                    entry::LLVM.Function)
-    # Materialize `Metal.apple_family()` before GPUCompiler optimizes the linked
-    # module, as Metal.jl's own jobs do: device code gates features on it (64-bit
-    # atomic min/max), and an unresolved external global would reach the driver.
-    gv = get(mod.globals, "apple_family", nothing)
-    if gv !== nothing
-        gv.initializer = ConstantInt(LLVM.Int32Type(),
-                                     something(job.config.target.apple_family, 0))
-        gv.linkage = LLVM.Linkage.Private
-    end
-    return invoke(GPUCompiler.finish_module!,
-                  Tuple{CompilerJob{MetalCompilerTarget}, LLVM.Module, LLVM.Function},
-                  job, mod, entry)
-end
 
 function GPUCompiler.finish_ir!(@nospecialize(job::MetalStageJob), mod::LLVM.Module,
                                 entry::LLVM.Function)
     entry = invoke(GPUCompiler.finish_ir!,
-                   Tuple{CompilerJob{MetalCompilerTarget}, LLVM.Module, LLVM.Function},
+                   Tuple{MetalDeviceJob, LLVM.Module, LLVM.Function},
                    job, mod, entry)
-    entry = stage_passes!(job, mod, entry)
-    # Metal.jl's device functions emit intrinsics in their newest form; rewrite them
-    # for the AIR and Metal versions this job targets.
-    Metal.legalize_intrinsics!(job, mod)
-    return entry
+    return stage_passes!(job, mod, entry)
 end
 
 """

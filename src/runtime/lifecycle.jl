@@ -74,10 +74,11 @@ tolerated trydevicearray refusals consume their own diagnostics. Empty without
 active validation. Wait for relevant GPU work before checking a complete run."""
 validationmessages!(dev) = String[]
 
-"""submissions(device) -> Int
+"""submissions(device) -> Union{Int,Missing}
 
 Monotone count of native submissions over every device queue. Vulkan counts
-queue submits; Metal counts committed command buffers. Direct host writes submit
+queue submits; Metal counts committed command buffers when Metal.jl exposes the
+queue counter and returns `missing` otherwise. Direct host writes submit
 nothing. For deferred launch APIs, include the wait/commit when comparing counts."""
 function submissions end
 

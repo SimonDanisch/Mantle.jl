@@ -239,6 +239,7 @@ runscalls(::Device) = false
     resetkernelcompiles!(device)
 
 Report/reset compiled-kernel cache hits and misses. Devices without counters return zeros.
+Metal reports `missing` for hits when Metal.jl does not expose that counter.
 
 A kernel is compiled once: it is kept by its code, not by the session, so the same code is not
 compiled again later in the session (an edit undone) nor in a later one. Every backend's compiler

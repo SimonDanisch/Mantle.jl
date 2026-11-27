@@ -962,20 +962,20 @@ Core's `drain!` on Metal.jl's queue: release what its completed command buffers 
 """
 drain!(bq::Metal.BatchedCommandQueue) = (Metal.drain_cleanups!(bq); nothing)
 
-# Its committed command buffers still count towards `submissions`.
-closechannel!(d::MetalDevice, bq::Metal.BatchedCommandQueue) =
-    (d.releasedsubmits += MTL.committed(bq.queue); nothing)
+@static if isdefined(MTL, :committed)
+    # Its committed command buffers still count after the channel is released.
+    closechannel!(d::MetalDevice, bq::Metal.BatchedCommandQueue) =
+        (d.releasedsubmits += MTL.committed(bq.queue); nothing)
 
-# The lifecycle verbs of `runtime/lifecycle.jl`.
-
-"""
-Command buffers with work committed to the device's queue and channels (released
-ones included); on MTL4, plus MTL4 commits, minus the empty bridge buffers.
-"""
-submissions(d::MetalDevice) = submissions(d.queue) + d.releasedsubmits +
-    sum(c -> MTL.committed(c.queue), d.channels; init = 0)
-submissions(q::LegacyQueue) = MTL.committed(q.mtl)
-submissions(q::MTL4Queue) = MTL.committed(q.mtl) - q.bridges + q.commits
+    # Count Metal 4 commits and exclude empty Metal 3 bridge buffers.
+    submissions(d::MetalDevice) = submissions(d.queue) + d.releasedsubmits +
+        sum(c -> MTL.committed(c.queue), d.channels; init = 0)
+    submissions(q::LegacyQueue) = MTL.committed(q.mtl)
+    submissions(q::MTL4Queue) = MTL.committed(q.mtl) - q.bridges + q.commits
+else
+    closechannel!(::MetalDevice, ::Metal.BatchedCommandQueue) = nothing
+    submissions(::MetalDevice) = missing
+end
 
 retire!(d::MetalDevice) = (d.retired = true; nothing)
 retired(d::MetalDevice) = d.retired

@@ -49,8 +49,7 @@ end
 """The submissions `f` makes on `dev`."""
 submits(f, dev) = (s0 = Mantle.submissions(dev); f(); Mantle.submissions(dev) - s0)
 
-@testset "submissions per call" begin
-    dev = Mantle.Device(TESTBACKEND)
+function test_submissions_per_call(dev)
     be = dev
     n = 256
 
@@ -117,5 +116,14 @@ submits(f, dev) = (s0 = Mantle.submissions(dev); f(); Mantle.submissions(dev) - 
         # A token covers work a submission has made. One past the newest names
         # work nothing submitted, which a wait would wait for for ever.
         @test_throws ArgumentError Mantle.waitfor!(dev, Mantle.fence(dev) + 1)
+    end
+end
+
+@testset "submissions per call" begin
+    dev = Mantle.Device(TESTBACKEND)
+    if ismissing(Mantle.submissions(dev))
+        @test_skip "Native submission counter is unavailable"
+    else
+        test_submissions_per_call(dev)
     end
 end

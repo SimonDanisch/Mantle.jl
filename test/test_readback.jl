@@ -23,7 +23,7 @@ end
         n = Mantle.submissions(dev)
         f = Mantle.Readback(a)
         fv = Mantle.Readback(v)
-        @test Mantle.submissions(dev) == n
+        @test Mantle.submissions(dev) == n skip=ismissing(n)
         @test !isready(f)
         @test !isready(fv)
         pl = Mantle.Plan(g; budget=Inf)
@@ -38,7 +38,7 @@ end
         k[] = Int32(10)
         n = Mantle.submissions(dev)
         Mantle.run!(pl)
-        @test Mantle.submissions(dev) == n + 1
+        @test Mantle.submissions(dev) == n + 1 skip=ismissing(n)
         got = fetch(f)
         @test got isa Matrix{Int32}
         @test got == reshape(Int32.(11:523), 19, 27)
@@ -46,7 +46,7 @@ end
         @test wait(f) === f
         @test isready(f)
         @test fetch(f) === got
-        @test Mantle.submissions(dev) == n + 1
+        @test Mantle.submissions(dev) == n + 1 skip=ismissing(n)
         @test_throws ArgumentError Mantle.Readback(g, Mantle.viewof(a, (1,); offset=0))
         Mantle.free!(pl)
         @test fetch(f) === got
@@ -70,7 +70,7 @@ end
         Mantle.run!(pl)
         @test pl.recording === rec
         @test length(g.readbacks) == 1
-        @test Mantle.submissions(dev) == n + 2
+        @test Mantle.submissions(dev) == n + 2 skip=ismissing(n)
         # Teardown before either result is collected must not retire staging
         # which the second result still needs.
         Mantle.free!(pl)
@@ -78,7 +78,7 @@ end
         @test fetch(f2) == Int32.(1001:1513)
         @test fetch(f2b) === fetch(f2)
         @test fetch(f1) == Int32.(1:513)
-        @test Mantle.submissions(dev) == n + 2
+        @test Mantle.submissions(dev) == n + 2 skip=ismissing(n)
         Mantle.free!(k)
     end
 
@@ -109,7 +109,7 @@ end
         n = Mantle.submissions(dev)
         Mantle.run!(pl)
         @test fetch(t) == Int32.(1:257)
-        @test Mantle.submissions(dev) == n + 1
+        @test Mantle.submissions(dev) == n + 1 skip=ismissing(n)
         cancelled = Mantle.Readback(a)
         t2 = @async try fetch(cancelled) catch err; err end
         yield()
@@ -142,7 +142,7 @@ end
         n = Mantle.submissions(dev)
         Mantle.run!(pl)
         @test fetch(f) == Int32.(1:257)
-        @test Mantle.submissions(dev) == n + 1
+        @test Mantle.submissions(dev) == n + 1 skip=ismissing(n)
         # Ordinary Array conversion continues to return an actual array.
         @test Array(a) isa Array{Int32,1}
         Mantle.free!(pl); Mantle.free!(a)
@@ -178,7 +178,7 @@ end
     n = Mantle.submissions(dev)
     Mantle.run!(pl)
     @test fetch(f) == Int32.(26:282)
-    @test Mantle.submissions(dev) == n + 1
+    @test Mantle.submissions(dev) == n + 1 skip=ismissing(n)
     # Move an external source while preserving its declared logical size. A
     # native transfer embeds a buffer handle, so this must refresh that binding.
     resize!(a, 1024)
@@ -188,7 +188,7 @@ end
     n = Mantle.submissions(dev)
     Mantle.run!(pl)
     @test fetch(f2) == Int32.(26:282)
-    @test Mantle.submissions(dev) == n + 1
+    @test Mantle.submissions(dev) == n + 1 skip=ismissing(n)
     Mantle.free!(pl); Mantle.free!(a)
 end
 
@@ -203,7 +203,7 @@ end
     n = Mantle.submissions(dev)
     @test_throws DimensionMismatch Mantle.run!(pl)
     @test_throws DimensionMismatch fetch(f)
-    @test Mantle.submissions(dev) == n
+    @test Mantle.submissions(dev) == n skip=ismissing(n)
     Mantle.free!(pl); Mantle.free!(a)
 
     g2, b, k = rb_plan(dev, Int32, (257,))
@@ -232,7 +232,7 @@ end
                 submissions = Mantle.submissions(dev)
                 Mantle.run!(plan)
                 @test fetch(result) == T[value]
-                @test Mantle.submissions(dev) == submissions + 1
+                @test Mantle.submissions(dev) == submissions + 1 skip=ismissing(submissions)
                 @test plan.recording === recording
             end
         finally

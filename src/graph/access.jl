@@ -756,6 +756,8 @@ function stmttaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
         # Linked device functions arrive as `ccall("extern name", llvmcall, ...)`;
         # their unique symbol is declared through `intrinsic_usage`.
         rawname = stmt.args[1]
+        # Julia 1.13 can encode a direct foreign symbol as a one-element tuple.
+        Meta.isexpr(rawname, :tuple, 1) && (rawname = only(rawname.args))
         name = rawname isa QuoteNode ? rawname.value : rawname
         if name === :jl_value_ptr
             # Julia lowers pointer_from_objref to this address conversion.

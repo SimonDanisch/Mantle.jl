@@ -75,16 +75,19 @@ loadframework(name::AbstractString) =
 # `staged_gemm_tile` is core's (`array/gemm.jl`); a method here would be an
 # overwrite. Metal devices decline the staged GEMM by their 8x8 `caps` tile.
 
-# Forwarded so the count is real: core's default `(; hits = 0, misses = 0)` would
-# read as "nothing compiled". Metal.jl counts the kernels and stages it compiled
-# (`Metal.compilations`) and the kernel lookups its cache answered (`Metal.cache_hits`),
-# neither public; the render stages found compiled are counted where Mantle looks them
-# up (`compile_stage_function`).
-kernelcompiles(::MetalDevice) = (; hits = Metal.cache_hits[] + METAL.stagehits[] - METAL.hitbase,
+# Metal counts compilations of compute kernels and render stages. A total for cache
+# hits also needs Metal's compute lookup counter, when the loaded version exposes it.
+metal_cache_hits() = @static if isdefined(Metal, :cache_hits)
+    Metal.cache_hits[] + METAL.stagehits[]
+else
+    missing
+end
+
+kernelcompiles(::MetalDevice) = (; hits = metal_cache_hits() - METAL.hitbase,
                                    misses = Metal.compilations[] - METAL.compilebase)
 function resetkernelcompiles!(::MetalDevice)
     METAL.compilebase = Metal.compilations[]
-    METAL.hitbase = Metal.cache_hits[] + METAL.stagehits[]
+    METAL.hitbase = coalesce(metal_cache_hits(), 0)
     return nothing
 end
 kerneloverlays(::MetalDevice) = Metal.method_table
