@@ -16,15 +16,13 @@ concurrency:
 
 jobs:
   lavapipe:
-    name: Lavapipe tests (Julia ${{ matrix.julia }}${{ matrix.julia == '1.11' && ', compatibility probe' || '' }})
+    name: Lavapipe tests (Julia ${{ matrix.julia }})
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    # Mantle and its Lava and Raycore dependencies require Julia 1.12.
-    continue-on-error: ${{ matrix.julia == '1.11' }}
     strategy:
       fail-fast: false
       matrix:
-        julia: ['1.11', '1.12', '1.13']
+        julia: ['1.12', '1.13', '1.14']
     steps:
       - uses: actions/checkout@v4
       - name: Install Vulkan loader and virtual display
@@ -33,7 +31,8 @@ jobs:
           sudo apt-get install -y libvulkan1 vulkan-validationlayers xauth xvfb
       - uses: julia-actions/setup-julia@v2
         with:
-          version: ${{ matrix.julia }}
+          # Include tagged 1.14 prereleases until 1.14 is released.
+          version: ${{ matrix.julia == '1.14' && '~1.14.0-0' || matrix.julia }}
       - uses: julia-actions/cache@v2
       - name: Run Mantle tests
         env:
