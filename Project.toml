@@ -41,7 +41,7 @@ MantleROCmExt = "AMDGPU"
 MantleWebGPUExt = "Bonito"
 
 [sources]
-Lava = {url = "https://github.com/SimonDanisch/Lava.jl", rev = "main"}
+Lava = {url = "https://github.com/SimonDanisch/Lava.jl", rev = "sd/webgpu"}
 # Metal.jl#1168, #1169 and the bounds-error fix are not released yet
 Metal = {url = "https://github.com/SimonDanisch/Metal.jl", rev = "sd/mantle-upstream"}
 Raycore = {url = "https://github.com/JuliaGeometry/Raycore.jl", rev = "master"}
