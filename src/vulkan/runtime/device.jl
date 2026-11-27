@@ -738,7 +738,15 @@ function LavaDevice(; select = nothing, debug::DebugConfig = DebugConfig())
                           :cooperative_matrix, (:cooperative_matrix,))
     coopmat2_caps = CoopMat2Caps()
     if has_coopmat && has("VK_NV_cooperative_matrix2")
-        q = feature!(VK.PhysicalDeviceCooperativeMatrix2FeaturesNV)
+        T = VK.PhysicalDeviceCooperativeMatrix2FeaturesNV
+        want = fieldnames(T)
+        driver = VK.get_physical_device_properties_2(phys_dev, VK.PhysicalDeviceDriverProperties).next
+        if driver.driver_id == VK.DRIVER_ID_MESA_LLVMPIPE
+            # Lavapipe crashes creating pipelines for these advertised operations.
+            unsafe_features = (:cooperative_matrix_per_element_operations, :cooperative_matrix_reductions)
+            want = filter(f -> !(f in unsafe_features), want)
+        end
+        q = feature!(T, want)
         coopmat2_caps = CoopMat2Caps(true, (getfield(q, f) for f in fieldnames(typeof(q)) if f !== :next)...)
     end
     has_coopvec = enabled("VK_NV_cooperative_vector", VK.PhysicalDeviceCooperativeVectorFeaturesNV,

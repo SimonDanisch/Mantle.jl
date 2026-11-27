@@ -34,6 +34,15 @@ jobs:
           # Include tagged 1.14 prereleases until 1.14 is released.
           version: ${{ matrix.julia == '1.14' && '~1.14.0-0' || matrix.julia }}
       - uses: julia-actions/cache@v2
+      # The adaptive mesh tests use Hikari's geometry routines. Its shader
+      # precompile workload is exercised in Hikari's own test environment.
+      - name: Configure the Hikari test dependency
+        run: |
+          cat >> LocalPreferences.toml <<'EOF'
+
+          [Hikari]
+          precompile_workload = false
+          EOF
       - name: Run Mantle tests
         env:
           MANTLE_TEST_LAVAPIPE: 'true'
