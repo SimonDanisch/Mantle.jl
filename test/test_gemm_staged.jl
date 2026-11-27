@@ -1,7 +1,7 @@
 # Staged GEMM: CPU references, every tiling/staging family, k-loop boundaries,
 # split-k selection, index widths and padding.
 
-using Test, DNNKernels, KernelAbstractions
+using Test, KernelAbstractions
 const KA = KernelAbstractions
 import KernelInterface
 include(joinpath(@__DIR__, "testbackend.jl"))
@@ -64,7 +64,9 @@ end
 
 # The kernels below are written at the staged GEMM's tile; a device without
 # cooperative matrices at that tile has nothing here to run.
-if hasstagedgemm()
+# The portable tiling checks above also run without the downstream package.
+if hasstagedgemm() && Base.find_package("DNNKernels") !== nothing
+    using DNNKernels
     @testset "staged GEMM" begin
         backend = TESTBACKEND
         # `nothing`, not a `Workspace`: the declared path deleted that bump

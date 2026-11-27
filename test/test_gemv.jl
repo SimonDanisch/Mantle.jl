@@ -22,6 +22,8 @@
 
 using Test, KernelAbstractions, LinearAlgebra
 include(joinpath(@__DIR__, "testbackend.jl"))
+# Relative GPU timings have no contract on a CPU Vulkan implementation.
+const GEMV_SOFTWARE_DEVICE = occursin("llvmpipe", lowercase(Mantle.devicename(Mantle.Device(TESTBACKEND))))
 const KA = KernelAbstractions
 
 "Host reference in Float64. `A` is length K, `B` is (K, N), result is length N."
@@ -202,7 +204,7 @@ end
             KA.synchronize(backend)
             tg, tm_ = interleaved(rg, rm, backend)
             @info "gemv(transposed) vs mul! at ($M,$K)" gemv_us=tg/iters/1e3 mul_us=tm_/iters/1e3 speedup=tm_/tg
-            @test tm_ / tg >= 1
+            @test tm_ / tg >= 1 skip=GEMV_SOFTWARE_DEVICE
         end
     end
 
@@ -286,6 +288,6 @@ end
         # the M5, where `mul!` is Metal's library product and both read `B` at the
         # memory floor. The claim is the decoder's: this kernel is never the
         # slower choice. The margin is the general path's, not this kernel's.
-        @test tm / tg >= 1
+        @test tm / tg >= 1 skip=GEMV_SOFTWARE_DEVICE
     end
 end
