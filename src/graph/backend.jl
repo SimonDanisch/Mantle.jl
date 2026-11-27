@@ -512,6 +512,16 @@ cost. Core starts a new submission past it; the default has no limit.
 """
 submitlimit(::Device) = typemax(Int)
 
+"""
+    atomicfloatadd(device) -> Bool
+
+Whether a kernel on `device` may add to a `Float32` buffer element atomically
+(`Atomix.@atomic x[i] += v`). A reduction split over workgroups accumulates that
+way, so a caller asks before it splits one. The default says yes; a device where
+the add is a feature of its own answers from that.
+"""
+atomicfloatadd(::Device) = true
+
 """Host-only profiler: no query pool, NaN GPU period/time. Host cost includes recording,
 binding, submission and waits; it is not GPU execution time."""
 hostprofiler(passes) =
@@ -679,6 +689,8 @@ const BACKEND_VOCABULARY = (
     # Whether passes can be timed, so recordings can be cut by the budget
     # (`partitionranges`); and the budget.
     :timestamps, :submissionbudget, :submitlimit,
+    # Whether a split reduction may accumulate with a float atomic add.
+    :atomicfloatadd,
     # Also read from backend-specific compiled dispatches.
     :argsize, :indirectindex,
     # Core defines a default for each; a backend overrides it.

@@ -428,7 +428,8 @@ end
     # `inferring`: only Lava serializes the inference its walks and compiles share. 37
     # with `trim_gpu_pool!`, whose core method trims through the default channel: only
     # Vulkan's other channels hold an open recording's frames and retire on their own.
-    @test length(lonely) <= 37
+    # 38 with `atomicfloatadd`: Vulkan exposes float atomic add as a feature bit.
+    @test length(lonely) <= 38
 end
 
 # 0.9: extension-defined Mantle methods must belong to the declared vocabulary.

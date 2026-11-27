@@ -915,6 +915,16 @@ makeprofiler(dev::LavaDevice, passes, profile::Bool) =
 timestamps(dev::LavaDevice) =
     VK.get_physical_device_properties(dev.physical_device).limits.timestamp_period > 0
 
+# `shaderBufferFloat32AtomicAdd` is a bit of its own inside
+# `VK_EXT_shader_atomic_float`, and a device may list the extension with the add
+# off: the Ryzen 7900X's integrated Radeon does, and RADV segfaulted in
+# `vkCreateComputePipelines` on a kernel that used `OpAtomicFAddEXT` there.
+# Device creation enables the bit wherever it is reported, so reported is enabled.
+atomicfloatadd(dev::LavaDevice) =
+    has_extension(dev.physical_device, "VK_EXT_shader_atomic_float") &&
+    supportedfeatures(dev.physical_device,
+                      VK.PhysicalDeviceShaderAtomicFloatFeaturesEXT).shader_buffer_float_32_atomic_add
+
 # RADV splits a submission's command buffers into chunks of 192, its own preamble
 # buffers included. The Radeon 8060S hung on every replay of a 411-buffer submission
 # with under 2 ms of measured work and no validation error; 128 leaves the margin.
