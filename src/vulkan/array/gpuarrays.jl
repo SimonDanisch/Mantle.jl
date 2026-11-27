@@ -397,15 +397,18 @@ function LinearAlgebra.norm(v::LavaArray{T}, p::Real=2) where T
     end
     p == 1 && return convert(RT, sum(abs, v; init = 0.0))
     maxabs = convert(Float64, maximum(abs, v))
-    (iszero(maxabs) || isinf(maxabs)) && return convert(RT, maxabs)
+    (iszero(maxabs) || !isfinite(maxabs)) && return convert(RT, maxabs)
     # Unscaled when the sum of squares can neither overflow nor underflow.
-    isfinite(length(v) * maxabs^2) && !iszero(maxabs^2) &&
+    squarescale = maxabs^2
+    isfinite(length(v) * squarescale) && squarescale >= floatmin(Float64) &&
         return convert(RT, sqrt(sum(abs2, v; init = 0.0)))
-    # Rescaled by `maxabs`, dividing by `sqrt(maxabs)` twice: drivers lower `x / m`
-    # to `x * (1/m)`, and for `m` near `floatmax` that reciprocal is subnormal and
-    # flushed to zero (lavapipe, RADV).
-    sm = sqrt(maxabs)
-    return convert(RT, maxabs * sqrt(sum(x -> ((abs(x) / sm) / sm)^2, v; init = 0.0)))
+    # A normal power of two scales both tiny and huge inputs without a
+    # reciprocal that can be flushed to zero on the device.
+    minexp = exponent(floatmin(Float64))
+    shift = clamp(-exponent(maxabs), minexp, -minexp)
+    scale = ldexp(1.0, shift)
+    scaled = sqrt(sum(x -> (abs(x) * scale)^2, v; init = 0.0))
+    return convert(RT, ldexp(scaled, -shift))
 end
 
 # Two methods, matching GPUArrays' `NTuple` and general signatures to avoid ambiguity.

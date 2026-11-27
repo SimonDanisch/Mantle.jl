@@ -5,8 +5,8 @@
 # enough: GPU drivers (and LLVM arcp fast-math) lower Float64 `x / m` to
 # `x * (1/m)`, so for `maxabs` near `floatmax` the reciprocal `1/maxabs` is
 # subnormal and is flushed to zero under FTZ (the default on lavapipe AND RDNA3),
-# collapsing the whole norm to 0.0. Fixed by dividing by `sqrt(maxabs)` twice
-# (`1/sqrt(m)` is always normal).
+# collapsing the whole norm to 0.0. Scaling by a normal power of two avoids
+# the reciprocal and also keeps tiny squared magnitudes in range.
 #
 # These are exactly the cases that failed in the GPUArrays `linalg/norm` suite
 # (2-norm, sizes (2,) and (2,2,2), Float64 and ComplexF64, overflow + underflow
