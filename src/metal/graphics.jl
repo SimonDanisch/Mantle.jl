@@ -525,7 +525,10 @@ function compile_stage_function(dev::MTL.MTLDevice, f, tt::Type, stage::Symbol, 
     stages = GPUCompiler.cached_results(MetalStages, job)
     if stages !== nothing
         compiled = get(stages.stages, key, nothing)
-        compiled === nothing || return compiled
+        if compiled !== nothing
+            Threads.atomic_add!(METAL.stagehits, 1)
+            return compiled
+        end
     end
     lib = MTL.MTLLibraryFromData(dev, Metal.compile_to_metallib(job).metallib)
     compiled = (MTL.MTLFunction(lib, name), lib)

@@ -118,7 +118,8 @@ MetalDevice(mtldev::MTL.MTLDevice = Metal.device()) = MetalDevice(mtldev, metalq
 
 """
 Process-wide Metal state: for the report block (`debug.jl`), `reports`, `reportlock`
-and `reporter`; for `kernelcompiles`, the compile count at the last reset; for
+and `reporter`; for `kernelcompiles`, the render stages found compiled and the counts at
+the last reset; for
 `adopt!`, the task and queue it last set. The devices are core's
 (`runtime/lifecycle.jl`).
 """
@@ -128,11 +129,13 @@ mutable struct MetalProcess
     # The block given to `MTLSetReportFailureBlock`, rooted here because Metal
     # holds it only by pointer.
     reporter::Any
+    stagehits::Threads.Atomic{Int}
     compilebase::Int
+    hitbase::Int
     adoptedtask::Union{Nothing,Task}
     adoptedqueue::Union{Nothing,Metal.ConcreteBatchedQueue}
 end
-const METAL = MetalProcess(String[], ReentrantLock(), nothing, 0, nothing, nothing)
+const METAL = MetalProcess(String[], ReentrantLock(), nothing, Threads.Atomic{Int}(0), 0, 0, nothing, nothing)
 
 # A device selected by name or with a debug configuration is not made the process
 # device by core, and so does not adopt the queue (see `adopt!`).
