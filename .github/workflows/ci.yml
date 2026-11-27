@@ -1,0 +1,54 @@
+name: Mantle
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mantle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lavapipe:
+    name: Lavapipe tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Vulkan loader and virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan1 vulkan-validationlayers xauth xvfb
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.12'
+      - uses: julia-actions/cache@v2
+      - name: Run Mantle tests
+        env:
+          MANTLE_TEST_LAVAPIPE: 'true'
+          JULIA_NUM_THREADS: '4'
+        run: xvfb-run -a julia --project=. --color=yes -e 'using Pkg; Pkg.instantiate(); Pkg.test(; julia_args = `--check-bounds=auto`)'
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build the documentation
+        run: |
+          python -m pip install mkdocs==1.6.1
+          python -m mkdocs build --strict
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mantle-docs
+          path: site/
+          if-no-files-found: error

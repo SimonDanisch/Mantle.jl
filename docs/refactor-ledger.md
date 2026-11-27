@@ -9,7 +9,7 @@ Separate four facts when updating a row: the target contract, what the current
 baseline already implements, existing evidence, and what has been verified on
 the replacement. An open replacement item does not mean the baseline feature,
 consumer migration or benchmark is absent. Check the
-[evidence index](../experiments/review-2026-10-20/evidence-index.md) before claiming
+[evidence index](https://github.com/SimonDanisch/Mantle.jl/blob/7beea17/experiments/review-2026-10-20/evidence-index.md) before claiming
 missing work. Found-while-working rows that settle a design choice must identify
 that scope; a settled choice does not close its phase's implementation gates.
 

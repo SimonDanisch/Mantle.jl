@@ -1,3 +1,10 @@
+const TEST_LAVAPIPE = get(ENV, "MANTLE_TEST_LAVAPIPE", "false") == "true"
+if TEST_LAVAPIPE
+    using Lavapipe_jll
+    ENV["VK_DRIVER_FILES"] = Lavapipe_jll.lvp_icd
+    ENV["VK_ICD_FILENAMES"] = Lavapipe_jll.lvp_icd
+end
+
 using Mantle, Test
 
 include(joinpath(@__DIR__, "backend_probe.jl"))
@@ -18,6 +25,13 @@ include(joinpath(@__DIR__, "backend_probe.jl"))
 _VULKAN_OK = backend_loadable("Vulkan") !== nothing &&
              backend_loadable("Lava") !== nothing &&
              :vulkan in Base.invokelatest(Mantle.availablebackends)
+
+if TEST_LAVAPIPE
+    _VULKAN_OK || error("Lavapipe CI requires a usable Vulkan backend")
+    device = Mantle.Device()
+    name = Mantle.devicename(device)
+    occursin("llvmpipe", lowercase(name)) || error("Expected Lavapipe, selected $name")
+end
 
 # BOTH backends are probed here, before anything runs.
 #

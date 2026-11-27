@@ -16,7 +16,7 @@ For the full API in one document, read [api-guide.md](api-guide.md).
 The Julia files are design sketches, not runnable implementations.
 [refactor-ledger.md](refactor-ledger.md) owns phased implementation/deletion status.
 Existing integrations, numerical decisions, probes and source inventories remain
-indexed in [the evidence index](../experiments/review-2026-10-20/evidence-index.md).
+indexed in [the evidence index](https://github.com/SimonDanisch/Mantle.jl/blob/7beea17/experiments/review-2026-10-20/evidence-index.md).
 Specified requirements are never replacement implementation passes.
 User instructions take precedence over this target specification. Existing code
 and historical evidence establish behavior and native facts, not authority to
@@ -765,7 +765,7 @@ API flexibility and passing scalar models are not performance evidence.
 | Multi-device | Per-device graphs with explicit transfers/collectives, participation/failure protocol; synchronous-copy evidence alone is insufficient. |
 | Training/AD | Representative backward/optimizer alias/state/RNG gate; AD algorithms stay above Mantle and inference is not training evidence. |
 
-The source-grounded [use-case review](../experiments/review-2026-10-29/use-case-review.txt)
+The source-grounded [use-case review](https://github.com/SimonDanisch/Mantle.jl/blob/7beea17/experiments/review-2026-10-29/use-case-review.txt)
 tracks remaining contract/migration gaps as F115–F122. In particular, raw kernels
 being expressive is not proof of a clean common scalar/sparse/operator interface;
 contiguous cache growth is not paged-attention evidence, and inference is not AD
