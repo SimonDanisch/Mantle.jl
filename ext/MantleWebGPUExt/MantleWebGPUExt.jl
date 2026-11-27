@@ -26,7 +26,15 @@ import LinearAlgebra
 import Mantle
 using Mantle: WebGPUAPI
 
-const EXECUTOR = Bonito.ES6Module(joinpath(@__DIR__, "executor.js"))
+const WEBGPU_EXECUTOR = Bonito.Asset(joinpath(@__DIR__, "executor.js");
+                                    name="mantle-webgpu-executor", es6module=true)
+
+# Serve this standalone module by content. A proxy may still retain bytes for
+# an older bundle registered under the same file key.
+webgpu_executor_asset() = Bonito.BinaryAsset(read(joinpath(@__DIR__, "executor.js")), "text/javascript")
+
+executor_import(::Nothing) = js"$(WEBGPU_EXECUTOR)"
+executor_import(url::AbstractString) = js"import($(url))"
 
 # The executor's binding window for one dispatch's arguments (`ARGS_WINDOW` there).
 const ARGS_WINDOW = 4096
@@ -118,9 +126,12 @@ mutable struct WebGPUDevice <: Mantle.Device
     heapsize::Int                   # the bytes of each heap
     allocators::Vector{HeapAllocator}
     freed::Vector{Tuple{Int, Int, Int}}  # (heap, offset, bytes) the GC freed, released at the next synchronize
+    freedtextures::Vector{Int}      # GPU textures the next batch retires
     freedlock::Threads.SpinLock
     info::Dict{Any, Any}            # adapter info, features, limits
+    caps::Mantle.DeviceCaps
     pipelines::Dict{Any, Tuple{Int, Lava.PushConstantInfo}}
+    renderpipelines::Dict{Any, Tuple{Int, Lava.PushConstantInfo, Union{Nothing, Lava.PushConstantInfo}}}
     npipelines::Int
     lock::ReentrantLock
     pool::Mantle.Pool
@@ -164,29 +175,45 @@ fails in the page throws here with the page's message: the promise is settled
 either way, since a rejected one would never reach Julia and the wait would only
 time out.
 """
-function call(session::Bonito.Session, name::String, args...; timeout = 300.0)
-    r = Bonito.evaljs_value(session, js"""$(EXECUTOR).then(M => M[$(name)](...$(collect(Any, args)))).then(
-            value => ({ value }), e => ({ error: String(e && e.message || e) }))"""; timeout)
+function call(session::Bonito.Session, name::String, args...; timeout = 300.0, executor = nothing)
+    module_import = executor_import(executor)
+    r = Bonito.evaljs_value(session, js"""$(module_import).then(M => M[$(name)](...$(collect(Any, args)))).then(
+            value => ({ value }), e => ({ error: String(e && e.message || e) }))""";
+            timeout, error_on_closed=false)
+    r === nothing && throw(EOFError())
     haskey(r, "error") && error("WebGPU page, $name: $(r["error"])")
     return r["value"]
 end
-call(d::WebGPUDevice, name::String, args...; kw...) = call(d.session, name, args...; kw...)
+device_executor(d::WebGPUDevice) = get(d.info, :executor_url, nothing)
+call(d::WebGPUDevice, name::String, args...; kw...) =
+    call(d.session, name, args...; executor=device_executor(d), kw...)
 
 """Send `name(args...)` to the executor without waiting; a failure shows at the next [`call`](@ref) that waits."""
+function post(session::Bonito.Session, name::String, args...; executor=nothing)
+    module_import = executor_import(executor)
+    return Bonito.evaljs(session, js"""$(module_import).then(M => M[$(name)](...$(collect(Any, args))))""")
+end
 post(d::WebGPUDevice, name::String, args...) =
-    Bonito.evaljs(d.session, js"""$(EXECUTOR).then(M => M[$(name)](...$(collect(Any, args))))""")
+    post(d.session, name, args...; executor=device_executor(d))
 
-const WANTED_FEATURES = ["subgroups", "shader-f16", "timestamp-query", "chromium-experimental-subgroup-matrix"]
+const WANTED_FEATURES = ["subgroups", "shader-f16", "timestamp-query", "chromium-experimental-subgroup-matrix",
+                         "float32-filterable", "float32-blendable", "indirect-first-instance"]
 
 """
 `Mantle.webgpudevice(page; memory)`: `memory`, 1 GiB by default, is split into as
 few heaps as the device's storage binding and buffer sizes allow, at most one fewer
 than its storage buffers per shader stage (the arguments take one) and Lava's
-`WEBGPU_MAX_HEAPS`. Every kernel binds every heap.
+`WEBGPU_MAX_HEAPS`. Every kernel binds every heap. Set `max_canvas_scale` to cap
+the number of render pixels per CSS pixel for interactive windows.
 """
 function Mantle.webgpudevice(session::Bonito.Session; power::String = "high-performance",
-                             memory::Integer = 2^30)
-    info = call(session, "open", 1, power, WANTED_FEATURES)
+                             memory::Integer = 2^30, max_canvas_scale::Union{Nothing,Real} = nothing)
+    if max_canvas_scale !== nothing
+        isfinite(max_canvas_scale) && max_canvas_scale > 0 ||
+            throw(ArgumentError("max_canvas_scale must be finite and positive"))
+    end
+    executor = Bonito.url(session, webgpu_executor_asset())
+    info = call(session, "open", power, WANTED_FEATURES, max_canvas_scale; executor)
     limits = info["limits"]
     perheap = min(Int(limits["maxStorageBufferBindingSize"]), Int(limits["maxBufferSize"])) ÷ HEAP_ALIGN * HEAP_ALIGN
     maxheaps = min(Int(limits["maxStorageBuffersPerShaderStage"]) - 1, Lava.WEBGPU_MAX_HEAPS)
@@ -195,10 +222,14 @@ function Mantle.webgpudevice(session::Bonito.Session; power::String = "high-perf
         "$memory bytes need $nheaps heaps of at most $perheap bytes; this device binds $maxheaps"))
     heapsize = cld(cld(Int(memory), nheaps), HEAP_ALIGN) * HEAP_ALIGN
     heaps = collect(2:nheaps + 1)
-    d = WebGPUDevice(session, 1, heaps, 1, heapsize, [HeapAllocator(heapsize) for _ in heaps],
-                     Tuple{Int, Int, Int}[], Threads.SpinLock(), info, Dict(), 0, ReentrantLock(),
+    sub = Int(get(info, "subgroupSize", info["subgroupMaxSize"]))
+    caps = Mantle.DeviceCaps(false, 0, sub, 0, Int(limits["maxComputeWorkgroupStorageSize"]),
+                             Int(limits["maxComputeInvocationsPerWorkgroup"]), 0, 0)
+    d = WebGPUDevice(session, Int(info["id"]), heaps, 1, heapsize, [HeapAllocator(heapsize) for _ in heaps],
+                     Tuple{Int, Int, Int}[], Int[], Threads.SpinLock(), info, caps, Dict(), Dict(), 0, ReentrantLock(),
                      Mantle.Pool(), Mantle.AccessCache(), Mantle.BufferLedger(), UInt64(0),
                      Dict{String, Any}[], UInt8[], 0, nheaps + 1, nothing, false)
+    d.info[:executor_url] = executor
     post(d, "createBuffer", d.id, d.args, ARGBUFFER)
     post(d, "createHeaps", d.id, heaps, heapsize)
     return d
@@ -210,6 +241,10 @@ a submission that carries it (`Mantle.flush!`, a heap read, a run's replay).
 """
 function takebatch!(d::WebGPUDevice)
     lock(d.lock) do
+        textures = takeretired!(d.freedtextures, d.freedlock)
+        for id in textures
+            push!(d.batch, Dict{String, Any}("op" => "retireTexture", "id" => id))
+        end
         # New vectors: the taken ones become a message.
         taken = (d.batch, d.batchargs)
         d.batch = Dict{String, Any}[]
@@ -225,6 +260,10 @@ submitted!(d::WebGPUDevice) = (lock(() -> (d.submissions += 1), d.lock); nothing
 function Mantle.flush!(d::WebGPUDevice)
     commands, args = takebatch!(d)
     isempty(commands) && return nothing
+    if all(c -> c["op"] == "retireTexture", commands)
+        post(d, "retireTextures", d.id, [c["id"] for c in commands])
+        return nothing
+    end
     post(d, "submit", d.id, commands, d.args, args)
     submitted!(d)
     return nothing
@@ -270,11 +309,34 @@ function Mantle.webgpudevice(; kw...)
         page[] = session
         Bonito.DOM.div("Mantle WebGPU device")
     end
-    window = Bonito.HTTPServer.ElectronDisplay(; electron_args = electron_args())
-    display(window, app)
-    d = Mantle.webgpudevice(page[]; kw...)
-    d.window = window
-    return d
+    # This display communicates through Bonito's connection to the page.
+    # ElectronCall can use its default isolated renderer and preload bridge.
+    backend = Bonito.HTTPServer.current_electron()
+    electron = backend.Application(; additional_electron_args = electron_args())
+    window = nothing
+    try
+        window = Bonito.HTTPServer.ElectronDisplay(; app = electron)
+        display(window, app)
+        d = Mantle.webgpudevice(page[]; kw...)
+        d.window = window
+        return d
+    catch
+        if window === nothing
+            close(electron)
+        else
+            close_device_display(window)
+        end
+        rethrow()
+    end
+end
+
+function close_device_display(window)
+    try
+        close(window)
+    finally
+        close(window.window; close_app = true)
+    end
+    return nothing
 end
 
 """
@@ -292,8 +354,11 @@ function Mantle.retire!(d::WebGPUDevice)
     d.retired && return nothing
     d.retired = true
     if d.window !== nothing
-        close(d.window)
+        close_device_display(d.window)
         d.window = nothing
+    else
+        page = Bonito.root_session(d.session)
+        isopen(page) && post(page, "close", d.id; executor=device_executor(d))
     end
     return nothing
 end
@@ -301,13 +366,11 @@ Mantle.retired(d::WebGPUDevice) = d.retired
 
 Mantle.devicename(d::WebGPUDevice) = "WebGPU $(d.info["vendor"]) $(d.info["architecture"])"
 Mantle.syncbackend(::WebGPUDevice) = WebGPUAPI()
+@inline Mantle.retype_pointer(::Type{T}, p::Lava.HeapPtr) where {T} = Lava.HeapPtr{T}(p.offset, p.heap)
 Mantle.waitidle(d::WebGPUDevice) = KI.synchronize(d)
+Mantle.Raycore.refit_by_depth(::WebGPUDevice) = true
 
-function Mantle.caps(d::WebGPUDevice)
-    sub = Int(get(d.info, "subgroupSize", d.info["subgroupMaxSize"]))
-    return Mantle.DeviceCaps(false, 0, sub, 0, limit(d, "maxComputeWorkgroupStorageSize"),
-                             limit(d, "maxComputeInvocationsPerWorkgroup"), 0, 0)
-end
+Mantle.caps(d::WebGPUDevice) = d.caps
 
 """
 Submit the open batch and wait for every submission, then give the heap back what
@@ -326,12 +389,14 @@ function KI.synchronize(d::WebGPUDevice)
     return nothing
 end
 
-function takefreed!(d::WebGPUDevice)
+takefreed!(d::WebGPUDevice) = takeretired!(d.freed, d.freedlock)
+
+function takeretired!(pending, lk)
     GC.enable_finalizers(false)
     try
-        return lock(d.freedlock) do
-            r = copy(d.freed)
-            empty!(d.freed)
+        return lock(lk) do
+            r = copy(pending)
+            empty!(pending)
             r
         end
     finally
@@ -585,6 +650,44 @@ Base.copyto!(dst::WebGPUArray{T}, src::WebGPUArray{T}) where {T} = copyto!(dst, 
 Base.copy(a::WebGPUArray) = copyto!(similar(a), a)
 Base.Array(a::WebGPUArray{T, N}) where {T, N} = copyto!(Array{T, N}(undef, a.dims), a)
 
+function Base.resize!(a::WebGPUArray{T,N}, dims::Dims{N}) where {T,N}
+    bytes = Mantle.checkedbytes(T, dims)
+    block = a.data[]
+    size(a) == dims && return a
+    if a.data.rc.count[] == 1 && bytes <= block.nbytes - a.offset
+        a.dims = dims
+        return a
+    end
+
+    fresh = WebGPUArray{T}(block.dev, dims)
+    try
+        copyto!(fresh, 1, a, 1, min(length(a), length(fresh)))
+    catch
+        GPUArrays.unsafe_free!(fresh)
+        rethrow()
+    end
+    # Copy arguments hold the previous address. Its range is retired only after
+    # synchronization covers the queued copy and any earlier use.
+    a.data, fresh.data = fresh.data, a.data
+    a.dims = dims
+    a.offset = 0
+    GPUArrays.unsafe_free!(fresh)
+    return a
+end
+
+Base.resize!(a::WebGPUArray{T,1}, n::Integer) where {T} = resize!(a, (Int(n),))
+
+function Base.append!(a::WebGPUArray{T,1}, items::AbstractVector) where {T}
+    isempty(items) && return a
+    values = collect(T, items)
+    n = length(a)
+    resize!(a, n + length(values))
+    copyto!(a, n + 1, values, 1, length(values))
+    return a
+end
+
+Base.push!(a::WebGPUArray{T,1}, value) where {T} = append!(a, T[value])
+
 # ── GPUArrays ─────────────────────────────────────────────────────────────────
 #
 # GPUArrays' generic implementations (broadcast, map, mapreduce) launch
@@ -594,9 +697,16 @@ Base.Array(a::WebGPUArray{T, N}) where {T, N} = copyto!(Array{T, N}(undef, a.dim
 struct WebGPUArrayStyle{N} <: GPUArrays.AbstractGPUArrayStyle{N} end
 WebGPUArrayStyle{M}(::Val{N}) where {N, M} = WebGPUArrayStyle{N}()
 Base.BroadcastStyle(::Type{<:WebGPUArray{T, N}}) where {T, N} = WebGPUArrayStyle{N}()
+Base.BroadcastStyle(::Type{<:SubArray{T,N,<:WebGPUArray}}) where {T,N} = WebGPUArrayStyle{N}()
+Base.BroadcastStyle(::Type{<:PermutedDimsArray{T,N,<:Any,<:Any,<:WebGPUArray}}) where {T,N} =
+    WebGPUArrayStyle{N}()
+Base.BroadcastStyle(::Type{<:Base.ReshapedArray{T,N,<:WebGPUArray}}) where {T,N} =
+    WebGPUArrayStyle{N}()
 
 """The device of the first WebGPU array among a broadcast's arguments, at any depth."""
 broadcastdevice(a::WebGPUArray) = device(a)
+broadcastdevice(a::Union{SubArray,PermutedDimsArray,Base.ReshapedArray,
+                         LinearAlgebra.Transpose,LinearAlgebra.Adjoint}) = broadcastdevice(parent(a))
 broadcastdevice(bc::Base.Broadcast.Broadcasted) = broadcastdevice(bc.args)
 broadcastdevice(x) = nothing
 function broadcastdevice(args::Tuple)
@@ -623,6 +733,12 @@ struct DeviceRefType{T} <: Ref{DataType} end
 Base.getindex(::DeviceRefType{T}) where {T} = T
 Adapt.adapt_structure(::WebGPUAdaptor, r::Base.RefValue{<:Union{DataType, Type}}) = DeviceRefType{r[]}()
 
+# Keep the constructor in the closure's type so broadcasts such as Float32.(a)
+# can pass their fused expression to a GPU kernel.
+Adapt.adapt_structure(to::WebGPUAdaptor,
+                      bc::Base.Broadcast.Broadcasted{Style, <:Any, Type{T}}) where {Style, T} =
+    Base.Broadcast.Broadcasted{Style}((x...) -> T(x...), Adapt.adapt(to, bc.args), bc.axes)
+
 # Core's, as for a Vulkan array: GPUArrays' generic one flushes its rescaling to zero.
 LinearAlgebra.norm(v::WebGPUArray, p::Real = 2) = Mantle.devicenorm(v, p)
 
@@ -641,33 +757,211 @@ end
 KI.kernel_function(d::WebGPUDevice, @nospecialize(f), @nospecialize(tt) = Tuple{}; name = nothing, kwargs...) =
     KI.Kernel(d, f)
 
+struct ComputeWGSL
+    source::String
+    digest::String
+end
+
+# SPIR-V identity comes from Lava's world-aware cache. A kernel invalidation
+# produces new bytes. Include the current world so edits to the WGSL printer
+# also take effect when opening another logical device.
+const COMPUTE_WGSL = IdDict{Vector{UInt8}, Dict{Tuple{Int,Bool,UInt}, ComputeWGSL}}()
+const COMPUTE_WGSL_LOCK = ReentrantLock()
+const COMPUTE_WGSL_BYTES = Ref(0)
+const COMPUTE_WGSL_LIMIT = 32 << 20
+
+function compute_wgsl(spirv::Vector{UInt8}, heaps::Int, linear::Bool)
+    variant = (heaps, linear, Base.tls_world_age())
+    hit = lock(COMPUTE_WGSL_LOCK) do
+        shaders = get(COMPUTE_WGSL, spirv, nothing)
+        return shaders === nothing ? nothing : get(shaders, variant, nothing)
+    end
+    hit === nothing || return hit
+
+    source = Lava.spirv_to_wgsl(collect(reinterpret(UInt32, spirv)); heaps, linear)
+    shader = ComputeWGSL(source, bytes2hex(Bonito.SHA.sha256(Vector{UInt8}(codeunits(source)))))
+    bytes = ncodeunits(source) + length(spirv)
+    bytes <= COMPUTE_WGSL_LIMIT || return shader
+    return lock(COMPUTE_WGSL_LOCK) do
+        if COMPUTE_WGSL_BYTES[] + bytes > COMPUTE_WGSL_LIMIT
+            empty!(COMPUTE_WGSL)
+            COMPUTE_WGSL_BYTES[] = 0
+        end
+        shaders = get!(Dict{Tuple{Int,Bool,UInt}, ComputeWGSL}, COMPUTE_WGSL, spirv)
+        return get!(shaders, variant) do
+            COMPUTE_WGSL_BYTES[] += bytes
+            shader
+        end
+    end
+end
+
+struct ComputePipelineRequest
+    key::Tuple
+    id::Int
+    layout::Lava.PushConstantInfo
+    name::Symbol
+    wgsl::String
+    digest::String
+    generation_ms::Float64
+end
+
+mutable struct ComputePipelineBatch
+    device::WebGPUDevice
+    cached::Set{String}
+    requests::Vector{ComputePipelineRequest}
+    bytes::Int
+end
+
+function check_compute_pipeline(r, name, wgsl)
+    r["ok"] && return nothing
+    @debug "Rejected WGSL source" kernel=name wgsl
+    msgs = join(("line $(m["line"]):$(m["column"]) $(m["type"]): $(first(m["message"], 500))"
+                 for m in Iterators.take(r["messages"], 5)), "\n")
+    error("the page rejected the WGSL of $name:\n$msgs")
+end
+
+const ComputePipelineTiming = @NamedTuple{at_ns::UInt64, pipeline::Int, kernel::Symbol, bytes::Int,
+                                          cached::Bool, generation_ms::Float64, fetch_ms::Float64,
+                                          module_ms::Float64, pipeline_ms::Float64}
+
+"""Collect timings for subsequent compute pipeline creation on this device."""
+function record_pipeline_timings!(d::WebGPUDevice)
+    return lock(d.lock) do
+        d.info[:pipeline_timings] = ComputePipelineTiming[]
+    end
+end
+
+pipeline_cache_hit(r) = get(r, "cached", false)
+
+function log_compute_pipeline(d, r, id, name, bytes, generation_ms)
+    cached = pipeline_cache_hit(r)
+    fetch_ms = get(r, "fetchMs", 0.0)
+    module_ms = get(r, "moduleMs", 0.0)
+    pipeline_ms = get(r, "pipelineMs", 0.0)
+    @debug "WebGPU compute pipeline timing" pipeline=id kernel=name bytes cached generation_ms fetch_ms module_ms pipeline_ms
+    lock(d.lock) do
+        samples = get(d.info, :pipeline_timings, nothing)
+        samples === nothing || push!(samples, ComputePipelineTiming(
+            (time_ns(), id, name, bytes, cached, generation_ms, fetch_ms, module_ms, pipeline_ms)))
+    end
+    return nothing
+end
+
+function flush_compute_pipelines!(batch::ComputePipelineBatch)
+    requests = batch.requests
+    isempty(requests) && return nothing
+    d = batch.device
+    started = time_ns()
+    payload = map(requests) do req
+        key = "$(length(d.heaps)):main:$(req.digest)"
+        Any[req.id, req.digest, key in batch.cached ? nothing : req.wgsl]
+    end
+    replies = call(d, "createComputePipelines", d.id, payload)
+    misses = findall(r -> get(r, "missing", false), replies)
+    if !isempty(misses)
+        # Compiling an earlier batch can evict one of the keys reported at open.
+        retry = [Any[requests[i].id, requests[i].digest, requests[i].wgsl] for i in misses]
+        replies[misses] = call(d, "createComputePipelines", d.id, retry)
+    end
+    for (req, reply) in zip(requests, replies)
+        check_compute_pipeline(reply, req.name, req.wgsl)
+        log_compute_pipeline(d, reply, req.id, req.name, ncodeunits(req.wgsl), req.generation_ms)
+    end
+    lock(d.lock) do
+        for req in requests
+            d.pipelines[req.key] = (req.id, req.layout)
+        end
+    end
+    @debug "Compiled WGSL pipeline batch" count=length(requests) hits=count(pipeline_cache_hit, replies) bytes=batch.bytes seconds=(time_ns() - started) / 1e9
+    empty!(requests)
+    batch.bytes = 0
+    return nothing
+end
+
+function Mantle.buildpasspipelines!(d::WebGPUDevice, c::Mantle.Compile)
+    keys = get(d.info, "pipelineKeys", nothing)
+    # A Bonito page can still be running an older executor module.
+    keys === nothing && return Mantle.buildpasspipelines!(c)
+    batch = ComputePipelineBatch(d, Set{String}(keys), ComputePipelineRequest[], 0)
+    return task_local_storage(Mantle.buildpasspipelines!, batch) do
+        result = Mantle.buildpasspipelines!(c)
+        flush_compute_pipelines!(batch)
+        return result
+    end
+end
+
 """
     pipeline!(d, f, all_args, items; linear = false) -> (pipeline id, argument layout)
 
 The page's pipeline for `f` at the argument types of `all_args` (the function
 slot first) and work-group size `items`: compiled by Lava for WebGPU, printed as
 WGSL (for a split 1-D grid with `linear`, see [`kigrid`](@ref)), compiled by the
-page. A shader the page rejects is an error showing its messages next to the WGSL.
+page. A shader the page rejects is an error showing its compiler diagnostics.
 """
-function pipeline!(d::WebGPUDevice, @nospecialize(f), all_args::Tuple, items::Dims{3}; linear::Bool = false)
+@noinline Base.@nospecializeinfer function pipeline!(d::WebGPUDevice, @nospecialize(f),
+                   @nospecialize(all_args::Tuple), items::Dims{3}; linear::Bool = false, batch = nothing,
+                   background::Bool = false)
     tt = Tuple{map(Core.Typeof, Base.tail(all_args))...}
     key = (typeof(f), tt, items, linear)
     hit = lock(() -> get(d.pipelines, key, nothing), d.lock)
     hit === nothing || return hit
-    # In the newest world: a plan walked from an older one launches kernels
-    # defined since (a generated family `@eval`s its function while declaring).
-    compiled = Base.invokelatest(compilewebgpu, f, tt, items)::Lava.LavaGPUKernel
-    wgsl = Lava.spirv_to_wgsl(collect(reinterpret(UInt32, compiled.spirv_bytes)); heaps = length(d.heaps), linear)
-    id = lock(() -> (d.npipelines += 1), d.lock)
-    r = call(d, "createPipeline", d.id, id, wgsl, "main")
-    if !r["ok"]
-        numbered = join(("$(lpad(k, 4)) | $l" for (k, l) in enumerate(split(wgsl, '\n'))), "\n")
-        msgs = join(("line $(m["line"]):$(m["column"]) $(m["type"]): $(m["message"])" for m in r["messages"]), "\n")
-        error("the page rejected the WGSL of $(nameof(typeof(f))):\n$msgs\n\n$numbered")
+    if batch !== nothing
+        for req in batch.requests
+            req.key == key && return (req.id, req.layout)
+        end
     end
-    entry = (id, compiled.push_info)
+    started = time_ns()
+    heaps = length(d.heaps)
+    layout, shader = if background && Threads.nthreads(:default) > 1
+        # The host compiler can occupy the render thread even when calling it
+        # from a cooperative task. Only pure shader generation runs here.
+        fetch(Threads.@spawn generate_shader($f, $tt, $items, $heaps, $linear))
+    else
+        generate_shader(f, tt, items, heaps, linear)
+    end
+    wgsl = shader.source
+    id = lock(() -> (d.npipelines += 1), d.lock)
+    browser_started = time_ns()
+    generation_ms = (browser_started - started) / 1e6
+    @debug "Submitting WGSL compute pipeline" pipeline=id kernel=nameof(typeof(f)) workgroup=items bytes=ncodeunits(wgsl) generation_seconds=generation_ms / 1e3
+    if batch !== nothing
+        # Bound both the transfer and how much generated source a plan retains.
+        batch.bytes + ncodeunits(wgsl) > 2^20 && flush_compute_pipelines!(batch)
+        req = ComputePipelineRequest(key, id, layout, nameof(typeof(f)), wgsl, shader.digest, generation_ms)
+        push!(batch.requests, req)
+        batch.bytes += ncodeunits(wgsl)
+        length(batch.requests) >= 12 && flush_compute_pipelines!(batch)
+        return (id, layout)
+    end
+    # Large assets served through Bonito's proxy can arrive as a different
+    # response body. Use the same connection as the dispatches for proxied
+    # sessions. The executor still keys its pipeline cache by shader content.
+    local_assets = d.session.asset_server isa Union{Bonito.HTTPAssetServer,Bonito.ChildAssetServer}
+    r = if local_assets && haskey(d.info, "pipelineKeys") && ncodeunits(wgsl) >= 128*1024
+        bytes = Vector{UInt8}(codeunits(wgsl))
+        asset = Bonito.BinaryAsset(bytes, "text/plain")
+        url = Bonito.url(d.session, asset)
+        reply = call(d, "createPipeline", d.id, id, url, "main", shader.digest)
+        if haskey(reply, "sourceError")
+            @debug "Retrying WGSL over the Bonito connection" kernel=nameof(typeof(f)) reason=reply["sourceError"]
+            reply = call(d, "createPipeline", d.id, id, wgsl, "main")
+        end
+        reply
+    else
+        call(d, "createPipeline", d.id, id, wgsl, "main")
+    end
+    check_compute_pipeline(r, nameof(typeof(f)), wgsl)
+    log_compute_pipeline(d, r, id, nameof(typeof(f)), ncodeunits(wgsl), generation_ms)
+    @debug "Compiled WGSL compute pipeline" pipeline=id cached=pipeline_cache_hit(r) seconds=(time_ns() - browser_started) / 1e9
+    entry = (id, layout)
     lock(() -> (d.pipelines[key] = entry), d.lock)
     return entry
+end
+
+@noinline Base.@nospecializeinfer function generate_shader(@nospecialize(f), @nospecialize(tt), items, heaps, linear)
+    # A recorded plan can launch a kernel defined after its caller's world.
+    compiled = Base.invokelatest(compilewebgpu, f, tt, items)::Lava.LavaGPUKernel
+    return compiled.push_info, compute_wgsl(compiled.spirv_bytes, heaps, linear)
 end
 
 compilewebgpu(@nospecialize(f), @nospecialize(tt), items::Dims{3}) =
@@ -709,6 +1003,13 @@ function packargs(layout::Lava.PushConstantInfo, all_args::Tuple)
     return bytes
 end
 
+"""Capture the compute pipeline builds for `f`'s launches without recording or running work."""
+function capture_compute_pipelines(f, d::WebGPUDevice)
+    builds = Function[]
+    task_local_storage(f, capture_compute_pipelines, (d, builds))
+    return builds
+end
+
 function KI.launch(k::KI.Kernel{WebGPUDevice}, groups::Dims{3}, items::Dims{3}, args::Tuple; kwargs...)
     isempty(kwargs) || throw(ArgumentError("WebGPU kernels take no launch keywords, got $(keys(kwargs))"))
     d = k.backend
@@ -724,6 +1025,15 @@ function KI.launch(k::KI.Kernel{WebGPUDevice}, groups::Dims{3}, items::Dims{3}, 
         groups = kagrid(d, (prod(groups),))
     else
         groups, linear = kigrid(d, groups)
+    end
+    capture = get(task_local_storage(), capture_compute_pipelines, nothing)
+    if capture !== nothing && capture[1] === d
+        # Adapted arguments are values. Pipeline compilation uses their types,
+        # so the builds can run later without touching the original buffers.
+        let f = k.kern, dispatch_items = items, dispatch_linear = linear
+            push!(capture[2], () -> pipeline!(d, f, all_args, dispatch_items; linear=dispatch_linear, background=true))
+        end
+        return nothing
     end
     pipeline, layout = pipeline!(d, k.kern, all_args, items; linear)
     cmd = Dict{String, Any}("op" => "dispatch", "pipeline" => pipeline, "groups" => collect(groups),
@@ -746,8 +1056,15 @@ Mantle.ledger(d::WebGPUDevice) = d.ledger
 Mantle.devicebuffertype(::WebGPUDevice, ::Type{T}, N::Int) where {T} = Lava.HeapDeviceArray{T, N}
 Mantle.argtype(d::WebGPUDevice, @nospecialize(y)) = Core.Typeof(KI.argconvert(d, y))
 Mantle.isdevicearray(::Lava.HeapDeviceArray) = true
+Mantle.isdevicearray(::WebGPUArray) = true
 # A heap offset is an address: integers computed from it reach the heap intrinsics.
 Mantle.devicepointer(::Type{<:Lava.HeapPtr}) = true
+
+# The typed heap load takes an address split across two integer arguments.
+# The access walk must retain the read when a large generated load is invoked
+# as its own function with no pointer-typed parameter.
+Mantle.argument_usage(::Type{typeof(Lava.heapread)}, ::Type{<:Tuple{Type,UInt32,UInt32}}) =
+    (Mantle.NOTOUCH, Mantle.READ, Mantle.READ)
 
 # Lava's interpreter, as on Vulkan: the WebGPU target changes the code Lava emits,
 # not the method table a kernel is inferred through.
@@ -764,7 +1081,10 @@ it leads back to the argument the pointer came from.
 function Mantle.intrinsic_usage(::WebGPUAPI, name::Symbol)
     s = String(name)
     (s == "_lava_wgpu_heapload" || s == "_lava_wgpu_atomic_load") && return Mantle.READ
-    (s == "_lava_wgpu_heapstore" || s == "_lava_wgpu_atomic_store") && return Mantle.WRITE
+    # A packed store preserves neighbouring bytes with atomics but does not
+    # read the destination element or carry its old value across iterations.
+    s in ("_lava_wgpu_heapstore", "_lava_wgpu_atomic_store", "_lava_wgpu_atomic_storepart") &&
+        return Mantle.WRITE
     startswith(s, "_lava_wgpu_atomic_") && return Mantle.ATOMIC
     return nothing
 end
@@ -834,8 +1154,21 @@ Mantle.capacity(d::WebGPUDevice) = length(d.heaps) * d.heapsize - d.ledger.bytes
 """Bytes no range of any heap is given to."""
 heapfree(d::WebGPUDevice) = lock(() -> sum(freebytes, d.allocators), d.lock)
 Mantle.maxalloc(d::WebGPUDevice) = d.heapsize - HEAP_ALIGN
-# A block per eighth of the heap: the default 64 MiB is a quarter of a default heap.
-Mantle.blocksize(d::WebGPUDevice) = d.heapsize ÷ 8
+# Keep pool growth proportional on small heaps and avoid reserving oversized
+# blocks for each pool kind on larger adapters.
+Mantle.blocksize(d::WebGPUDevice) = min(d.heapsize ÷ 8, 64 << 20)
+
+# A pool block occupies one contiguous range of one WebGPU heap. Report that
+# limit to placement so it can split an arena across several blocks.
+function Mantle.arenaroom(p::Mantle.Pool, d::WebGPUDevice, kind)
+    lock(p.lock) do
+        span = lock(d.lock) do
+            maximum(h -> maximum(length, h.free; init = 0), d.allocators; init = 0)
+        end
+        grow = span >= Mantle.blocksize(d) ? span : 0
+        return max(Mantle.arenaof(p, kind).bytes, Mantle.largestfree(p, kind), grow)
+    end
+end
 
 # Every heap is one of the GPU's buffers; together they are what the device may use.
 function Mantle.probe_device_memory_budget(d::WebGPUDevice)
@@ -953,9 +1286,10 @@ struct WebGPUDispatch
     groups::Dims{3}
     items::Dims{3}
     argoff::Int
+    count::Union{Nothing,Mantle.DeviceRange}
 end
 
-Mantle.argsize(d::WebGPUDispatch) = argblockbytes(d.layout)
+Mantle.argsize(d::WebGPUDispatch) = argblockbytes(d.layout) + (d.count === nothing ? 0 : 8)
 Mantle.indirectindex(::WebGPUDispatch) = 0
 Mantle.workgroupsize(d::WebGPUDispatch) = UInt32(prod(d.items))
 
@@ -984,8 +1318,8 @@ The pipeline and launch geometry of `dispatch`, as an eager launch would work th
 out: a `@kernel` through its launch shape (one-dimensional workgroups, as
 `KI.launch` gives Lava's KernelAbstractions lowering), a plain kernel through
 KernelInterface's extents. A call goes to core's `bake`, and so does a
-`DeviceRange` without a ceiling, whose count is read on the host: there is no
-indirect dispatch here yet, and `recordspass` keeps such a plan walked.
+`DeviceRange` without a ceiling, whose count is read on the host while walking
+the plan. A recorded, gated 1-D range can resolve its count on the device.
 """
 function Mantle.compile_dispatch(c::Mantle.Compile{WebGPUDevice}, d::Mantle.Dispatch,
                                  argoff::Int, indirect::Int)
@@ -1023,8 +1357,13 @@ function Mantle.compile_dispatch(c::Mantle.Compile{WebGPUDevice}, d::Mantle.Disp
     all(<=(maxgroups), groups) || throw(ArgumentError(
         "dispatch!: $(groups) workgroups of $(items) invocations; a WebGPU dispatch has at most " *
         "$maxgroups workgroups per dimension"))
-    pipeline, layout = pipeline!(dev, f, all_args, items; linear)
-    return WebGPUDispatch(dev, pipeline, layout, f, ctx, d.args, groups, items, argoff)
+    batch = get(task_local_storage(), Mantle.buildpasspipelines!, nothing)
+    batch !== nothing && batch.device !== dev && (batch = nothing)
+    pipeline, layout = pipeline!(dev, f, all_args, items; linear, batch)
+    count = d.ndrange isa Mantle.DeviceRange && get(dev.info, "countedGates", false) &&
+            groups[2] == groups[3] == 1 && eltype(d.ndrange.count) in (Int32, UInt32) &&
+            length(dev.heaps) + 2 <= limit(dev, "maxStorageBuffersPerShaderStage") ? d.ndrange : nothing
+    return WebGPUDispatch(dev, pipeline, layout, f, ctx, d.args, groups, items, argoff, count)
 end
 
 # ── recordings ──
@@ -1080,6 +1419,16 @@ Mantle.emitupdate!(e::WebGPURun, pl::Mantle.Plan, ::Mantle.PassPlan) =
 Mantle.emitdispatch!(::WebGPURun, d, ::AbstractString) = (d(); nothing)
 Mantle.emitloophead!(::WebGPURun, ::Mantle.Plan, ::AbstractUnitRange) = nothing
 
+# Walked passes read their gate in queue order. Recorded passes encode an
+# indirect dispatch and resolve the flag at replay.
+function Mantle.withpredicate(f, e::WebGPURun, (pred, i)::Tuple{Any, Int})
+    gate = Mantle.storage(pred)
+    bytes = readheap(e.dev, heapindex(gate), heapoffset(gate) + i * sizeof(Mantle.Predicate),
+                     sizeof(Mantle.Predicate); synchronize = true)
+    iszero(only(reinterpret(Mantle.Predicate, bytes)).go) && return nothing
+    return f()
+end
+
 """`n` host bytes at `p` to byte `offset` of array `a`, as a write of the run's batch."""
 function storeheap!(e::WebGPURun, a::WebGPUArray, offset::Int, p::Ptr{Cvoid}, n::Int)
     bytes = Vector{UInt8}(undef, n)
@@ -1102,10 +1451,11 @@ function Mantle.emitinline!(::WebGPURun, am::Mantle.ArgMemory{WebGPUArgs}, off::
 end
 
 """The commands of one recorded piece, collected by the plan's walk."""
-struct WebGPURecorder
+mutable struct WebGPURecorder
     plan::Mantle.Plan
     passes::UnitRange{Int}
     commands::Vector{Dict{String, Any}}
+    gate::Union{Nothing,NTuple{2,Int}}
 end
 
 """A recorded piece, kept by the page under `id`."""
@@ -1118,15 +1468,28 @@ Mantle.recordsplans(::WebGPUDevice) = true
 # A profiled plan is walked: a replay has no pass walk to time.
 Mantle.recordsprofiled(::WebGPUDevice) = false
 
-"""Whether a declared dispatch can be recorded: not a `DeviceRange` without a ceiling, whose count the host reads."""
+"""Whether a declared dispatch has a fixed launch ceiling for replay."""
 recordabledispatch(d::Mantle.Dispatch) = !(d.ndrange isa Mantle.DeviceRange && d.ndrange.max === nothing)
 recordabledispatch(d) = true
 Mantle.recordspass(::WebGPUDevice, p::Mantle.Pass) =
-    (p.kind === :compute || p.kind === :update) && all(recordabledispatch, p.dispatches)
+    (p.kind === :compute || (p.kind === :update && p.predicate === nothing)) &&
+    all(recordabledispatch, p.dispatches) &&
+    (p.predicate === nothing || all(d -> d isa Mantle.Dispatch && !Mantle.iscall(d), p.dispatches))
 
 function Mantle.openrecording(d::WebGPUDevice, pl::Mantle.Plan, passes::AbstractUnitRange)
-    pl.profile && return nothing
-    return WebGPURecorder(pl, first(passes):last(passes), Dict{String, Any}[])
+    Mantle.recordable(d, pl) || return nothing
+    return WebGPURecorder(pl, first(passes):last(passes), Dict{String, Any}[], nothing)
+end
+
+function Mantle.withpredicate(f, e::WebGPURecorder, (pred, i)::Tuple{Any,Int})
+    gate = Mantle.storage(pred)
+    previous = e.gate
+    e.gate = (heapindex(gate), heapoffset(gate) + i * sizeof(Mantle.Predicate))
+    try
+        return f()
+    finally
+        e.gate = previous
+    end
 end
 
 """Pack `cd`'s arguments into the plan's argument memory, noting its heap pointers for move patches."""
@@ -1139,6 +1502,23 @@ function Mantle.emitdispatch!(e::WebGPURecorder, cd::WebGPUDispatch, name::Abstr
     cmd = dispatchcommand(cd, am.store.id)
     cmd["argoffset"] = cd.argoff
     cmd["name"] = String(name)
+    e.gate === nothing || (cmd["gate"] = collect(e.gate))
+    if e.gate !== nothing && cd.count !== nothing
+        range = cd.count
+        count = Mantle.resolve(cd.dev, range.count)
+        checkbounds(count, range.at)
+        offset = heapoffset(count) + (range.at - 1) * sizeof(eltype(count))
+        ptr = Lava.HeapPtr{eltype(count)}(UInt32(offset), UInt32(heapindex(count)))
+        # Store the counter address with the other recorded pointers, so a
+        # move of its buffer updates the gate along with the dispatch.
+        word = argblockbytes(cd.layout)
+        GC.@preserve am begin
+            slot = block + word
+            Mantle.storebits!(slot, ptr)
+            Mantle.notepacked!(Mantle.PatchSite(e.plan, am, am.ptr), typeof(ptr), slot)
+        end
+        cmd["counter"] = [cd.argoff + word, prod(cd.items), range.max, Int(eltype(count) === Int32)]
+    end
     push!(e.commands, cmd)
     return nothing
 end
@@ -1181,10 +1561,9 @@ function profiledispatches(f, d::WebGPUDevice)
 end
 
 """
-One submission of recorded pieces, in order: a loop body's pieces once per
-iteration (core's `submissionbatches`), all encoded into one command buffer, behind
-the open batch, which holds what was launched before the run and the run's host
-stores.
+Replay recorded pieces in order, after the open batch of pending launches and
+host stores. A loop body's pieces appear once per iteration (core's
+`submissionbatches`). The browser splits long replays across command buffers.
 """
 function Mantle.submitrecording!(d::WebGPUDevice, pieces::Union{Tuple{WebGPURecording}, Vector{WebGPURecording}}, _)
     commands, args = takebatch!(d)
@@ -1210,6 +1589,7 @@ walk filled and the readbacks' mirror copies.
 function submitrun!(d::WebGPUDevice, pl::Mantle.Plan)
     if pl.recording === nothing
         foreach(cmd -> enqueue!(d, cmd), mirrorcopies(d, pl))
+        foreach(s -> queue_canvas_present!(d, s.win), pl.graph.surfaces)
         Mantle.flush!(d)
     else
         Mantle.submitplan!(d, pl, nothing, WebGPURecording)
@@ -1217,5 +1597,16 @@ function submitrun!(d::WebGPUDevice, pl::Mantle.Plan)
     return Mantle.fence(d)
 end
 Mantle.closerun!(d::WebGPUDevice, pl::Mantle.Plan, ::Union{WebGPURun, Nothing}) = submitrun!(d, pl)
+
+include("graphics.jl")
+
+function __init__()
+    # A browser device needs an explicit session or Electron window. Listing
+    # available backends only reports a default that the caller already made.
+    Mantle.register_backend!(; name = :webgpu, priority = 20) do
+        d = Mantle.existingdefault(WebGPUAPI())
+        d !== nothing && !Mantle.retired(d) && isopen(d.session) ? d : nothing
+    end
+end
 
 end

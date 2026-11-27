@@ -9,8 +9,8 @@ whose closures capture `Core.Box`es that do not compile for a GPU, and whose
 rescaling divides by `maxabs`: drivers lower `x / m` to `x * (1/m)`, and for `m`
 near `floatmax` that reciprocal is subnormal and flushed to zero (lavapipe, RADV),
 so the norm comes out 0. Here a device with Float64 accumulates Float16 and
-Float32 in it, where nothing overflows; otherwise the sum is rescaled by `maxabs`,
-dividing by `sqrt(maxabs)` twice, whose reciprocal is always normal. `p` other
+Float32 in it, where nothing overflows; otherwise the sum is rescaled by a
+normal power of two based on the largest magnitude. `p` other
 than 0, 1, 2 and ±Inf needs transcendental math that is inaccurate on some drivers
 (RDNA3.5), so it runs on the host.
 """
@@ -35,10 +35,14 @@ end
 function devicenorm(v::AbstractArray, p::Real, ::Type{RT}, ::Type{A}) where {RT, A}
     p == 1 && return convert(RT, sum(x -> A(abs(x)), v; init = zero(A)))
     maxabs = A(maximum(abs, v))
-    (iszero(maxabs) || isinf(maxabs)) && return convert(RT, maxabs)
+    (iszero(maxabs) || !isfinite(maxabs)) && return convert(RT, maxabs)
     # Unscaled when the sum of squares can neither overflow nor underflow.
-    isfinite(length(v) * maxabs^2) && !iszero(maxabs^2) &&
-        return convert(RT, sqrt(sum(x -> A(abs2(x)), v; init = zero(A))))
-    sm = sqrt(maxabs)
-    return convert(RT, maxabs * sqrt(sum(x -> ((A(abs(x)) / sm) / sm)^2, v; init = zero(A))))
+    squarescale = maxabs^2
+    isfinite(length(v) * squarescale) && squarescale >= floatmin(A) &&
+        return convert(RT, sqrt(sum(x -> A(abs(x))^2, v; init = zero(A))))
+    minexp = exponent(floatmin(A))
+    shift = clamp(-exponent(maxabs), minexp, -minexp)
+    scale = ldexp(one(A), shift)
+    scaled = sqrt(sum(x -> (A(abs(x)) * scale)^2, v; init = zero(A)))
+    return convert(RT, ldexp(scaled, -shift))
 end

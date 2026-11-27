@@ -117,8 +117,9 @@ readback_target(dev::Device, t, ::Type) = throw(ArgumentError(
 """
     restingusage(plan, r) -> Union{Type,Nothing}
 
-The destination of the last transition `plan` makes on `r`, in scheduled order:
-the layout `r` rests in between runs. `nothing` when the plan never touches `r`.
+The layout `r` rests in between runs, from the last transition or, on a backend
+with implicit transitions, from the last declared use. `nothing` when the plan
+never touches `r`.
 """
 function restingusage(pl::Plan, r)
     id = get(pl.graph.ids, r, nothing)
@@ -126,6 +127,10 @@ function restingusage(pl::Plan, r)
     rest = nothing
     for pp in pl.passes, t in pp.pre
         t.resource == id && (rest = t.to)
+    end
+    rest === nothing || return rest
+    for pp in reverse(pl.passes), (resource, usage) in pp.pass.usages
+        resource == id && return usage
     end
     return rest
 end
@@ -160,6 +165,9 @@ Whether this backend can run a [`MeshPipeline`](@ref) (Metal mesh pipelines,
 geometry body. `false` by default.
 """
 supports_mesh_pipeline(backend) = false
+
+"""Whether a pipeline with a geometry stage can be drawn on this backend."""
+supports_geometry_pipeline(backend) = supports_geometry_stage(backend) || supports_mesh_pipeline(backend)
 
 """
     use_bindings!(handle, compiled, bindings)

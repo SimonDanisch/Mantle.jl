@@ -27,10 +27,11 @@ end
         @test !isready(f)
         @test !isready(fv)
         pl = Mantle.Plan(g; budget=Inf)
-        # Poison every destination on the host before submission: a skipped
-        # transfer must fail even if the pool happens to hold an earlier result.
+        # Poison the staging data before submission, including on devices whose
+        # readback stores are not directly host mapped.
         for r in g.readbacks
-            fill!(Mantle.hostview(dev, r.buffer.store), typemin(Int32))
+            store = r.buffer.store
+            Mantle.upload!(dev, store, 1, fill(typemin(Int32), length(store)))
         end
         @test_throws ArgumentError Mantle.Plan(g; budget=Inf)
         Mantle.record!(pl)

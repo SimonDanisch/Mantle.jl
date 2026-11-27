@@ -96,7 +96,11 @@ end
         # Each backend parsed them itself: Metal had no `:clamp_border` and no
         # `anisotropy`, and Vulkan refused an unknown one with a bare `error`.
         for filter in (:nearest, :linear), wrap in (:repeat, :clamp, :mirror, :clamp_border)
-            @test Mantle.Sampler(dev; filter, wrap, anisotropy = 4) isa Mantle.Sampler
+            if wrap === :clamp_border && Mantle.syncbackend(dev) isa Mantle.WebGPUAPI
+                @test_throws ArgumentError Mantle.Sampler(dev; filter, wrap, anisotropy = 4)
+            else
+                @test Mantle.Sampler(dev; filter, wrap, anisotropy = 4) isa Mantle.Sampler
+            end
         end
         @test_throws ArgumentError Mantle.Sampler(dev; filter = :cubic)
         @test_throws ArgumentError Mantle.Sampler(dev; wrap = :wrap)

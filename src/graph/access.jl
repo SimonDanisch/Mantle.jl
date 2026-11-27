@@ -973,6 +973,14 @@ function storetouch(ir, st::State, rest, target::Taint)
     return slottouch(claim, target)
 end
 
+# Scalar math from Lava's device overrides. The suffix is the scalar LLVM type.
+const MEMORYLESS_LLVM_MATH = Set(Symbol("llvm.", op, ".", ty)
+    for op in ("sqrt", "fabs", "floor", "ceil", "round", "rint", "roundeven",
+               "trunc", "fma", "fmuladd", "minnum", "maxnum", "minimum", "maximum",
+               "copysign", "sin", "cos", "exp", "exp2", "log", "log2", "log10", "pow",
+               "sinh", "cosh")
+    for ty in ("f16", "f32", "f64"))
+
 """
     intrinsic_usage(name::Symbol) -> Touch or nothing
 
@@ -984,9 +992,7 @@ define `intrinsic_usage(::Symbol)`: with two backends compiled (a Mac) that is o
 method defined twice, which precompilation refuses.
 """
 function intrinsic_usage(name::Symbol)
-    # An outlined lookup can pass scalar provenance from a captured table into
-    # sqrt. LLVM's scalar square root has no memory access, on every backend.
-    name in (Symbol("llvm.sqrt.f32"), Symbol("llvm.sqrt.f64")) && return NOTOUCH
+    name in MEMORYLESS_LLVM_MATH && return NOTOUCH
     for api in (VulkanAPI(), MetalAPI(), WebGPUAPI())
         u = intrinsic_usage(api, name)
         u === nothing || return u

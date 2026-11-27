@@ -130,3 +130,7 @@ devicearray(x, ::Type{T}, dims::Dims; kw...) where {T} =
 devicearray(x, ::Type{T}, dims::Integer...; kw...) where {T} =
     devicearray(x, T, Dims(dims); kw...)
 
+"""Change a device pointer's element type while preserving its address."""
+@inline retype_pointer(::Type{T}, p::Ptr) where {T} = Ptr{T}(p)
+@inline retype_pointer(::Type{T}, p::Core.LLVMPtr{S,A}) where {T,S,A} =
+    reinterpret(Core.LLVMPtr{T,A}, p)

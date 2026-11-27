@@ -46,6 +46,14 @@ toolarge(dev) = Mantle.maxalloc(dev) < typemax(Int) ? Mantle.maxalloc(dev) + 1 :
 end
 
 @testset "a tolerated allocation failure leaves no validation messages" begin
+    if Mantle.syncbackend(TESTBACKEND) isa Mantle.WebGPUAPI
+        # WebGPU validation runs on the page the device belongs to.
+        # Synchronization reports any validation error recorded there.
+        @test Mantle.trydevicearray(TESTBACKEND, UInt8, toolarge(TESTBACKEND)) === nothing
+        @test Mantle.waitidle(TESTBACKEND) === nothing
+        return
+    end
+
     status, out = infreshprocess(raw"""
         dev = Mantle.reset_device!(Mantle.Device(BACKEND); debug = DebugConfig(validation = true))
         Mantle.validating(dev) || exit(3)

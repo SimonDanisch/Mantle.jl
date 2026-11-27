@@ -29,6 +29,16 @@ Release `surface` once nothing in flight uses it, before its platform window goe
 """
 function closesurface! end
 
+"""Pixel density and input events of a WebGPU canvas window."""
+function canvasdensity end
+function canvasevents end
+
+"""Give a window the latest size reported by its presentation frontend."""
+pollwindow!(w::Window) = nothing
+
+"""Wait for another presentation opportunity when a frontend needs pacing."""
+pacewindow!(w::Window) = nothing
+
 """
     platformwindow(width, height, title) -> GLFW.Window
 

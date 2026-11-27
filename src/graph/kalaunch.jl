@@ -322,6 +322,12 @@ argument block (`argcursor`) and each device-sized dispatch its indirect slot
 function run!(::Pipelines, c::Compile)
     # `invokelatest` for the reason the dispatch loop below gives.
     Base.invokelatest(compilekernels!, c)
+    return buildpasspipelines!(c.graph.dev, c)
+end
+
+buildpasspipelines!(dev, c::Compile) = buildpasspipelines!(c)
+
+function buildpasspipelines!(c::Compile)
     argcursor = 0
     indcursor = 0
     for p in ordered(c)
