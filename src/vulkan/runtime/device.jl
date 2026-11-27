@@ -204,8 +204,9 @@ CoopMat2Caps() = CoopMat2Caps(false, false, false, false, false, false, false, f
 """
     query_shader_cores(phys_dev) -> (cores, warps)
 
-SM/CU count and warps per SM, or `(0, 0)` where the device does not report
-them; kernels size grids to fill the device from it. Physical-device property
+SM/CU count and the subgroups one of them holds (warps per SM; SIMDs times
+wavefronts per SIMD on a compute unit), or `0` for what the device does not
+report; kernels size grids to fill the device from it. Physical-device property
 queries (vendor coverage as in llama.cpp), so neither extension is enabled, but
 the chained struct is only filled for an advertised extension. The chain also
 needs an instance of API 1.1 or later (`LavaDevice` asks for 1.4); below that
@@ -223,6 +224,11 @@ function query_shader_cores(phys_dev)
         p = VK.get_physical_device_properties_2(
                 phys_dev, VK.PhysicalDeviceShaderCoreProperties2AMD).next
         smcount = Int(p.active_compute_unit_count)
+        if has_extension(phys_dev, "VK_AMD_shader_core_properties")
+            q = VK.get_physical_device_properties_2(
+                    phys_dev, VK.PhysicalDeviceShaderCorePropertiesAMD).next
+            warps = Int(q.simd_per_compute_unit) * Int(q.wavefronts_per_simd)
+        end
     end
     return smcount, warps
 end
