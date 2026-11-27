@@ -40,7 +40,7 @@ MantleROCmExt = "AMDGPU"
 
 [sources]
 Hikari = {url = "https://github.com/JuliaGraphics/Hikari.jl", rev = "d9ef5fc0ce71166cd667c9940e2c76146db22959"}
-Lava = {url = "https://github.com/SimonDanisch/Lava.jl", rev = "d52a8bd847c2f3fb06459ff849ae8db5c75b58bf"}
+Lava = {url = "https://github.com/SimonDanisch/Lava.jl", rev = "91d9abce474513537e152a380e08d0cfa5effbda"}
 # The graphics compiler uses Metal.jl's stage compiler extension API.
 Metal = {url = "https://github.com/JuliaGPU/Metal.jl", rev = "main"}
 Raycore = {url = "https://github.com/JuliaGeometry/Raycore.jl", rev = "master"}

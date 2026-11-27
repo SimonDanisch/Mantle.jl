@@ -202,6 +202,13 @@ const PURE_OPS = (:getfield, :setfield!, :tuple, :bitcast, :add_ptr, :sub_ptr,
                   :ptrtoint, :inttoptr, :getproperty, :nfields, :sizeof,
                   :arraysize, :memorynew, :memoryrefoffset)
 
+# Newer inference stores proven bindings directly in the statement.
+resolve_access_binding(@nospecialize(x)) = x
+@static if isdefined(Core, :BindingPartition) && isdefined(Base.Compiler, :partition_singleton)
+    resolve_access_binding(x::Core.BindingPartition) =
+        something(Base.Compiler.partition_singleton(x), x)
+end
+
 opname(@nospecialize(f)) = nothing
 opname(f::GlobalRef) = f.name
 opname(f::Core.IntrinsicFunction) = Symbol(string(f))
@@ -862,7 +869,7 @@ A builtin, an intrinsic, or a call the optimiser left dynamic. `READ_OPS`,
 """
 function calltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
                     args::Vector{Any}, @nospecialize(tt), depth::Int)
-    f = args[1]
+    f = resolve_access_binding(args[1])
     name = opname(f)
     rest = @view args[2:end]
     out = Taint()
@@ -945,8 +952,8 @@ modulemember(@nospecialize(x)) = nothing
 modulemember(x::GlobalRef) = x
 # `getglobal(M, :name)`: what `M.name` becomes when the optimiser cannot resolve it.
 function modulemember(x::Expr)
-    Meta.isexpr(x, :call, 3) && opname(x.args[1]) === :getglobal || return nothing
-    mod, name = constmodule(x.args[2]), x.args[3]
+    Meta.isexpr(x, :call, 3) && opname(resolve_access_binding(x.args[1])) === :getglobal || return nothing
+    mod, name = constmodule(resolve_access_binding(x.args[2])), x.args[3]
     mod isa Module && name isa QuoteNode && name.value isa Symbol || return nothing
     return GlobalRef(mod, name.value)
 end
