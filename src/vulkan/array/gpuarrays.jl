@@ -37,9 +37,12 @@ Adapt.adapt_structure(::LavaAdaptor, r::Base.RefValue{<:Union{DataType, Type}}) 
     LavaRefType{r[]}()
 
 # `T.(args...)`: replace the type with a closure that calls it.
-Adapt.adapt_structure(to::LavaAdaptor,
-                      bc::Base.Broadcast.Broadcasted{Style, <:Any, Type{T}}) where {Style, T} =
-    Base.Broadcast.Broadcasted{Style}((x...) -> T(x...), Adapt.adapt(to, bc.args), bc.axes)
+lava_broadcast_function(to::LavaAdaptor, f) = Adapt.adapt(to, f)
+lava_broadcast_function(::LavaAdaptor, ::Type{T}) where T = (x...) -> T(x...)
+
+Adapt.adapt_structure(to::LavaAdaptor, bc::Base.Broadcast.Broadcasted{Style}) where Style =
+    Base.Broadcast.Broadcasted{Style}(lava_broadcast_function(to, bc.f),
+                                      Adapt.adapt(to, bc.args), bc.axes)
 
 struct LavaArrayStyle{N} <: GPUArrays.AbstractGPUArrayStyle{N} end
 
@@ -389,7 +392,17 @@ function LinearAlgebra.norm(v::LavaArray{T}, p::Real=2) where T
     p == -Inf && return convert(RT, minimum(abs, v))
     # Other p-norms need transcendental math that is inaccurate on some Vulkan
     # drivers (RDNA3.5), so they run on the host.
-    (p != 1 && p != 2) && return convert(RT, LinearAlgebra.norm(Array(v), p))
+    if p != 1 && p != 2
+        data = Array(v)
+        if isfinite(p) && p > 1
+            host_scale = Float64(maximum(abs, data))
+            if isfinite(host_scale) && host_scale > 0 && host_scale^p < floatmin(Float64)
+                magnitudes = (Float64(abs(x)) / host_scale for x in data)
+                return convert(RT, host_scale * LinearAlgebra.norm(magnitudes, p))
+            end
+        end
+        return convert(RT, LinearAlgebra.norm(data, p))
+    end
     # Float16/Float32 and their complex types accumulate in Float64, which cannot overflow.
     if RT === Float32 || RT === Float16
         p == 1 && return RT(sum(x -> Float64(abs(x)), v; init = 0.0))

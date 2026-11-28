@@ -14,6 +14,15 @@ include(gpuarrays_testsuite)
 # needs the type constructor itself, without its parameters.
 const AT = Base.typename(typeof(Mantle.devicearray(TESTBACKEND, Float32, 1))).wrapper
 
+const SUPPORTS_ISBITS_UNION = try
+    AT(Union{Int32,Float32}[Int32(1), 2.0f0])
+    true
+catch err
+    err isa ArgumentError || rethrow()
+    false
+end
+TestSuite.supports_isbits_union(::Type{<:AT}) = SUPPORTS_ISBITS_UNION
+
 # Supported element types — the full set, less Float64 where the device has none.
 TestSuite.supported_eltypes(::Type{<:AT}) = testeltypes(Int16, Int32, Int64,
                                                         Float16, Float32, Float64,
@@ -80,6 +89,7 @@ function effective_skip()
         union!(skip, LAVAPIPE_CRASH_SKIP)
     end
     nameof(AT) === :MtlArray && push!(skip, "indexing scalar")
+    SUPPORTS_ISBITS_UNION || push!(skip, "unions")
     return skip
 end
 

@@ -46,7 +46,7 @@ include(joinpath(@__DIR__, "testbackend.jl"))
         Da, Db = Diagonal(Mantle.devicearray(TESTBACKEND, copy(ha))), Diagonal(Mantle.devicearray(TESTBACKEND, copy(hb)))
         C6 = Mantle.devicearray(TESTBACKEND, copy(hC6))
         LinearAlgebra.mul!(C6, Da, Db, T(2), T(3))
-        @test Array(C6) ≈ 2 .* Diagonal(ha) * Diagonal(hb) .+ 3 .* hC6
+        @test Array(C6) ≈ Matrix(Diagonal(T(2) .* ha .* hb)) .+ T(3) .* hC6
         C7 = Mantle.devicearray(TESTBACKEND, fill(T(NaN), n, n))
         LinearAlgebra.mul!(C7, Da, Db, one(T), zero(T))
         @test Array(C7) ≈ Diagonal(ha) * Diagonal(hb)

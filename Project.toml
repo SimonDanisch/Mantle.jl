@@ -39,10 +39,10 @@ AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
 MantleROCmExt = "AMDGPU"
 
 [sources]
-# GPUArrays 12.3.0 with its union-array conformance expectation corrected.
-GPUArrays = {url = "https://github.com/SimonDanisch/GPUArrays.jl", rev = "a3421f68ae7e47dda856789124aab41056fb2aa6"}
+# GPUArrays 12.3.0 with capability-aware union-array conformance tests.
+GPUArrays = {url = "https://github.com/SimonDanisch/GPUArrays.jl", rev = "7290db5ea73f8e5f60da6f2306eee38a7b4eeb4b"}
 Hikari = {url = "https://github.com/JuliaGraphics/Hikari.jl", rev = "d9ef5fc0ce71166cd667c9940e2c76146db22959"}
-Lava = {url = "https://github.com/SimonDanisch/Lava.jl", rev = "89b4e0c563c954ea640090ee145043c188f70ac8"}
+Lava = {url = "https://github.com/SimonDanisch/Lava.jl", rev = "cfc69b7359d7b4d25c39c5ca3bf531e1e849b68d"}
 # The graphics compiler uses Metal.jl's stage compiler extension API.
 Metal = {url = "https://github.com/JuliaGPU/Metal.jl", rev = "main"}
 Raycore = {url = "https://github.com/JuliaGeometry/Raycore.jl", rev = "master"}

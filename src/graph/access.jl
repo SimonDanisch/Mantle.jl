@@ -816,16 +816,23 @@ function invoketaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
     ci = stmt.args[1]
     mi = ci isa Core.CodeInstance ? ci.def : ci
     sig = mi isa Core.MethodInstance ? mi.specTypes : nothing
-    callargs = stmt.args[2:end]
+    callargs = @view stmt.args[2:end]
     # A call that cannot return (`throw_boundserror` and every other thrower) is an
     # abort path, reached from most kernels' bounds checks. A store before the throw
     # cannot be observed by a later pass, so it needs no barrier.
     tt === Union{} && return Taint()
-    inner = sig === nothing ? nothing : signaturetouches(w, sig, depth + 1)
+    inner = nothing
+    summarized = false
     out = Taint()
     for (j, a) in enumerate(callargs)
         at = operandtaint(ir, st, a)
         isempty(at) && continue
+        # A call over kernel-local values cannot touch a dispatched resource.
+        # This includes the heap temporaries in unreachable error reporting.
+        if !summarized
+            inner = sig === nothing ? nothing : signaturetouches(w, sig, depth + 1)
+            summarized = true
+        end
         if inner === nothing
             # `signaturetouches` found no answer: no single method, `Union{}`,
             # recursion, or past the depth limit.
