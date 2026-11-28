@@ -139,7 +139,7 @@ function videoimage(ctx, pins, profile, coded, display, usage; families=UInt32[]
 end
 
 function videodecoder(::Type{CodecDecoder{S,E}}, ctx, data; chroma=false) where {S,E}
-    ctx.video_decode_available || error("device has no video decode support")
+    ctx.video_decode_available || throw(ArgumentError("device has no video decode support"))
     D = CodecDecoder{S,E}
     cfg = decoderconfig(D, data)
     profile = decoderprofile(D)
