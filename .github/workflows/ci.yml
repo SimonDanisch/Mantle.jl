@@ -16,17 +16,20 @@ concurrency:
 
 jobs:
   test:
-    name: ${{ matrix.name }} tests (Julia ${{ matrix.julia }})
+    name: ${{ matrix.name }} (Julia ${{ matrix.julia }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { julia: '1.12', name: Lavapipe, backend: vulkan, os: ubuntu-24.04 }
-          - { julia: '1.13', name: Lavapipe, backend: vulkan, os: ubuntu-24.04 }
-          - { julia: '1.14', name: Lavapipe, backend: vulkan, os: ubuntu-24.04 }
-          - { julia: '1.13', name: Metal, backend: metal, os: macos-26 }
+          - { julia: '1.12', name: Lavapipe tests, backend: vulkan, os: ubuntu-24.04, software_mesh: false }
+          - { julia: '1.13', name: Lavapipe tests, backend: vulkan, os: ubuntu-24.04, software_mesh: false }
+          - { julia: '1.14', name: Lavapipe tests, backend: vulkan, os: ubuntu-24.04, software_mesh: false }
+          # The hosted Metal device can exercise mesh expansion through compute and
+          # rasterization. The full Metal suite requires a native Metal 4 device.
+          - { julia: '1.13', name: Lavapipe mesh fallback, backend: vulkan, os: ubuntu-24.04, software_mesh: true }
+          - { julia: '1.13', name: Metal mesh fallback, backend: metal, os: macos-26, software_mesh: true }
     steps:
       - uses: actions/checkout@v4
       - name: Install Vulkan loader and virtual display
@@ -52,9 +55,10 @@ jobs:
         env:
           MANTLE_TEST_LAVAPIPE: ${{ matrix.backend == 'vulkan' && 'true' || 'false' }}
           MANTLE_TEST_METAL: ${{ matrix.backend == 'metal' && 'true' || 'false' }}
+          MANTLE_TEST_SOFTWARE_MESH: ${{ matrix.software_mesh && 'true' || 'false' }}
           JULIA_NUM_THREADS: '4'
-          JULIA_TEST_RECORD_PASSES: ${{ matrix.julia == '1.13' && 'true' || 'false' }}
-          MANTLE_TEST_INVENTORY: ${{ matrix.julia == '1.13' && format('{0}/mantle-tests', runner.temp) || '' }}
+          JULIA_TEST_RECORD_PASSES: ${{ matrix.software_mesh && 'true' || 'false' }}
+          MANTLE_TEST_INVENTORY: ${{ matrix.software_mesh && format('{0}/mantle-tests', runner.temp) || '' }}
         run: |
           set --
           if [ "$MANTLE_TEST_LAVAPIPE" = true ]; then
@@ -62,14 +66,14 @@ jobs:
           fi
           "$@" julia --project=. --color=yes -e 'using Pkg; Pkg.instantiate(); Pkg.test(; julia_args = `--check-bounds=auto`)'
       - uses: actions/upload-artifact@v4
-        if: ${{ always() && !cancelled() && matrix.julia == '1.13' }}
+        if: ${{ always() && !cancelled() && matrix.software_mesh }}
         with:
           name: mantle-tests-${{ matrix.backend }}
           path: ${{ runner.temp }}/mantle-tests/*.tsv
           if-no-files-found: error
 
   test-parity:
-    name: Metal and Lavapipe test parity
+    name: Metal and Lavapipe mesh fallback parity
     runs-on: ubuntu-24.04
     needs: test
     if: ${{ always() && !cancelled() }}
@@ -77,7 +81,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: mantle-tests-*
-      - name: Compare the assertions run on Julia 1.13
+      - name: Compare the mesh fallback assertions on Julia 1.13
         run: |
           export LC_ALL=C
           test -s mantle-tests-vulkan/suite.tsv
