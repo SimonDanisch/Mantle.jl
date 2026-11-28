@@ -3,6 +3,8 @@
 # in primitive order. Unused output slots are clipped by the vertex stage.
 
 Mantle.supports_geometry_pipeline(::WebGPUDevice) = true
+Mantle.supports_mesh_pipeline(::WebGPUDevice) = true
+Mantle.uses_mesh_fallback(::WebGPUDevice, ::Mantle.MeshPipeline) = true
 
 struct GeometryOutput{V,P,F,C}
     vertices::V
