@@ -1,0 +1,156 @@
+#version 460
+
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_control_flow_attributes : require
+
+// Differential oracle for the scheduling idea used by ncnn's gemm_cm.comp:
+// the next global-memory tile lives in registers while cooperative matrices
+// consume the current tile from one (not ping-ponged) shared-memory buffer.
+//
+// Define STM=2 for BM=64; the default STM=3 gives BM=96.  Both variants use
+// eight 32-lane subgroups, each producing STM x 2 16x16 tiles.
+#ifndef STM
+#define STM 3
+#endif
+
+layout(local_size_x = 256) in;
+
+const uint TM = 16;
+const uint TN = 16;
+const uint TK = 16;
+const uint STN = 2;
+const uint WM = 2;
+const uint WN = 4;
+const uint BK = 32;
+const uint BN = 128;
+const uint BM = TM * STM * WM;
+
+// Eight scalar values of padding match Lava's winning staged kernel.  Arrays
+// are addressed as packed fp16 pairs, hence the division by two.
+const uint LDA2 = (BM + 8) / 2;
+const uint LDB2 = (BK + 8) / 2;
+const uint AREPS = (BM * BK / 2) / 256;
+const uint BREPS = (BK * BN / 2) / 256;
+
+layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Half2In {
+    f16vec2 v[];
+};
+layout(buffer_reference, scalar, buffer_reference_align = 2) writeonly buffer HalfOut {
+    float16_t v[];
+};
+layout(buffer_reference, scalar, buffer_reference_align = 8) readonly buffer Arguments {
+    uint64_t pa;
+    uint64_t pb;
+    uint64_t pc;
+    uint M;
+    uint N;
+    uint K;
+};
+layout(push_constant, scalar) uniform Push {
+    Arguments args;
+} p;
+
+shared f16vec2 tile_a[LDA2 * BK];
+shared f16vec2 tile_b[LDB2 * BN];
+
+void prefetch_tile(uint k0, uint tm, uint tn,
+                   out f16vec2 ra[AREPS], out f16vec2 rb[BREPS]) {
+    uint lane = gl_LocalInvocationIndex;
+    [[unroll]] for (uint q = 0; q < AREPS; ++q) {
+        uint x = lane + q * 256;
+        uint m2 = x % (BM / 2);
+        uint kk = x / (BM / 2);
+        ra[q] = Half2In(p.args.pa).v[(tm / 2 + m2) + (k0 + kk) * (p.args.M / 2)];
+    }
+    [[unroll]] for (uint q = 0; q < BREPS; ++q) {
+        uint x = lane + q * 256;
+        uint k2 = x % (BK / 2);
+        uint n = x / (BK / 2);
+        rb[q] = Half2In(p.args.pb).v[(k0 / 2 + k2) + (tn + n) * (p.args.K / 2)];
+    }
+}
+
+void publish_tile(in f16vec2 ra[AREPS], in f16vec2 rb[BREPS]) {
+    uint lane = gl_LocalInvocationIndex;
+    [[unroll]] for (uint q = 0; q < AREPS; ++q) {
+        uint x = lane + q * 256;
+        uint m2 = x % (BM / 2);
+        uint kk = x / (BM / 2);
+        tile_a[m2 + kk * LDA2] = ra[q];
+    }
+    [[unroll]] for (uint q = 0; q < BREPS; ++q) {
+        uint x = lane + q * 256;
+        uint k2 = x % (BK / 2);
+        uint n = x / (BK / 2);
+        tile_b[k2 + n * LDB2] = rb[q];
+    }
+}
+
+void main() {
+    uint blocks_m = p.args.M / BM;
+    uint block = gl_WorkGroupID.x;
+    uint tm = (block % blocks_m) * BM;
+    uint tn = (block / blocks_m) * BN;
+
+    uint sg = gl_SubgroupID;
+    uint sg_m = sg % WM;
+    uint sg_n = sg / WM;
+
+    coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>
+        acc[STN][STM];
+    [[unroll]] for (uint j = 0; j < STN; ++j)
+        [[unroll]] for (uint i = 0; i < STM; ++i)
+            acc[j][i] = coopmat<float, gl_ScopeSubgroup, TM, TN,
+                                gl_MatrixUseAccumulator>(0.0);
+
+    f16vec2 next_a[AREPS];
+    f16vec2 next_b[BREPS];
+    prefetch_tile(0, tm, tn, next_a, next_b);
+
+    for (uint k0 = 0; k0 < p.args.K; k0 += BK) {
+        // No second LDS allocation: all readers finish before the sole tile is
+        // overwritten.  Global loads for k0+BK then overlap the MMA work on k0.
+        if (k0 != 0)
+            barrier();
+        publish_tile(next_a, next_b);
+        barrier();
+
+        if (k0 + BK < p.args.K)
+            prefetch_tile(k0 + BK, tm, tn, next_a, next_b);
+
+        [[unroll]] for (uint kt = 0; kt < BK / TK; ++kt) {
+            [[unroll]] for (uint j = 0; j < STN; ++j) {
+                coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> mb;
+                uint boff = (kt * TK) / 2 + (sg_n * STN + j) * TN * LDB2;
+                coopMatLoad(mb, tile_b, boff, LDB2,
+                            gl_CooperativeMatrixLayoutColumnMajor);
+                [[unroll]] for (uint i = 0; i < STM; ++i) {
+                    coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> ma;
+                    uint aoff = (sg_m * STM + i) * (TM / 2) + kt * TK * LDA2;
+                    coopMatLoad(ma, tile_a, aoff, LDA2,
+                                gl_CooperativeMatrixLayoutColumnMajor);
+                    acc[j][i] = coopMatMulAdd(ma, mb, acc[j][i]);
+                }
+            }
+        }
+    }
+
+    [[unroll]] for (uint j = 0; j < STN; ++j) {
+        [[unroll]] for (uint i = 0; i < STM; ++i) {
+            uint row = tm + (sg_m * STM + i) * TM;
+            uint col = tn + (sg_n * STN + j) * TN;
+            coopmat<float16_t, gl_ScopeSubgroup, TM, TN,
+                    gl_MatrixUseAccumulator> out16 =
+                coopmat<float16_t, gl_ScopeSubgroup, TM, TN,
+                        gl_MatrixUseAccumulator>(acc[j][i]);
+            coopMatStore(out16, HalfOut(p.args.pc).v, row + col * p.args.M,
+                         p.args.M, gl_CooperativeMatrixLayoutColumnMajor);
+        }
+    }
+}

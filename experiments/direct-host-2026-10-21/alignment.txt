@@ -1,0 +1,10 @@
+ALIGNMENT device=AMD Radeon RX 7900 XTX (RADV NAVI31) variant=aligned import_bytes=67108864 payload_bytes=67108864 upload_gpu_ms=2.38612
+ALIGNMENT device=AMD Radeon RX 7900 XTX (RADV NAVI31) variant=exact import_bytes=67108864 payload_bytes=67108852 upload_gpu_ms=2.41876
+ALIGNMENT device=AMD Radeon RX 7900 XTX (RADV NAVI31) variant=split import_bytes=67108864 payload_bytes=67108852 upload_gpu_ms=2.35646
+Test Summary:                                        | Pass  Total   Time
+copy alignment: AMD Radeon RX 7900 XTX (RADV NAVI31) |    4      4  18.3s
+ALIGNMENT device=NVIDIA RTX 4000 Ada Generation variant=aligned import_bytes=67108864 payload_bytes=67108864 upload_gpu_ms=10.47072
+ALIGNMENT device=NVIDIA RTX 4000 Ada Generation variant=exact import_bytes=67108864 payload_bytes=67108852 upload_gpu_ms=12.397984
+ALIGNMENT device=NVIDIA RTX 4000 Ada Generation variant=split import_bytes=67108864 payload_bytes=67108852 upload_gpu_ms=10.477488000000001
+Test Summary:                                  | Pass  Total   Time
+copy alignment: NVIDIA RTX 4000 Ada Generation |    4      4  19.0s

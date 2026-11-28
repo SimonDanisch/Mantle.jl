@@ -1,0 +1,100 @@
+USE-CASE REVIEW — 2026-10-29
+
+The explicit recorded-call/shared capability layer fits the principal resource/execution patterns. Clean coverage of every named use case is not yet established; the contract and qualification obligations below remain open.
+Selected source review only; runtime/native qualification remains OPEN.
+
+COVERAGE
+DNNs: fits with an explicit target-aware exporter/known operation recipes; remaining UC-01, UC-02, UC-03, UC-08
+Raytracing: fits: raw dispatch/trace, typed hit groups, GPU queue lengths, shared AS versions and explicit Groups; remaining UC-05, UC-06
+Simulations: fits: persistent state, explicit scratch, nested GPU controls and shared display resources; remaining UC-01, UC-02, UC-04, UC-06
+FEM: expressible via existing explicit-kernel paths; clean common sparse/matrix-free/scalar interfaces need specification; remaining UC-01, UC-04, UC-06
+Particles: fits the canonical GPU size/compaction model; real coupled sparse chains still qualify; remaining UC-04, UC-06
+Raster/Makie: fits rendering/pieces/images, but per-frame capture/picking lifecycle is incomplete; remaining UC-03, UC-05
+LLMs: fits contiguous packed decode/prefill and per-token slots; paged/continuous-batched access not established; remaining UC-01, UC-03, UC-06, UC-07
+Training/AD: can emit forward/backward/update graphs; external differentiation boundary unqualified; remaining UC-01, UC-02, UC-08
+
+FINDINGS
+
+UC-01 P1 Portable operation extension and GPU-result contracts need a concrete minimum catalog
+The new call! entry correctly rejects unknown functions, but mul!/Array examples do not specify the public way a library defines a retained/reselectable operation, nor complete result/shape contracts for reductions and allocations. A CPU future from a scalar-returning operation cannot simply be a GPU loop predicate. Raw kernels can implement these workloads; clean reusable operation-layer coverage is not yet established.
+Required: Document the portable extension hook/recipe contract and a minimum supported-family matrix covering effects, result identity/type, deferred shapes, workspace, control eligibility and invalidation. Include GPU-output reductions/convergence storage, plus allocating/view results with device-written shapes. Reuse the existing operation definitions; do not add device/group adaptation or infer returns from !.
+Ledger F115; existing MWE-02, MWE-04
+
+UC-02 P1 DNN emitter temporary/output lifetimes must be mapped explicitly
+DNNKernels currently returns unbound module outputs, including views, as owner-graph temporaries for subsequent caller nodes. A mechanical switch to persistent-default constructors makes all intermediates persistent and defeats arena reuse; prohibiting any returned scratch handle would instead break same-graph composition. GPU-written scratch size metadata is arena-local too and cannot be host-read after the run.
+Required: Produce an emitter allocation/escape map: internal scratch, same-owner graph-only outputs/views, and persistent outputs saved/shared beyond a run. Clarify that returning a scratch handle for further owner-graph declarations is legal; using its data or arena metadata outside its run is not. This clarification requires no new array type or adaptation.
+Ledger F116; existing MWE-01, MWE-04
+
+UC-03 P1 One-shot readback requests are easy to consume during warmup or reuse stale across runs
+call!(g,Array,a) returns a future for the next execution. Warmup/seed runs can consume that request, and repeated fetch must intentionally keep returning its original snapshot. Reusing the same future in a token/frame loop therefore does not mean latest result. The API can express fresh requests through Readback(previous), but the concrete consumer protocol and retention bounds need qualification.
+Required: Specify a canonical warmup/production replay request protocol: bind after warmup, request before each desired execution, preserve old snapshots, and have a new request retain only the stable output descriptor rather than a chain of previous future payloads. Do not silently redefine fetch as latest-value access or introduce another eager future mode.
+Ledger F117; existing MWE-01, MWE-04, MWE-06
+
+UC-04 P1 Sparse/block-sparse and matrix-free operator support is named but not specified
+The plan promises sparse conversion and SpMV/FEM solves without defining their supported composite layouts and operation contracts. The AScanner snapshot has block-COO values/row/column buffers with a common live triplet count and one-based block indices; ge2sym! publishes a GPU selection count. PrintSim also uses matrix-free products/preconditioners. Dense mul! and independent per-array resizing are insufficient evidence for these composite semantics.
+Required: Specify compatible sparse/block layouts, logical index base/width, duplicate accumulation/symmetry semantics, coherent multi-array GPU counts, resource discovery, and the matrix-free/preconditioner extension boundary. Choose portable/shared operation definitions with capability-selected candidates, not one numerical API per backend. Existing upstream composites may wrap MantleArrays; no new public array family is implied.
+Ledger F118; existing MWE-02, MWE-04
+
+UC-05 P2 Window capture and picking need one explicit frame-consistency contract
+Array(window) still means the next presented frame, unlike eager Array(image), and the supported recorded Array(window) path is not explicitly defined. RayMakie retains picking metadata plus its plot map/extent; returning correct pixel bytes with a newer plot map can select the wrong object. Headless image smoke does not qualify acquire/copy/present/generation behavior or a small picking read.
+Required: Specify the supported window/offscreen snapshot route and timing, capture before presentation, generation/extent ownership, and how the consumer associates immutable frame plot maps with the matching snapshot. Qualify small ROI/pixel readback without requiring full-frame downloads. Do not guess a presenting graph from an array or add a backend-specific screenshot path. Include CPU pixel layout/orientation and color/metadata decoding so the native storage representation never leaks into per-backend consumer code.
+Ledger F119; existing MWE-06
+
+UC-06 P1 Nested solver/control migration needs realistic cost and predicate-boundary checks
+PrintSim launch!/is_recording currently recognize Graph, not Group; is_recording(target)=target isa Mantle.Graph. Updating only the launch dispatch can leave Group emission taking the immediate solver branch and host-reading a convergence flag before graph execution. PrintSim uses device-side CG flags, sequential line-search loops, per-dispatch ConditionalTarget predicates and optional CPU diagnostics; a whole Group predicate is sampled once, so predicates cannot be collapsed blindly. The fixed scaling MWE covers a long single loop, not realistic nested expansion. Hikari already documents per-sample allocations from abstract/Any plan-holder boundaries.
+Required: Generalize Graph-only emitter signatures/classification to explicit Graph/Group emission without routing through a device/array adapter. Map original predicate sampling/reset points to explicit regions/individual conditionals; retain pure GPU and explicit diagnostic host modes separately. Add actual nested native/portable plan-size, stopped-work and compile/runtime measurements using the existing MWE profiles. Keep consumer session/graph holders concretely typed or behind measured function barriers; no new backend runtime.
+Ledger F120; existing MWE-02, MWE-08
+
+UC-07 P2 Contiguous KV growth is not paged-attention/continuous-batching coverage
+Bonsai kv_page rounds growth of contiguous Int8 K/V and Float32 scale arrays; it does not demonstrate a GPU page table, page reuse or per-request ownership. The plan names paged access but provides no corresponding layout/membership/lifetime qualification. Core span refinement on ordinary strided views alone is not proof of non-affine page-table access or useful overlap.
+Required: Either explicitly bound the initial LLM gate to contiguous packed caches, or specify the shared paged-layout/resource-set and page reuse/lease contract plus a real paged attention case. Preserve tracked reachable resources, quantized scale relationships and safe multi-session page retirement. Hardware-specific optimized candidates remain behind shared capability dispatch. Logical attention paging is a data/layout contract and need not require hardware sparse residency.
+Ledger F121; existing MWE-04, MWE-07, MWE-08
+
+UC-08 P2 Training needs an explicit AD boundary and activation lifetime test
+The plan correctly puts AD algorithms outside Mantle but does not say where differentiation happens relative to call!/materialization/run!. Differentiating eager model code, differentiating a graph builder and emitting an already differentiated program are different integrations. Inference and a standalone optimizer kernel do not validate backward saved values, mutation/alias versions or scratch lifetime.
+Required: State the supported external AD/emitter boundary and what operation identity/effect/result metadata it consumes. Saved activations must remain in one owner run or use explicit persistent storage between forward/backward runs; external AD owns mathematical versioning/checkpoint/recompute choices. No generic AD-through-call! promise follows from the common array interface.
+Ledger F122; existing MWE-01, MWE-04
+
+EXECUTION-BOUNDARY REVIEW — 2026-10-30
+
+Selected source paths only; semantic review and runtime qualification are not complete.
+
+step!(target,world,state,dt) — graph builder
+world_cg_iteration! and launch! emit kernels; recorded branch emits repeat!; immediate branch reads convergence on host. Generalize Graph-only launch/classification to Group, without wrapping step! in call!.
+Source: /sim/Programmieren/VideoEdit/dev/PrintSim/src/dynamics/coupled.jl
+
+emitgraph!(g,aten,weights,dims;...) — graph builder
+Explicitly emits into caller graph, runs nothing and returns resource handles. Generalize target support and classify scratch/output lifetimes; no whole-module call! adapter is required.
+Source: /sim/Programmieren/VideoEdit/dev/JuliaVision/DNNKernels/src/emit.jl
+
+sample_graph(dev,state,refs,max_depth;...) — graph factory plus target-aware builders
+Constructs Graph, calls setup/round/accumulate builders and returns it. For composition, reuse the emission bodies with an explicit target; do not claim existing factory already accepts Group or wrap it in call!.
+Source: /sim/Programmieren/VideoEdit/dev/Hikari/src/integrators/volpath/graph.jl
+
+_recordstep / _declarestep! / step!(session,token) — builder versus host controller
+_recordstep constructs graph/scratch and calls _declarestep!. Public step! grows cache as needed, updates GPURefs, run!s plan and advances host position. Public step! is not the recorded builder despite its name.
+Source: /sim/Programmieren/VideoEdit/dev/JuliaVision/BonsaiRunner/src/BonsaiRunner.jl
+
+frame_plan! / frame_draws! — host plan cache plus draw builder
+frame_plan! selects/rebinds cached plans or constructs graph/metadata; frame_draws! emits draws. Do not record the cache controller through call!; preserve same-frame metadata/output obligations.
+Source: /sim/Programmieren/VideoEdit/dev/Makie/RayMakie/src/overlay_rendering.jl
+
+Other API/lifetime/size/control/resource contracts still need semantic review; existing UC-01..UC-08 obligations remain open with their existing gates.
+
+RESOURCE LIFECYCLE REVIEW — 2026-10-30
+Removed stale eager Readback(img) recommendation and ambiguous scratch-handle escape wording. API/companion now specify warmup/rearm and no completed-future history. F116 migration and F117 runtime memory/consumer gates remain open.
+
+REDUCTION/STREAMED-WEIGHT CONTRACTS — 2026-10-30
+Base.sum!(f,r,A) supplies the minimum device-output reduction interface with ordinary arrays; CPU identity/empty/init=false semantics checked. GPUArrays eager empty branches require explicit recorded lowering. Minimum catalog now specified; F115 extension/native gates remain open. Streamed immutable-source weights reject writes/resize via shared readonly validation.
+
+CAPACITY/RESIDENCY CLARIFICATION — 2026-10-30
+Deferred placement/eviction retain a usable backing requirement, not resident bytes. Descriptor publication requires backing for that capacity; unbacked virtual spare is excluded. Existing native allocation/restore/descriptor-version gates stay open.
+
+CONSUMER CONTRACT PASS — 2026-10-30
+API and execution-contracts §16.12 now state operation-extension, sparse/composite, solver/configuration, frame/ROI, library-owned paged cache and external AD/saved-state boundaries. Unsafe blocking Array(win) next-frame proposal is replaced by the existing explicit recorded snapshot interface. Existing runtime/native/consumer gates remain open.
+
+DNN ALLOCATION MAP — 2026-10-30
+Selected make/scratch/activationbuffer/residentweights/MemoryBank paths now map explicitly to scratch, persistent, borrowed/bound or view lifetime. Empty scratch is legal; the legacy zero-size persistent workaround is not retained. F116 actual port/native gates remain open.
+
+ALLOCATION IDENTITY / LOGICAL HEADER — 2026-10-30
+F123 separates canonical payload ownership/byte hazards from independent imported shape/element metadata. Ordinary aliases of one logical root still share its resize. ABI byte spans/capacity conversions and readonly/lease restrictions cannot be bypassed by typed aliases. Qualification extends existing MWE-07.

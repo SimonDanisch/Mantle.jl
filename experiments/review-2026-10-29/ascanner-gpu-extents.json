@@ -1,0 +1,109 @@
+{
+  "date": "2026-10-29",
+  "worker": "Bosgame",
+  "project": "/home/sim/Programmieren/AScanner",
+  "method": "Read-only source and saved-status inspection; no consumer code edits, GPU execution, or new runtime reproduction. Selected file fingerprints matched the live checkout after transfer.",
+  "repositories": {
+    "Mantle": {
+      "head": "87f8139dc380e3eea9e36c4e9ffa547e19f8e7a0",
+      "branch": "sd/lava-refactor",
+      "has_uncommitted_work": true
+    },
+    "MantleUIPC": {
+      "head": "0ade86693200a2741f90d5f31d88fc6ce27e517d",
+      "branch": "main",
+      "has_uncommitted_work": true
+    }
+  },
+  "source_sha256": {
+    "MantleUIPC/src/backend/mantle_tool/buffer.jl": "ce5dc6958d4e6e83b394297730a74c2168d7ebf761f9d2d33e63277cd712eb52",
+    "MantleUIPC/src/backend/mantle_tool/cub.jl": "744e31c69e36172b21825e2fb2366cd3bb5e4aad438219a998d13ac80868e8d0",
+    "MantleUIPC/src/backend/algorithm/matrix_converter.jl": "0db3786af26bcca1be7e432a57cf65b695b0602e9c2bd8fc65f12dcf8259e774",
+    "MantleUIPC/src/backend/collision_detection/filters/hw_simplex_trajectory_filter.jl": "50d6eae10bdcde4f93c64b5b3df00f393e86b9903aab347414bc40e25f97e2fe",
+    "Mantle/ext/cuda/record.jl": "743bf4344c7456dd59def431029c41779f537cda692dd1d5d8dcd8aef37fd5e6",
+    "MantleUIPC/docs/validation-status.md": "43aa9440252a16a7c79e94e9d4a18520ea15111a63654439dac2ceb41aa6a7af"
+  },
+  "snapshot": "/sim/Programmieren/VideoEdit/experiments/ascanner-length-review-2026-10-29",
+  "findings": [
+    {
+      "id": "AS-LEN-01",
+      "source": "MantleUIPC/src/backend/mantle_tool/buffer.jl",
+      "symbols": [
+        "buffer_view",
+        "subview",
+        "fill!",
+        "copy_view!"
+      ],
+      "fact": "Views and fill/copy dispatches bind host integer lengths; GPU counts are tracked separately from logical array descriptors.",
+      "target": "Existing P4.A3/A10/A11/A12; P4.G4 KL-11/13/14"
+    },
+    {
+      "id": "AS-LEN-02",
+      "source": "MantleUIPC/src/backend/mantle_tool/cub.jl",
+      "symbols": [
+        "device_reduce!",
+        "device_scan!",
+        "select_flagged!",
+        "sort_pairs!"
+      ],
+      "fact": "Numerical helpers take n::Integer; select_flagged! returns a GPURef count. Scratch is sized from host-known bounds.",
+      "target": "P6.A24; KL-12/20"
+    },
+    {
+      "id": "AS-LEN-03",
+      "source": "MantleUIPC/src/backend/algorithm/matrix_converter.jl",
+      "symbols": [
+        "ge2sym!",
+        "loose_resize!"
+      ],
+      "fact": "ge2sym! passes the GPURef selection result to loose_resize!(...,n::Integer) and Int32(m); source-level incompatible count protocol. This legacy path was not executed in this investigation.",
+      "target": "P11.G94; actual sparse-conversion migration"
+    },
+    {
+      "id": "AS-LEN-04",
+      "source": "MantleUIPC/src/backend/collision_detection/filters/hw_simplex_trajectory_filter.jl",
+      "symbols": [
+        "select_valid!",
+        "gather_selected_kernel!"
+      ],
+      "fact": "Working retained path uses full-size arrays, -1 sentinels, GPU count views and DeviceRange(count;max=n), rather than propagating array shape.",
+      "target": "P4.A36/P6.A24; preserve baseline exact results"
+    },
+    {
+      "id": "AS-LEN-05",
+      "source": "Mantle/ext/cuda/record.jl",
+      "symbols": [
+        "bounded_dispatch!",
+        "launch_arguments",
+        "compile_dispatch",
+        "emitdispatch!"
+      ],
+      "fact": "Dynamic dispatch uses a compiled-capacity grid and GPU count block gating. Count-dependent array dimensions and composed algorithms require additional descriptor/algorithm handling.",
+      "target": "Existing capacity-predication/descriptor contract; KL-11/12/14"
+    },
+    {
+      "id": "AS-LEN-06",
+      "source": "MantleUIPC/docs/validation-status.md",
+      "fact": "Saved report for the latest blocked-sort/precleared combination gives Mantle/libuipc medians 1.760/1.484 ms (128 particles) and 3.084/1.677 ms (512). Exact latest-combination full-frame qualification is still marked pending there. These are prior consumer-reported measurements, not measurements made by this review.",
+      "target": "P11.G94; compare live/capacity work and complete frame, no speedup claim from one native launch"
+    }
+  ],
+  "added_contract": "docs/execution-contracts.md section 15",
+  "new_acceptance_cases": [
+    "KL-11",
+    "KL-12",
+    "KL-13",
+    "KL-14",
+    "KL-15",
+    "KL-16"
+  ],
+  "qualification_status": "Specified requirements only; replacement implementation and native tests remain open.",
+  "design_decisions_left_explicit": [],
+  "settled_design": "One array resource has allocation capacity and GPU-resident logical size (conceptually size::GPURef; specified as Cell/lengthof). Existing head/prepare nodes propagate it into consumers. Consumer integer-only helpers need migration; no new array-shape abstraction.",
+  "retracted_inferences": [
+    "The source-level consumer mismatch does not establish a defect or missing architecture in the proposed Cell/prepare design.",
+    "A new public dynamic-view API is not required for kernel-side views from GPU bounds.",
+    "A general capacity-overflow publication/retry policy is not a prerequisite for bounded compaction.",
+    "The fixed-shape graph-readback baseline and oversized-count KL-05 deserve their existing qualification, not newly invented blockers for basic GPU size tracking."
+  ]
+}

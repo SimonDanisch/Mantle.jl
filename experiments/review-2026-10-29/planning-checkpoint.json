@@ -1,0 +1,220 @@
+{
+  "date": "2026-11-02",
+  "task": "Reconcile the complete Mantle refactor plan, then specify efficient implementation and validation without starting the runtime refactor",
+  "planning_status": "RT interface and AS memory lifecycle policies specified; F127 adds native memory/lifetime/performance qualification. Runtime implementation remains unstarted by this documentation task.",
+  "runtime_implementation_status": "open; not started by this documentation task",
+  "authority": {
+    "user_instructions": "take precedence",
+    "architecture": "docs/recording-plan.md",
+    "signatures": "docs/api.md",
+    "protocols": "docs/execution-contracts.md",
+    "status": "docs/refactor-ledger.md",
+    "old_implementation": "evidence, not target authority"
+  },
+  "base_revision": "a30a423da24cfc841e09943b409ea091383f93cc",
+  "branch": "sd/lava-refactor",
+  "worktree": "Design/evidence changes combined with latest tracked upstream; this task changes no runtime source. Historical evidence retains its original source baseline.",
+  "target_sha256": {
+    "docs/api.md": "184fe68167251294f3bed2c30a035c1d419a9327e7e373f30fce6b9244328225",
+    "docs/examples.jl": "f79d2ca2ac0386716aed2843c45b2ef3d4b54136f29357f7fab9325881ba87f6",
+    "docs/execution-contracts.md": "5cad8a192f34541ca6b1558124d13092d03084303772a737d702b5d8b489b536",
+    "docs/internals.jl": "63e097e23a724a27402a5a3832f21529f25464c4e661e9e124142bcb96ad3374",
+    "docs/recording-plan.md": "d424b6ef0f9ad2dbe083b45f1be79ea5b070e885082a0b205d1fec1fd35ccd6f",
+    "docs/refactor-ledger.md": "cf69c3a37c186407ffd4d141e61ef8ad11354e31bd5d59311125e94a531e4e76",
+    "docs/resizing-and-raytracing.jl": "f1006d44f7966599d7df0783b5dcb8f6a1ef3a7b76249458b946bd9f82bc6f8a",
+    "experiments/review-2026-10-20/consumer-coverage.md": "436f892caf5b2c0d6ffe26cfe6eef2c1a033827b809cfee5d93cb33215c48204",
+    "experiments/review-2026-10-29/explicit-routing-ruling.json": "aa2981b7ed76564b9ee6d8315c7970a0e95c4ae1e3bd6e8df96a4b121e20a525",
+    "experiments/review-2026-10-29/check-plan-reconciliation.py": "4a53f9a0ceda2f3fb93de7327f1eb8603f294e42fd18758e073f0c60e70ffd63",
+    "experiments/review-2026-10-29/check-julia-docs.jl": "4416955aee0e2196cc05a98f26485fc62c4831eeeff2739a39a9b916b98dfb6b",
+    "experiments/review-2026-10-29/plan-reconciliation.json": "c14ddc609cea02dd42f64cb7f9c03b6245803017b4c8ffbd5d41404bd85ff2c9",
+    "experiments/review-2026-10-29/api-ergonomics-audit.json": "c096098f50d0d8e9ccd9291c44d648973a055b538f1a35b7d0263618057c7d0a",
+    "experiments/review-2026-10-29/use-case-review.json": "c57af763c70a56269bdc2f821e8bb40af67eeb210896b4d89d398e11461eb85d",
+    "experiments/review-2026-10-29/printsim-api-focus.json": "7d0c8eba757a47b59b24429530e30916053b26e96e7a68707846d7eb08a8c3ec",
+    "docs/api-guide.md": "23b7c340e23c9b0224f793cfa32b7765dfd3f12d0b7d0e4379bb41695341a1ea"
+  },
+  "decisions": [
+    "An array has one owning Mantle Device/domain; many nodes in multiple graphs may reference it.",
+    "A Group contains operation nodes, not adapted arrays/devices; no recording-device wrapper or returned Group alias.",
+    "Ordinary eager numerical methods keep Julia signatures, without an extra public device argument.",
+    "The separate recorded-call entry explicitly names Graph/Group and a supported function.",
+    "One shared Mantle/GPUArrays-style operation layer serves eager and recorded calls and owns device-capability dispatch; backend algorithm duplication is forbidden.",
+    "Known operation definitions/recipes supply shared validation, effects, returns, candidate materialization and resource management; arbitrary Julia capture is not promised.",
+    "Return contracts are explicit per operation definition: mul! returns C; recorded Array returns a typed future; neither ! nor a universal-future heuristic determines this.",
+    "Array(a) is standard blocking eager conversion; call!(target,Array,a) declares a snapshot; Readback(previous_future) only requests its next execution. No separate public eager Readback(array).",
+    "Actual CPU work during replay uses explicit hostcall! staging/host cuts; unsupported call! never falls back to it or eager execution.",
+    "The core selector intersects enabled hardware/compiler capability, precision/layout/shape/alias/workspace and recording/control requirements, then compares eligible candidates using measured evidence.",
+    "Eager calls materialize immediately; graph compile materializes/reselects retained recipes; replay uses baked choices without probing/tuning.",
+    "KA.get_backend(a) stays the owning Mantle Device; ordinary host length/size queries synchronize and return snapshots, never a recording target or hidden graph provenance.",
+    "Target-aware consumer graph builders such as PrintSim.step!(group,world,state,dt) are called directly during construction; no call! adapter or operation registration is required for their composition.",
+    "A recorded window screenshot uses call!(presenting_graph,Array,win) and the common future lifecycle; Array(win) rejects instead of blocking on unsubmitted future work.",
+    "Ordinary device-array destination sum! supplies GPU-resident reduction results; no new public scalar handle or mandatory replacement of PrintSim world_dot!.",
+    "Capacity is a usable allocation bound/backing requirement for nonresident state; descriptor publication requires actual backing and excludes virtual spare.",
+    "Canonical payload byte identity/ownership and logical-header metadata are distinct; independent imported headers keep their own shapes/capacity units while data hazards/readonly/lease restrictions remain shared (F123).",
+    "No public Device(Graph/Group) constructor/query overload: it was an unneeded ownership convenience retained after removing recording-device wrappers. Core resolves ownership internally; recording explicitly names Graph/Group.",
+    "User explicitly selects hostcall!(target,f,args;writes) for replay-time CPU callbacks, replacing dispatch!/hostcall! syntax. mul! documentation now expands recipe/candidate/materialize/kernel hookups with core-owned selection.",
+    "Supported consumer API is explicitly exported or declared public; implementation helpers use neither. Cache trimming is private core/test maintenance.",
+    "Particle compaction is an illustrative application graph builder, not a new Mantle API. Explicit array-backing trimming is deferred; shrink retains capacity. AS compact! remains a separate scene-storage operation."
+  ],
+  "validation": {
+    "documentation": {
+      "command": "python3 experiments/review-2026-10-29/check-plan-reconciliation.py",
+      "result": "pass",
+      "artifact": "plan-reconciliation-checks.json",
+      "documents": 8,
+      "original_findings": 24,
+      "followup_findings": 10,
+      "abstract_models": 9,
+      "fixed_mwes": 8,
+      "batches": 5,
+      "unique_ledger_items": 755
+    },
+    "julia": {
+      "tool": "bt_julia_eval",
+      "env_path": "/sim/Programmieren/VideoEdit",
+      "code": "include(joinpath(pwd(), \"dev\", \"Mantle\", \"experiments\", \"review-2026-10-29\", \"check-julia-docs.jl\"))",
+      "julia_version": "1.12.7",
+      "result": "pass",
+      "parsed_sketches": 3,
+      "unqualified_example_call_names": 74,
+      "static_routing_guard_controls": 11,
+      "limitations": "Syntax/name/pattern checks only; no Mantle import, method execution or native/runtime qualification",
+      "api_julia_blocks_parsed": 4,
+      "cpu_sum_destination_contract": "identity/empty/init=false and matrix reduction checked; no GPU",
+      "api_guide_julia_blocks_parsed": 17
+    },
+    "whitespace": {
+      "command": "git diff --check",
+      "result": "pass"
+    }
+  },
+  "uncollected_runs": [],
+  "full_gpu_suite_started": false,
+  "remaining_planning_work": [],
+  "implementation_gates": "Applicable phase/native/consumer rows and F76-F127 remain open; no runtime refactor or consumer migration started.",
+  "restart_rule": "Read current_ruling and target docs before historical code/reports. Eager methods, known-function call!, shared capability selection and device-only array identity are authoritative. Existing adaptation/target-overload/eager-Readback proposals are superseded. Do not restart completed tests solely after compaction.",
+  "authorized_scope": "Plan/documentation refinement. This checkpoint does not authorize starting or claiming completion of runtime implementation.",
+  "last_task": "Combine local refactor documentation with latest upstream and record the agreed public/private API boundary",
+  "followup_api_audit": {
+    "report": "experiments/review-2026-10-29/api-ergonomics-audit.json",
+    "validation": "experiments/review-2026-10-29/api-ergonomics-validation.json",
+    "ledger": "F100\u2013F109",
+    "count": 10
+  },
+  "current_ruling": "experiments/review-2026-10-29/explicit-routing-ruling.json",
+  "current_validation": "experiments/review-2026-10-29/use-case-review-validation.json",
+  "current_use_case_review": "experiments/review-2026-10-29/use-case-review.json",
+  "remaining_contract_obligations": [
+    {
+      "id": "UC-01",
+      "ledger": "F115",
+      "status": "open_contract",
+      "title": "Portable operation extension and GPU-result contracts need a concrete minimum catalog"
+    },
+    {
+      "id": "UC-02",
+      "ledger": "F116",
+      "status": "open_migration_contract",
+      "title": "DNN emitter temporary/output lifetimes must be mapped explicitly"
+    },
+    {
+      "id": "UC-03",
+      "ledger": "F117",
+      "status": "open_lifecycle_qualification",
+      "title": "One-shot readback requests are easy to consume during warmup or reuse stale across runs"
+    },
+    {
+      "id": "UC-04",
+      "ledger": "F118",
+      "status": "open_contract",
+      "title": "Sparse/block-sparse and matrix-free operator support is named but not specified"
+    },
+    {
+      "id": "UC-05",
+      "ledger": "F119",
+      "status": "open_contract_and_native_qualification",
+      "title": "Window capture and picking need one explicit frame-consistency contract"
+    },
+    {
+      "id": "UC-06",
+      "ledger": "F120",
+      "status": "open_migration_and_performance_qualification",
+      "title": "Nested solver/control migration needs realistic cost and predicate-boundary checks"
+    },
+    {
+      "id": "UC-07",
+      "ledger": "F121",
+      "status": "open_scope_and_layout_contract",
+      "title": "Contiguous KV growth is not paged-attention/continuous-batching coverage"
+    },
+    {
+      "id": "UC-08",
+      "ledger": "F122",
+      "status": "open_integration_contract",
+      "title": "Training needs an explicit AD boundary and activation lifetime test"
+    }
+  ],
+  "use_case_review_validation": {
+    "documentation": {
+      "command": "python3 experiments/review-2026-10-29/check-plan-reconciliation.py",
+      "result": "pass",
+      "artifact": "plan-reconciliation-checks.json",
+      "review_obligations_mapped": 8,
+      "abstract_models": 9,
+      "mwe_catalog_size": 8,
+      "batch_count": 5
+    },
+    "julia_static": {
+      "tool": "bt_julia_eval",
+      "env_path": "/sim/Programmieren/VideoEdit",
+      "code": "include(joinpath(pwd(), \"dev\", \"Mantle\", \"experiments\", \"review-2026-10-29\", \"check-julia-docs.jl\"))",
+      "result": "pass",
+      "julia_version": "1.12.7",
+      "sketches_parsed": 3,
+      "unqualified_example_names": 55,
+      "static_routing_guard_controls": 11,
+      "runtime_execution": false
+    },
+    "whitespace": {
+      "command": "git diff --check",
+      "result": "pass"
+    }
+  },
+  "printsim_focus": "experiments/review-2026-10-29/printsim-api-focus.json",
+  "semantic_review": {
+    "date": "2026-10-30",
+    "evidence": "use-case-review.json: execution_boundary_review",
+    "completed_scope": "Selected composition sources; resource/reduction, minimum known-operation/extension catalog, DNN allocation map, sparse/operator/configuration, frame capture, paged-cache/AD boundaries and F123 physical alias versus logical-header metadata; persistent constructor source-version ordering and request acceptance/failure outcomes; public/internal helper classification and recorded host-copy/scoped-scratch contracts; explicit image copy/resolve eager versus recorded boundary",
+    "remaining_scope": "Existing implementation/consumer/native/performance gates; broader execution/driver qualification not rerun or claimed",
+    "static_checks_are_semantic_approval": false,
+    "validation": "use-case-review-validation.json: semantic_followup_2026_10_30",
+    "public_surface_validation": "use-case-review-validation.json: public_surface_followup_2026_10_30"
+  },
+  "remaining_planning_work_note": "The three RT interface gaps are specified in API/\u00a77 with exact example/reference outcomes. Implementation and actual Metal/Vulkan/software profiles remain open; design completion is not a native pass.",
+  "pushed_source_refresh": {
+    "Mantle": {
+      "local_head": "a30a423da24cfc841e09943b409ea091383f93cc",
+      "fetched_head": "3e9943f935adf56ef171be867c3a544defd2e411",
+      "worktree_updated": false
+    },
+    "Hikari": {
+      "local_head": "041fb4168f2200e8ceda3d5153305de2e6d3d2fa",
+      "fetched_head": "407f9b2423ad158eed6ecaa3e2d95229845152e6",
+      "worktree_updated": false
+    },
+    "Makie": {
+      "local_head": "5fe04217229c995905d3e5955a5c05b0236a5b20",
+      "fetched_head": "42e6355fbbb3a0773594c6837747d902bcc927b8",
+      "worktree_updated": false
+    },
+    "Metal": {
+      "local_head": "f8b6fbea95e478edcbba9753e36de44d25ea917f",
+      "fetched_head": "f8b6fbea95e478edcbba9753e36de44d25ea917f",
+      "worktree_updated": false
+    }
+  },
+  "rt_gap_resolution": "rt-gap-resolution.json",
+  "performance_status": "RT performance unmeasured. Structural and native/workload regression acceptance is specified in execution-contracts \u00a716.11; F124-F126 cannot close without it.",
+  "consolidated_api_guide": "docs/api-guide.md",
+  "api_guide_validation": "api-guide-validation.json",
+  "integrated_upstream_revision": "3fe40a4c126b3582eb8d32b72d8ecd52d725b01e"
+}

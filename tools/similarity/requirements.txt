@@ -1,0 +1,4 @@
+# Install a CUDA build of torch suitable for the local driver first.
+torch==2.8.0
+transformers==4.57.1
+numpy==2.5.4

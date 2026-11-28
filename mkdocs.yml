@@ -1,0 +1,12 @@
+site_name: Mantle.jl
+repo_url: https://github.com/SimonDanisch/Mantle.jl
+nav:
+  - Home: index.md
+  - API guide: api-guide.md
+  - API contracts: api.md
+  - Execution contracts: execution-contracts.md
+  - Recording plan: recording-plan.md
+  - Refactor ledger: refactor-ledger.md
+validation:
+  links:
+    anchors: warn

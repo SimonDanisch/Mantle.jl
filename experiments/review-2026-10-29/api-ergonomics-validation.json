@@ -1,0 +1,47 @@
+{
+  "date": "2026-10-29",
+  "scope": "Target plan follow-up audit; static checks only, not runtime/native qualification",
+  "audit_findings": 10,
+  "runtime_implementation_changed": false,
+  "checks": {
+    "documentation": {
+      "command": "python3 experiments/review-2026-10-29/check-plan-reconciliation.py",
+      "result": "pass",
+      "artifact": "plan-reconciliation-checks.json",
+      "original_findings": 24,
+      "followup_findings": 10,
+      "fixed_mwes": 8,
+      "batches": 5,
+      "abstract_models": 9
+    },
+    "julia_syntax_and_names": {
+      "tool": "bt_julia_eval",
+      "env_path": "/sim/Programmieren/VideoEdit",
+      "code": "include(joinpath(pwd(), \"dev\", \"Mantle\", \"experiments\", \"review-2026-10-29\", \"check-julia-docs.jl\"))",
+      "julia_version": "1.12.7",
+      "result": "pass",
+      "sketches_parsed": 3,
+      "unqualified_example_call_names_checked": 57,
+      "unqualified_call_policy": "Public API / Base or selected stdlib / local definition / explicitly marked app_*",
+      "limitations": "Does not execute examples, resolve target methods, validate qualified call types or import Mantle",
+      "background_run": false
+    },
+    "whitespace": {
+      "command": "git diff --check",
+      "result": "pass"
+    }
+  },
+  "target_sha256": {
+    "docs/api.md": "7296504cd8b9f32dd04fc65ebd19b084ef27815ebc12f185ee3776e1785919fe",
+    "docs/recording-plan.md": "8f9cebfbace463177faa1cc82de6b215f4dc58ee94b66404b329ba4b6154755a",
+    "docs/execution-contracts.md": "7d9e7e0cd0d0689331e5f9369757b005bb27f558ea64c5ae3950bec09059b2ee",
+    "docs/refactor-ledger.md": "d74dc037efdc23d8c0261474e2173e7a76e4b30fb4045cedec1aaef4897bda5c",
+    "docs/internals.jl": "007e08fb7b66208ada82f11e98209297205b97b787d6c81fed8ccbce9755fb7b",
+    "docs/examples.jl": "e9a98efeffed3a834f4596ca8206808c09e8cd15f17d73c67680955cb030e658",
+    "docs/resizing-and-raytracing.jl": "e521104f989fbb6155679e672e6197aaf11856ea9cb984cc6bb6e17893983a6e",
+    "experiments/review-2026-10-29/api-ergonomics-audit.json": "5444b4e6d2e69ea8ad99aa903683fc007252c91d64a8ee281126dae00176c466",
+    "experiments/review-2026-10-29/check-julia-docs.jl": "26eaff5ec75435d8ee6f06e4e520e7d19c40c5e88ab52b52b51618971d5aefc4",
+    "experiments/review-2026-10-29/check-plan-reconciliation.py": "5d33c4d876583fa0ceb4a4f2425de4b694ce4906ed89d34369adc16ee253e9ae",
+    "experiments/review-2026-10-29/plan-reconciliation.json": "8f376c23f2bd18bb52e6eecdaf2fd81d94cb372e567456ba8db866f85f7fc0e8"
+  }
+}

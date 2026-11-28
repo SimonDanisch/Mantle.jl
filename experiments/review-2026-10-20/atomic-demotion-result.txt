@@ -1,0 +1,22 @@
+source: /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/target.jl
+source SHA256: 636ae684490045408734111b4d2d9498855358f0cbc8ca3fe3a54cac76449a3f
+changed: true
+before:
+
+define i32 @message(ptr %flag, ptr %payload) {
+entry:
+  %value = load atomic i32, ptr %flag acquire, align 4
+  store atomic i32 %value, ptr %payload release, align 4
+  ret i32 %value
+}
+
+after:
+
+define i32 @message(ptr %flag, ptr %payload) {
+entry:
+  %value = load i32, ptr %flag, align 4
+  store i32 %value, ptr %payload, align 4
+  ret i32 %value
+}
+
+DEFECT REPRODUCED: true

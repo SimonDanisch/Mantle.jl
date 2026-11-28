@@ -1,0 +1,90 @@
+{
+  "date": "2026-10-29",
+  "scope": "Use-case plan review and two lifetime text clarifications; no runtime/consumer port or native qualification",
+  "review": "use-case-review.json",
+  "findings": 8,
+  "ledger": "F115\u2013F122",
+  "findings_status": "open contracts/migrations/qualification; recommendations are not new public API decisions",
+  "checks": {
+    "documentation": {
+      "command": "python3 experiments/review-2026-10-29/check-plan-reconciliation.py",
+      "result": "pass",
+      "artifact": "plan-reconciliation-checks.json",
+      "review_obligations_mapped": 8,
+      "abstract_models": 9,
+      "mwe_catalog_size": 8,
+      "batch_count": 5
+    },
+    "julia_static": {
+      "tool": "bt_julia_eval",
+      "env_path": "/sim/Programmieren/VideoEdit",
+      "code": "include(joinpath(pwd(), \"dev\", \"Mantle\", \"experiments\", \"review-2026-10-29\", \"check-julia-docs.jl\"))",
+      "result": "pass",
+      "julia_version": "1.12.7",
+      "sketches_parsed": 3,
+      "unqualified_example_names": 55,
+      "static_routing_guard_controls": 11,
+      "runtime_execution": false
+    },
+    "whitespace": {
+      "command": "git diff --check",
+      "result": "pass"
+    }
+  },
+  "current_target_sha256": {
+    "docs/api.md": "d01edfe0b912425555d6de9fbf888cdd85b7a4a7ed0d99da93ebfa9b5f7b46c2",
+    "docs/examples.jl": "28553ce092102475dfd0ea4a72972a53cb14c188e57b72551ef9916aa11d57e0",
+    "docs/execution-contracts.md": "a52df28f722a12652a0dc1eaa129e48aa74f77b5c8144287895834878949d421",
+    "docs/internals.jl": "8ee2038803624811c1baf9700a50495d7ef5821fef7a7aac1bb57f7cc2206600",
+    "docs/recording-plan.md": "7f39218bcac5735f20811a2919600cc80f490aac5cdf58b69d1345baea377095",
+    "docs/refactor-ledger.md": "c45d1eb95ab9a43a3b75266c3e3b7f98a43f3428335109172c7d8991126a373f",
+    "docs/resizing-and-raytracing.jl": "3525c1c1e472cdfc705aa82493d9657c6934836cbf498cb38d168c58178efbfa",
+    "experiments/review-2026-10-20/consumer-coverage.md": "9545822a7a8a364d554309fc9a7508ca9a8f1c70df353b5de31fd3c2967efc64",
+    "experiments/review-2026-10-29/explicit-routing-ruling.json": "6346c866f5b1398db496d60c1f2c72d4fce7526780f04a78af1e47220c7ad58a",
+    "experiments/review-2026-10-29/check-plan-reconciliation.py": "24c2207f41caaf1e9622982e96c0c58616d7106ab54c1d595ef4bcdc5bc883d2",
+    "experiments/review-2026-10-29/check-julia-docs.jl": "4416955aee0e2196cc05a98f26485fc62c4831eeeff2739a39a9b916b98dfb6b",
+    "experiments/review-2026-10-29/plan-reconciliation.json": "c14ddc609cea02dd42f64cb7f9c03b6245803017b4c8ffbd5d41404bd85ff2c9",
+    "experiments/review-2026-10-29/use-case-review.json": "bf057d525ddac3811f794d3306cec795a1f7ae785c4b8695cb69db8554dbc906"
+  },
+  "preserved": "Current operation-layer/device ownership/routing model; original consumer baseline evidence and existing eight-MWE schedule",
+  "no_full_gpu_suite_started": true,
+  "semantic_followup_2026_10_30": {
+    "scope": "Source-grounded target contract review and static/CPU checks only; no runtime refactor or GPU validation",
+    "source_review": "use-case-review.json: execution_boundary_review, resource_lifecycle_review, reduction_source_review, dnn_allocation_review, consumer_contract_pass",
+    "checks": {
+      "documentation_consistency": "pass: seven docs, 751 unique ledger items, 24 original findings, 10 follow-up findings, eight use-case obligations, nine abstract models, five batches/eight fixed MWE specifications",
+      "julia_static": "pass: three sketches, 55 unqualified example names, 11 routing guard controls; four API Julia blocks parsed without execution",
+      "cpu_sum_contract": "pass: identical destination; mapped sum 14; empty sum zero; init=false yields 19; 2x2 mapped sum yields 30, Julia 1.12.7",
+      "whitespace": "git diff --check passed"
+    },
+    "runtime_changes": false,
+    "gpu_execution": false,
+    "committed_or_pushed": false,
+    "target_sha256": {
+      "docs/api.md": "454d101fc147e4b02a4fa1b527823b8361fbb0fc144af654d012f904233037d2",
+      "docs/examples.jl": "34a230bd873e3d2f64ef81c01722b5fc5a62c8a9334ecb5812f15a10cfedeffc",
+      "docs/execution-contracts.md": "c95ba34f73607f8a3df63afe671e30db0f084d45b0bcda271e16008f3da2db7f",
+      "docs/internals.jl": "651ad7e493af43fa0de22129bdd6724980654ca64e55dc1a1951c90f71f7c3a7",
+      "docs/recording-plan.md": "6b9114299a0ad917c7cd0a059719c68dd61642532736062f44420c43cb55fc7b",
+      "docs/refactor-ledger.md": "f62daedab91697bdd1a1a380a9f12a36f92c812dfe697a1aa0832275b0e5f5f7",
+      "docs/resizing-and-raytracing.jl": "56608c7c4fe6a816ecdfada24626815fca7c0307c26f8785fbf9d85791569e0a"
+    },
+    "open": "Implementation, native visibility/lifetime/failure, real consumer/AD integration and performance gates remain open. This pass is not global semantic or native certification."
+  },
+  "public_surface_followup_2026_10_30": {
+    "scope": "Documentation only: public/internal API classification, scoped scratch, host-source copies and explicit image-copy routing",
+    "result": "pass",
+    "checks": [
+      "Seven-doc consistency/local links/ledger and existing nine abstract models pass.",
+      "User API excludes internal location, test queuepolicy, Lavapipe setup and Device(Graph/Group) constructor queries.",
+      "Image copy/resolve lists eager and explicit recorded forms.",
+      "git diff --check passed."
+    ],
+    "changed_target_sha256": {
+      "docs/api.md": "bcc0fff14c497a905507e4b2196f11d70b3b30ccb645fec4cb640f1475c29b62",
+      "docs/execution-contracts.md": "b053db0b0ae817075648684cf60a4da41417a7d30ba6ac8af67086ed044431e6"
+    },
+    "julia_or_gpu_started": false,
+    "runtime_source_changed": false
+  }
+}

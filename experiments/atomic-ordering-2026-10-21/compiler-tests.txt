@@ -1,0 +1,2 @@
+Test Summary:                     | Pass  Total  Time
+LLVM atomic ordering is preserved |  119    119  0.7s

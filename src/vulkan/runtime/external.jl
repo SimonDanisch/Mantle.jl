@@ -1,0 +1,157 @@
+# External-memory interop. Exported images get a dedicated allocation outside the
+# pool: importers see the whole allocation, and NVIDIA requires dedicated
+# allocations for exported images.
+
+"""
+    VulkanExternalImage(ctx, width, height; format = VK.FORMAT_R8G8B8A8_UNORM)
+
+An image on `ctx` whose memory [`memoryfd`](@ref) exports to other APIs. OPTIMAL
+tiling, `TRANSFER_DST | SAMPLED` usage; fill it with `copyto!(img, array)`.
+Requires `ctx.external_memory_available` (`VK_KHR_external_memory_fd`).
+"""
+mutable struct VulkanExternalImage <: ExternalImage
+    image::VK.Image
+    memory::VK.DeviceMemory
+    width::Int
+    height::Int
+    allocation_size::Int   # importers must import exactly this many bytes
+    layout_initialized::Bool
+    ctx::LavaDevice         # the device that owns the image and exports its memory
+end
+
+function VulkanExternalImage(ctx::LavaDevice, width::Integer, height::Integer;
+                       format::VK.Format = VK.FORMAT_R8G8B8A8_UNORM)
+    ctx.external_memory_available ||
+        error("this device was created without VK_KHR_external_memory_fd support")
+    handle_types = VK.EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT
+    image = @vk_checked ctx "external_image_create" VK.create_image(ctx.device, VK.IMAGE_TYPE_2D, format,
+        VK.Extent3D(width, height, 1), 1, 1, VK.SAMPLE_COUNT_1_BIT,
+        VK.IMAGE_TILING_OPTIMAL,
+        VK.IMAGE_USAGE_TRANSFER_DST_BIT | VK.IMAGE_USAGE_SAMPLED_BIT,
+        VK.SHARING_MODE_EXCLUSIVE, UInt32[], VK.IMAGE_LAYOUT_UNDEFINED;
+        next = VK.ExternalMemoryImageCreateInfo(; handle_types))
+    req = VK.get_image_memory_requirements(ctx.device, image)
+    mtype = findfirst(0:(length(ctx.memory_properties.memory_types) - 1)) do i
+        (req.memory_type_bits >> i) & 1 == 1 &&
+            ctx.memory_properties.memory_types[i + 1].property_flags &
+            VK.MEMORY_PROPERTY_DEVICE_LOCAL_BIT != VK.MemoryPropertyFlag(0)
+    end
+    mtype === nothing && error("no device-local memory type for external image")
+    memory = @vk_checked ctx "external_image_alloc" VK.allocate_memory(ctx.device, req.size, mtype - 1;
+        next = VK.ExportMemoryAllocateInfo(;
+            next = VK.MemoryDedicatedAllocateInfo(; image),
+            handle_types))
+    @vk_checked ctx "external_image_bind" VK.bind_image_memory(ctx.device, image, memory, 0)
+    return VulkanExternalImage(image, memory, Int(width), Int(height), Int(req.size), false, ctx)
+end
+
+ExternalImage(d::LavaDevice, width::Integer, height::Integer; kw...) =
+    VulkanExternalImage(d, width, height; kw...)
+
+"""
+    memoryfd(img::VulkanExternalImage) -> Int
+
+Export the image's memory as a new opaque fd per call; the importer owns it
+(`glImportMemoryFdEXT` consumes it). Importers must import exactly
+`img.allocation_size` bytes and, in GL, mark the memory object dedicated and the
+texture OPTIMAL-tiled.
+"""
+function memoryfd(img::VulkanExternalImage)
+    ctx = img.ctx
+    # VK.jl's `get_memory_fd_khr` passes a `Ref{Int64}` where the C signature
+    # wants `int*`, so call the entry point directly.
+    fptr = VK.function_pointer(ctx.device, "vkGetMemoryFdKHR")
+    pfd = Ref{Int32}(-1)
+    info = VK._MemoryGetFdInfoKHR(img.memory,
+        VK.EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT)
+    res = VK.vkGetMemoryFdKHR(ctx.device, info, pfd, fptr)
+    res == VK.VkCore.VK_SUCCESS || error("vkGetMemoryFdKHR failed: $res")
+    return Int(pfd[])
+end
+
+"""
+    copyto!(img::VulkanExternalImage, a::LavaArray) -> img
+
+Copy at least `4 * width * height` bytes of x-contiguous rows from `a` into the
+image, in a one-shot on the device's channel, ordered behind the work that wrote
+`a`, and wait for it, so the importer may sample immediately. Leaves the image in
+`GENERAL` layout.
+"""
+function Base.copyto!(img::VulkanExternalImage, a::LavaArray)
+    nbytes = length(a) * sizeof(eltype(a))
+    needed = 4 * img.width * img.height
+    nbytes >= needed || throw(ArgumentError(
+        "copyto!: the array holds $nbytes bytes and the image needs $needed"))
+    bq = batchqueue(img.ctx)
+    managed = a.buf[]
+    src_offset = UInt64(pool_offset(managed) + a.offset)
+    oldlayout = img.layout_initialized ? VK.IMAGE_LAYOUT_GENERAL : VK.IMAGE_LAYOUT_UNDEFINED
+    tok = oneshot!(bq; tag = :external) do e
+        imagebarrier!(e.cmd, img.image, oldlayout, VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK.PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
+            VK.AccessFlag(0), VK.ACCESS_TRANSFER_WRITE_BIT)
+        VK.cmd_copy_buffer_to_image(e.cmd, managed.buffer, img.image,
+            VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            [VK.BufferImageCopy(src_offset, 0, 0,
+                VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT, 0, 0, 1),
+                VK.Offset3D(0, 0, 0), VK.Extent3D(img.width, img.height, 1))])
+        imagebarrier!(e.cmd, img.image, VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK.IMAGE_LAYOUT_GENERAL,
+            VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            VK.ACCESS_TRANSFER_WRITE_BIT, VK.AccessFlag(0))
+        hold!(e, a)
+    end
+    waitfor!(bq, tok)
+    img.layout_initialized = true
+    return img
+end
+
+"""
+    importhost(bq, ptr, nbytes) -> VkManagedBuffer
+
+A buffer over `nbytes` of host memory at `ptr` (`VK_EXT_external_memory_host`):
+dedicated, outside the pool, and with `mapped_ptr` the memory itself. `ptr` and
+`nbytes` must be multiples of `ctx.host_import_alignment`. The memory must outlive
+the buffer; destroying the buffer leaves it alone.
+"""
+function importhost(bq::SubmitChannel{<:VulkanQueue}, ptr::Ptr, nbytes::Integer)
+    ctx = deviceof(bq)
+    align = ctx.host_import_alignment
+    align > 0 || error("this device was created without VK_EXT_external_memory_host")
+    UInt(ptr) % align == 0 && nbytes % align == 0 || throw(ArgumentError(
+        "importhost: $(nbytes) bytes at $(ptr) are not aligned to the device's $(align)"))
+    dev = ctx.device
+    htype = VK.EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT
+    hostprops = unwrap(VK.get_memory_host_pointer_properties_ext(dev, htype, Ptr{Cvoid}(ptr)))
+    usage = VK.BUFFER_USAGE_STORAGE_BUFFER_BIT | VK.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK.BUFFER_USAGE_TRANSFER_SRC_BIT | VK.BUFFER_USAGE_TRANSFER_DST_BIT
+    buf = VK.Buffer(dev, nbytes, usage, VK.SHARING_MODE_EXCLUSIVE, UInt32[];
+                    next = VK.ExternalMemoryBufferCreateInfo(; handle_types = htype))
+    reqs = VK.get_buffer_memory_requirements(dev, buf)
+    memtype = find_memory_type(ctx, reqs.memory_type_bits & hostprops.memory_type_bits,
+                               VK.MemoryPropertyFlag(0))
+    memory = VK.DeviceMemory(dev, nbytes, memtype;
+        next = VK.ImportMemoryHostPointerInfoEXT(htype, Ptr{Cvoid}(ptr);
+            next = VK.MemoryAllocateFlagsInfo(UInt32(0); flags = VK.MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)))
+    unwrap(VK.bind_buffer_memory(dev, buf, memory, 0))
+    address = VK.get_buffer_device_address(dev, VK.BufferDeviceAddressInfo(buf))
+    return VkManagedBuffer(buf, memory, address, Ptr{UInt8}(ptr), Int(nbytes), nothing,
+                           Stamp{UInt64}(), BUF_STATE_ALIVE, ctx)
+end
+
+canimporthost(dev::LavaDevice) = dev.host_import_alignment > 0
+
+function importhost(backend::LavaDevice, A::DenseArray{T,N}) where {T,N}
+    managed = importhost(batchqueue(backend), pointer(A), sizeof(A))
+    # The release closure keeps `A` alive. It synchronizes first because
+    # `vk_free!` defers the destroy, and `A` may be freed once the closure is
+    # collected.
+    ref = GPUArrays.DataRef(managed) do buf
+        KA.synchronize(backend)
+        vk_free!(buf)
+        A
+        return
+    end
+    # ambient-allocation-ok: wraps `ref`, whose buffer carries `backend`;
+    # nothing is allocated.
+    return LavaArray{T,N}(ref, size(A))
+end

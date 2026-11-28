@@ -1,0 +1,56 @@
+{
+  "date": "2026-10-29",
+  "scope": "User-confirmed correction of the resource/execution model; implementation remains open",
+  "user_confirmed": [
+    "An array has one owning Mantle Device/domain; many nodes in multiple graphs may reference it.",
+    "A Group contains operation nodes, not adapted arrays/devices; no recording-device wrapper or returned Group alias.",
+    "Ordinary eager numerical methods keep Julia signatures, without an extra public device argument.",
+    "The separate recorded-call entry explicitly names Graph/Group and a supported function.",
+    "One shared Mantle/GPUArrays-style operation layer serves eager and recorded calls and owns device-capability dispatch; backend algorithm duplication is forbidden.",
+    "Actual replay-time CPU callbacks use hostcall!(target,f,args;writes), not dispatch!(target,HostCall(f),...)."
+  ],
+  "derived_contract_updates": [
+    "Known operation definitions/recipes supply shared validation, effects, returns, candidate materialization and resource management; arbitrary Julia capture is not promised.",
+    "Return contracts are explicit per operation definition: mul! returns C; recorded Array returns a typed future; neither ! nor a universal-future heuristic determines this.",
+    "Array(a) is standard blocking eager conversion; call!(target,Array,a) declares a snapshot; Readback(previous_future) only requests its next execution. No separate public eager Readback(array).",
+    "Actual CPU work during replay uses explicit hostcall! staging/host cuts; unsupported call! never falls back to it or eager execution.",
+    "The core selector intersects enabled hardware/compiler capability, precision/layout/shape/alias/workspace and recording/control requirements, then compares eligible candidates using measured evidence.",
+    "Eager calls materialize immediately; graph compile materializes/reselects retained recipes; replay uses baked choices without probing/tuning.",
+    "KA.get_backend(a) stays the owning Mantle Device; ordinary host length/size queries synchronize and return snapshots, never a recording target or hidden graph provenance."
+  ],
+  "supersedes": [
+    "Group/graph adaptation and array binding parts of MR-06/09/22 and AE-03/04/06",
+    "The proposed GraphDevice wrapper and the return-binding workaround",
+    "Intermediate direct mul!(Graph/Group,...) and public mul!(Device,...) syntax",
+    "Intermediate public eager/recorded Readback(array) forms"
+  ],
+  "preserved": [
+    "All historical evidence and before-edit archives",
+    "One array family; persistent default; explicit scratch; shared policy; standard logical-size API",
+    "Five batches and eight fixed MWE specifications"
+  ],
+  "ledger": [
+    "F110",
+    "F111",
+    "F112",
+    "F113",
+    "F114"
+  ],
+  "runtime_status": "open",
+  "before_archive": "before-explicit-routing-cleanup.tar.gz",
+  "previous_user_confirmed": [
+    "An array has one owning Mantle device/domain and can be referenced by many nodes in multiple graphs.",
+    "A Group groups operation nodes, not array/device identities.",
+    "Pass the recording target explicitly: mul!(group,C,A,B).",
+    "One shared operation implementation; no adaptation to Graph/Group, no recording device wrappers or Group-bound returned aliases."
+  ],
+  "working_public_spelling": "call!(target,f,args...;kwargs...), target Graph/Group",
+  "before_operation_layer_archive": "before-shared-operation-layer.tar.gz",
+  "consumer_surface_clarification_2026_11_02": {
+    "public_boundary": "Consumer bindings use export or public; core helpers use neither. Julia-qualified internal access has no compatibility guarantee.",
+    "cache_maintenance": "trim!(dev) is private core/test policy, not an application maintenance step.",
+    "array_trimming": "No initial public trim!(a); shrinking retains capacity. Reconsider only for a concrete consumer and portable contract.",
+    "particle_compaction": "app_compact!(target,active,particles,predicate) is an illustrative direct application/library graph builder, not Mantle compact! or a required call! registration.",
+    "acceleration_structure_compaction": "The separately specified compact!(as) scene-storage maintenance contract is unchanged."
+  }
+}

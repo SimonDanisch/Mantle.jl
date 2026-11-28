@@ -1,0 +1,37 @@
+{
+  "scope": "Documentation consistency and abstract models only; no native/runtime qualification",
+  "documents": {
+    "documents": 8,
+    "unique_ledger_items": 755,
+    "review_findings_mapped": 24,
+    "local_links_and_anchors": "valid",
+    "followup_api_findings_mapped": 10,
+    "use_case_review_obligations_mapped": 8,
+    "explicit_routing_and_shared_capability_policy": "specified; runtime open",
+    "fixed_mwes_specified": 8,
+    "implementation_batches": 5,
+    "mwe_runtime_qualification": "open; specifications only",
+    "stale_contract_patterns": "absent",
+    "sha256": {
+      "api-guide.md": "23b7c340e23c9b0224f793cfa32b7765dfd3f12d0b7d0e4379bb41695341a1ea",
+      "api.md": "184fe68167251294f3bed2c30a035c1d419a9327e7e373f30fce6b9244328225",
+      "examples.jl": "f79d2ca2ac0386716aed2843c45b2ef3d4b54136f29357f7fab9325881ba87f6",
+      "execution-contracts.md": "5cad8a192f34541ca6b1558124d13092d03084303772a737d702b5d8b489b536",
+      "internals.jl": "63e097e23a724a27402a5a3832f21529f25464c4e661e9e124142bcb96ad3374",
+      "recording-plan.md": "d424b6ef0f9ad2dbe083b45f1be79ea5b070e885082a0b205d1fec1fd35ccd6f",
+      "refactor-ledger.md": "cf69c3a37c186407ffd4d141e61ef8ad11354e31bd5d59311125e94a531e4e76",
+      "resizing-and-raytracing.jl": "f1006d44f7966599d7df0783b5dcb8f6a1ef3a7b76249458b946bd9f82bc6f8a"
+    }
+  },
+  "models": {
+    "complete_alias_frontier": true,
+    "linear_chain_frontier_size": true,
+    "accepted_build_consumes_only_covered_geometry": true,
+    "nested_loop_lexical_reset": true,
+    "region_predicate_latched_for_body": true,
+    "wait_timeout_preserves_live_work": true,
+    "conditional_render_clear_and_preserve": true,
+    "candidate_region_rebuild_preserves_output": true,
+    "import_alias_allocation_generation": true
+  }
+}

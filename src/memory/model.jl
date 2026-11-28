@@ -13,13 +13,9 @@ Base.length(w::OffsetWindow) = w.upper - w.lower
 """
     Gap(during, window)
 
-A sub-interval of an item's lifespan over which it needs less than its full size.
-`window === nothing` means it needs nothing at all there, so its bytes are free
-for someone else; a window means it occupies only that sub-range of its extent.
-
-This is the case RT build scratch, a shrinking DNN workspace and a mip chain all
-want and none of them can express today: each currently reserves its peak for its
-whole lifespan.
+A sub-interval of an item's lifespan over which it needs less than its full
+size: nothing when `window === nothing`, else only that sub-range of its extent.
+For needs that shrink (RT build scratch, a DNN workspace, a mip chain).
 """
 struct Gap
     during::Span
@@ -27,14 +23,11 @@ struct Gap
 end
 
 """
-    Item(id, live, size; alignment, gaps, offset)
+    Item(id, live, size; alignment = 1, gaps = Gap[], offset = nothing)
 
-One resource to place. `live` is its liveness interval, `size` its bytes, and the
-offset is the only free variable.
-
-`alignment` is per item because Vulkan reports a different
-`memoryRequirements.alignment` per resource. `offset` pins an item that was
-allocated elsewhere.
+One resource to place: liveness interval `live`, `size` bytes, and an offset to
+choose. `alignment` is per item because Vulkan reports it per resource; `offset`
+pins an item allocated elsewhere.
 """
 struct Item
     id::String

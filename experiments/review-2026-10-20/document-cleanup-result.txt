@@ -1,0 +1,20 @@
+Document consistency check: 2026-10-21T12:03:23.673592+00:00
+PASS: 7 target documents and 2 evidence entrances; 695 unique ledger IDs; 585 suite cases.
+PASS: 60 local links/anchors.
+PASS: 97 suite paths.
+PASS: 66 suite case references.
+PASS: whitespace checks in Mantle and Vulkan.
+Native direct-host evidence: 519 assertions, zero validation errors; source-specific import failures recorded explicitly.
+Output-header regression: 4 assertions; generator old initializer 191/8, fix 192/7 (seven pre-existing failures remain).
+Host models/helpers: 131 assertions; parsed 52 suite/design/doc files and expanded/lowered 42 areas / 585 cases.
+F74 remains unfinished: replacement integration, other OS/native API and capacity/performance qualification.
+No staged restore fallback introduced.
+
+SHA256 of target documents:
+8aad4c42cced8c0b9a6bf772136c037c7e1b2def84500f53a3835dbee2c6f518  docs/recording-plan.md
+73e0cc549a6c378962141bbec57cce2bdded199440aeb11c9c917c63aaad4070  docs/api.md
+37cacb39ee7893454dbd638d76cc15013154b6db93779641bc2f4d3e9ecd280a  docs/internals.jl
+95d26fe6f7cd6ace9b7f3333f0fc74b516587e777915fa01c2557d008bf1f017  docs/examples.jl
+4905c17a314edf2a0acaf532c099b1f577b2b0dc9ba8a53335c44cea11644062  docs/resizing-and-raytracing.jl
+c5b98d2359583587d74aab98b512aec60474b3a5e6f8bbe688b4f2abf466f625  docs/execution-contracts.md
+43f66e0a1b209159cfd5be655bf1f14b9268bbc9701d2d9ca99acc98028e8bdd  docs/refactor-ledger.md

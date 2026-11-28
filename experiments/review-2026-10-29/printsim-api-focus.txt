@@ -1,0 +1,29 @@
+PRINTSIM API FOCUS — 2026-10-30
+
+Direct target-aware timestep construction, standard device-array sum! outputs and explicit configuration/diagnostic contracts now have a coherent target shape; the actual Group/shared-operation port and native qualification are not implemented.
+
+Proposed usage (Julia pseudocode, Group support requires migration):
+
+frame = Graph(dev)
+physics = Group(frame, "physics")
+PrintSim.step!(physics, world, state, dt)
+repeat!(physics, substeps)
+# Add rendering nodes using the SAME device-owned state arrays.
+run!(frame)
+
+Use the existing explicit-target graph-building interface directly, generalized to Group. The builder composes call! array operations/raw dispatches during construction; it needs no call! wrapper, operation registration or CPU execution during replay. No new Mantle Solver class or per-backend solver implementation is proposed.
+
+Operator boundary:
+- Standard mul! for assembled or matrix-free operators, through call! when recorded
+- Standard ldiv! for preconditioner application, through call! when recorded
+- Standard sum!(f,r,A) uses an ordinary one-element device array r; convergence kernels read r[1]. Existing world_dot! kernels remain valid.
+
+Implementation/qualification still open:
+- Implement and qualify operator/reduction definitions using the documented shared recipe boundary; retain valid existing target-aware kernels.
+- Apply sparse/matrix-free/preconditioner schema and invalidation contracts to actual FEM/AScanner migration.
+- Keep dt-dependent setup recompute/rebuild/reject and diagnostic host-boundary rules explicit in the actual port.
+
+Parameter rule: Updating a GPURef cannot by itself refresh a timestep-dependent operator or coarse factor. The PrintSim definition must recompute/rebuild affected setup or explicitly reject such changes; preserve persistent simulation state as appropriate.
+Diagnostic rule: Keep a GPU-only resident mode. CPU diagnostics require explicit host boundaries/controller orchestration and measured synchronization; do not hide callbacks inside a supposedly baked GPU-controlled loop.
+
+Tracked by F115/F118/F120. No runtime changes or GPU tests.

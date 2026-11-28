@@ -15,11 +15,12 @@ function point_vertex(pos::AbstractVector{Vec3f}, col::AbstractVector{Vec4f},
     return (position = mvp * Vec4f(p[1], p[2], p[3], 1.0f0), color = c)
 end
 
-const POINTS = Rasterizer(
-    vertex = point_vertex, fragment = inputs -> inputs.color,
-    varyings = (color = Vec4f,),
-    topology = PointList(), blend = Additive(), cull = NoCull(), depth = DepthOff(),
-)
+const POINTS = Rasterizer(; vertex = VertexShader(point_vertex; outputs = (color = Vec4f,)),
+                            fragment = FragmentShader(inputs -> inputs.color),
+                            topology = PointList(),
+                            blend = Additive(),
+                            cull = NoCull(),
+                            depth = DepthOff())
 
 function camera(angle)
     eye = Vec3f(3.2f0 * cos(angle), 1.2f0, 3.2f0 * sin(angle))
@@ -40,13 +41,13 @@ function run(frames = 600)
 
     gpos = LavaArray(pts); gcol = LavaArray(cols); gsiz = LavaArray(Float32[2.0f0])
     win = RenderWindow(W, H; title = "baseline", vsync = false)
-    bq = Lava.vk_context().default_bq
+    bq = Mantle.batchqueue(Mantle.Device())
 
     times = Float64[]
     t0 = time()
     for k in 1:frames
         isopen(win) || break
-        Lava.GLFW.PollEvents()
+        Mantle.GLFW.PollEvents()
         tf = time()
         acquire_next_image!(win)
         draw!(bq, POINTS, WindowTarget(win), N;

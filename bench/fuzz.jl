@@ -1,16 +1,7 @@
-# Differential and validation fuzzing of the barrier derivation.
-#
-# Elision is where races come from, and a race that happens to produce the right
-# answer is not evidence of anything. So this checks two things per case:
-#
-#   1. synchronization validation reports nothing, which is what actually
-#      detects a missing barrier
-#   2. the results match the same graph run with the backend's unconditional
-#      per-dispatch barrier
-#
-# Graphs are random DAGs by construction: pass i writes resource i and reads only
-# resources written earlier, so nothing is ever read before it is written and the
-# comparison is deterministic.
+# Fuzzing of the barrier derivation over random DAGs: each result is checked
+# against a CPU replay, and with synchronization validation on, the validation
+# messages are what detect a missing barrier. Pass i writes resource i and reads
+# only resources written earlier, so the result is deterministic.
 
 import Mantle
 using Lava, KernelAbstractions, Random
@@ -39,7 +30,7 @@ it, but a scheduler is free to move that pass anywhere its dependencies allow an
 a later transient then legitimately takes over its bytes. Only a resource the
 placer never touches is comparable after the run.
 """
-function random_graph(dev, rng, n, passes; policy = M.Overlap(), coalesce = true)
+function random_graph(dev, rng, n, passes; policy = M.Overlap())
     g = M.Graph(dev)
     seed = M.Buffer(dev, fill(1.0f0, n))
     out = M.Buffer(dev, zeros(Float32, n))
@@ -49,19 +40,12 @@ function random_graph(dev, rng, n, passes; policy = M.Overlap(), coalesce = true
         a = sources[rand(rng, 1:length(sources))]
         b = sources[rand(rng, 1:length(sources))]
         dst = bufs[i]
-        M.compute!(g, "p$i") do p
-            ra = M.use(p, a; read = true)
-            rb = M.use(p, b; read = true)
-            w = M.use(p, dst; write = true)
-            M.dispatch!(p, mix!, (w, ra, rb, Float32(i)), n)
-        end
+        M.dispatch!(g, mix!, (dst, a, b, Float32(i)), n; name = "p$i")
         push!(sources, dst)
     end
-    M.compute!(g, "out") do p
-        M.dispatch!(p, keep!, (M.use(p, out; write = true),
-                               M.use(p, bufs[end]; read = true)), n)
-    end
-    (; g, seed, out, bufs, plan = M.Plan(g; policy, coalesce))
+    M.dispatch!(g, keep!, (out,
+                               bufs[end]), n; name = "out")
+    (; g, seed, out, bufs, plan = M.record!(M.Plan(g; policy)))
 end
 
 """
@@ -85,49 +69,30 @@ end
 emitted(plan) = count(pp -> !isempty(pp.pre), plan.passes)
 
 """
-Run one random graph both ways and compare, and check both against the CPU
-replay. Returns the barrier counts, whether the two agreed, and whether either
-was right.
+Run one random graph and check it against the CPU replay. Returns the number of
+passes with barriers and whether the result was right.
 """
 function check(dev, seed; n = 4096, passes = 12, policy = M.Overlap())
-    rng = MersenneTwister(seed)
-    s = random_graph(dev, rng, n, passes; policy)
+    s = random_graph(dev, MersenneTwister(seed), n, passes; policy)
     want = expected(MersenneTwister(seed), passes)
-
-    function once(mode)
-        M.update!(s.seed, fill(1.0f0, n))
-        M.run!(s.plan; barriers = mode)
-        Lava.flush!(dev.bq, dev.ctx.device)
-        Array(M.storage(s.out))
-    end
-    reference = once(:backend)
-    got = once(:derived)
-
-    # What coalescing removed, measured rather than guessed at. `passes - 1` was
-    # the old proxy for "every barrier there could be", and it undercounts: a plan
-    # is replayed, so the first pass needs one against the previous frame too.
-    # Comparing against the same graph compiled with `coalesce = false` asks the
-    # question the number is for, and does not move when a mask gets wider.
+    M.update!(s.seed, fill(1.0f0, n))
+    M.run!(s.plan)
+    M.waitfor!(s.plan)
     (seed = seed,
      emitted = emitted(s.plan),
-     uncoalesced = emitted(random_graph(dev, MersenneTwister(seed), n, passes;
-                                        policy, coalesce = false).plan),
      possible = length(s.plan.passes) - 1,
-     agree = got == reference,
-     correct = all(==(want), got) && all(==(want), reference))
+     correct = all(==(want), Array(M.storage(s.out))))
 end
 
 """Sweep seeds. With validation on, `messages` is the number that matters."""
 function fuzz(seeds = 1:25; n = 4096, passes = 12, validate = false, policy = M.Overlap())
-    dev = M.Device(Lava)
-    validate && Lava.clear_validation_messages!()
+    dev = M.Device(M.VulkanAPI())
+    validate && Mantle.clear_validation_messages!()
     results = [check(dev, s; n, passes, policy) for s in seeds]
-    msgs = validate ? Lava.get_validation_messages() : []
+    msgs = validate ? Mantle.get_validation_messages() : []
     (cases = length(results),
      wrong = count(r -> !r.correct, results),
-     disagreements = count(r -> !r.agree, results),
      emitted_total = sum(r -> r.emitted, results),
-     uncoalesced_total = sum(r -> r.uncoalesced, results),
      possible_total = sum(r -> r.possible, results),
      messages = length(msgs),
      detail = unique(msgs))

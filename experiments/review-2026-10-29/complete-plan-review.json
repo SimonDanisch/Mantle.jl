@@ -1,0 +1,952 @@
+{
+  "review_date": "2026-10-29",
+  "scope": "Complete Mantle target refactor plan in docs: four Markdown contracts/ledger and three Julia design/example sketches; linked existing evidence and selected real consumers checked",
+  "verdict": "Keep the single core runtime and shared operation bodies, but reconcile API decisions and resolve the P1 findings before freezing foundational implementation",
+  "principles": [
+    "Mantle is the Julia GPU API across hardware families",
+    "Modern native graph/indirect/resource capabilities must be expressible without backend-specific consumer programs",
+    "One core owner per scheduling, memory, lifetime, hazard, selection and control-flow algorithm; native adapters translate driver facts and commands"
+  ],
+  "provenance": {
+    "repository_head": "a30a423da24cfc841e09943b409ea091383f93cc",
+    "branch": "sd/lava-refactor",
+    "reviewed_working_tree": true,
+    "prior_uncommitted_ascanner_doc_edits_preserved": true
+  },
+  "evidence_limits": [
+    "Findings concern target contracts/sketches, not claims of newly reproduced runtime failures",
+    "No Julia or GPU suite was started for this review",
+    "Existing integration passes, consumer ports, slot/capacity probes, numerical rulings and direct-host evidence were consulted and remain valid within their recorded scopes",
+    "The current Cell/prepare GPU logical-size design remains settled; review does not reopen general overflow policy or demand a new dynamic-view API",
+    "Recommendations are review proposals, not silently adopted API changes"
+  ],
+  "models": {
+    "script": "experiments/review-2026-10-29/plan-review-models.py",
+    "results": "experiments/review-2026-10-29/plan-review-model-results.json",
+    "scope": "Four small Python counterexamples to specified abstract rules only"
+  },
+  "findings": [
+    {
+      "id": "MR-01",
+      "priority": "P1",
+      "category": "correctness",
+      "title": "Aliased transient reuse needs a DAG frontier, not one last topological user",
+      "evidence": [
+        {
+          "file": "docs/internals.jl",
+          "line": 832
+        },
+        {
+          "file": "docs/internals.jl",
+          "line": 856
+        },
+        {
+          "file": "docs/recording-plan.md",
+          "line": 531
+        }
+      ],
+      "problem": "sharing! adds lastuser(a) -> firstuser(b). Two independent readers of a may run on different queues: the reader listed last can finish first. Reusing the bytes after only that reader races the other reader. A scalar lifetime index is not a GPU completion proof.",
+      "recommendation": "Compute the maximal prior-use and minimal next-use frontiers for each aliased byte range; connect all required frontier pairs or a core-owned join. Perform this once in core, then derive both DAG edges and native barriers.",
+      "acceptance": [
+        "Two readers on distinct queues, with the earlier-listed reader deliberately delayed; poison/reuse the bytes in a later transient.",
+        "Remove one frontier edge as a negative control."
+      ],
+      "status": "new finding"
+    },
+    {
+      "id": "MR-02",
+      "priority": "P1",
+      "category": "correctness",
+      "title": "Automatic acceleration updates do not cover a writer and trace in the same segment",
+      "evidence": [
+        {
+          "file": "docs/recording-plan.md",
+          "line": 1226
+        },
+        {
+          "file": "docs/internals.jl",
+          "line": 1548
+        },
+        {
+          "file": "docs/internals.jl",
+          "line": 1646
+        }
+      ],
+      "problem": "Updates are pended after accepting a segment and applied by the next touching submission. A graph can write vertices and trace the BLAS in the same segment; an ordinary memory dependency does not rebuild/refit the acceleration structure before that trace. Additionally, skipping every reader in builtby(pl) suppresses necessary updates if a write follows the build or a later build stage never submits.",
+      "recommendation": "Represent geometry dirtiness and builds in the core execution DAG. Insert an update before an AS read when required by the preceding geometry version; clear a pending update only when an accepted matching build consumes that version. Retain transitive reader propagation on partial failure.",
+      "acceptance": [
+        "One graph: deform -> query/trace; results match an independently rebuilt scene.",
+        "Build -> deform -> external trace.",
+        "Deform -> failing host/preparation stage before build; a later independent trace must see the required update."
+      ],
+      "status": "new finding"
+    },
+    {
+      "id": "MR-03",
+      "priority": "P1",
+      "category": "inconsistency",
+      "title": "A GPU-length writer makes its repeated group illegal in the sketch",
+      "evidence": [
+        {
+          "file": "docs/internals.jl",
+          "line": 315
+        },
+        {
+          "file": "docs/internals.jl",
+          "line": 387
+        },
+        {
+          "file": "docs/internals.jl",
+          "line": 495
+        },
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 1110
+        }
+      ],
+      "problem": "declare! inserts a PrepareNode after lengthof writers, but loopable accepts only KernelNode/TraceNode. repeat! therefore rejects the generated body. Adding a writer to an already repeated group can append the kernel and then throw on its prepare node, violating declaration atomicity. This directly contradicts the settled GPU-size model and KL-14.",
+      "recommendation": "Include internal prepare/control nodes in the loop lowering contract and validate a declaration's complete node expansion before mutating the graph. This is a sketch/implementation correction, not a new GPU-size abstraction.",
+      "acceptance": [
+        "Repeat a compact/length-publish/consume chain through zero and nonzero counts.",
+        "Declare a length writer both before and after repeat!; failed declarations leave nodes and holds unchanged."
+      ],
+      "status": "new finding"
+    },
+    {
+      "id": "MR-04",
+      "priority": "P1",
+      "category": "correctness",
+      "title": "A host semaphore timeout is incorrectly treated as proven device loss",
+      "evidence": [
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 243
+        },
+        {
+          "file": "docs/api.md",
+          "line": 421
+        },
+        {
+          "file": "docs/internals.jl",
+          "line": 1938
+        }
+      ],
+      "problem": "A submission can wait on a legal chain on another queue for longer than twice jobtimeout after its own predecessor passes. The current rule poisons a healthy device. Vulkan distinguishes VK_TIMEOUT from VK_ERROR_DEVICE_LOST. The calibrated heuristic estimate in internals.jl also cannot support the claim that every estimate is a proven lower bound.",
+      "recommendation": "Separate wait-deadline expiration, suspected hang and confirmed native device loss. Account for dependency progress when applying a diagnostic deadline. Keep calibrated scheduling estimates distinct from any defensible lower bound used for mandatory rejection.",
+      "acceptance": [
+        "Several individually short upstream segments exceed the downstream queue's deadline in aggregate without poisoning the device.",
+        "Actual disposable-context device-loss tests still verify quarantine.",
+        "Profile calibration cannot turn a feasible launch into an error claimed to be mathematically necessary."
+      ],
+      "status": "new finding"
+    },
+    {
+      "id": "MR-05",
+      "priority": "P1",
+      "category": "design",
+      "title": "Reselection on growth has no operation-reconstruction step",
+      "evidence": [
+        {
+          "file": "docs/recording-plan.md",
+          "line": 257
+        },
+        {
+          "file": "docs/recording-plan.md",
+          "line": 293
+        },
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 682
+        },
+        {
+          "file": "docs/internals.jl",
+          "line": 445
+        },
+        {
+          "file": "docs/internals.jl",
+          "line": 713
+        }
+      ],
+      "problem": "Operations select and expand into fixed kernel nodes at declaration; compile explicitly performs no operation expansion. Yet shape/capacity growth promises reselection through recompile. Recompiling the existing kernel nodes cannot replace a one-kernel GEMM with a multi-kernel split-K implementation or resize its algorithm-specific scratch. Origin metadata has no specified replay/reconstruction contract.",
+      "recommendation": "Retain one core-owned operation recipe/region sufficient to re-emit the selected implementation when its selection dependencies change, using the same operation body as eager execution. Alternatively restrict the promise explicitly, but do not run an out-of-domain specialization. Keep reselection and dependent scratch reconstruction atomic.",
+      "acceptance": [
+        "Growth across two candidate domains with different node counts/workspaces; compare fresh declaration versus recompile.",
+        "Code/config invalidation and tuning affect a subsequent compile according to one documented policy."
+      ],
+      "status": "new finding"
+    },
+    {
+      "id": "MR-06",
+      "priority": "P1",
+      "category": "inconsistency",
+      "title": "Graph construction still silently chooses transient lifetime",
+      "evidence": [
+        {
+          "file": "docs/api.md",
+          "line": 67
+        },
+        {
+          "file": "docs/recording-plan.md",
+          "line": 139
+        },
+        {
+          "file": "docs/recording-plan.md",
+          "line": 148
+        },
+        {
+          "file": "docs/examples.jl",
+          "line": 76
+        }
+      ],
+      "problem": "The documents still say MantleArray(g,...) is always transient and graph arrays are never persistent. That conflicts with the user's later decision that scratch must be explicit and persistence should not depend on constructing with a different device/location. Passing a graph leaf to another graph currently requires anticipating it and creating a device array beforehand.",
+      "recommendation": "Reconcile all seven target documents with the agreed separation of array identity, execution target, ownership and lifetime. Preserve one public array family and the existing Cell/prepare metadata model. Specify explicit scratch declaration and the boundary for retaining/sharing graph outputs without introducing backend-specific array roles.",
+      "acceptance": [
+        "Recorded particle state survives replay and plan replacement.",
+        "A leaf retained by a second graph preserves allocation and size metadata.",
+        "An explicitly temporary array can be arena-aliased and cannot escape without a diagnosed lifetime transition."
+      ],
+      "status": "Earlier user decision not propagated into target docs"
+    },
+    {
+      "id": "MR-07",
+      "priority": "P1",
+      "category": "API coverage",
+      "title": "Native-array import has a qualification gate but no usable public entry",
+      "evidence": [
+        {
+          "file": "docs/api.md",
+          "line": 148
+        },
+        {
+          "file": "docs/api.md",
+          "line": 308
+        },
+        {
+          "file": "docs/api.md",
+          "line": 644
+        },
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 451
+        },
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 1112
+        }
+      ],
+      "problem": "Vendor-array arguments are rejected; withview exports Mantle storage to vendor code. The low-level external-memory verbs do not specify wrapping an existing same-context CUDA.jl allocation as a MantleArray. KL-16 requires exactly that. Ownership, alias identity, initial readiness and return-to-foreign-stream ordering are not covered by a public import contract.",
+      "recommendation": "Specify one zero-copy import/adapt route into MantleArray with retained external owner, nonrelocatable storage, canonical alias/resource identity and explicit readiness/completion edges. Core owns that lifecycle; backend verbs supply pointer/context/handle facts. Imported bytes remain separately accounted.",
+      "acceptance": [
+        "An existing CuArray enters a CUDA Mantle graph without copying.",
+        "Two wrappers/views over the same allocation cannot evade hazards.",
+        "Drop the external Julia handle while work is in flight; no early free; completion is safely handed back to the foreign stream."
+      ],
+      "status": "new finding"
+    },
+    {
+      "id": "MR-08",
+      "priority": "P1",
+      "category": "correctness/API",
+      "title": "Conditional draws cannot correctly implement the cached shadow-pass example",
+      "evidence": [
+        {
+          "file": "docs/recording-plan.md",
+          "line": 1681
+        },
+        {
+          "file": "docs/api.md",
+          "line": 150
+        },
+        {
+          "file": "docs/api.md",
+          "line": 272
+        }
+      ],
+      "problem": "The plan updates shadow/AO maps using conditional draws without clear, preserving old contents. Removing or moving an occluder leaves old depth in uncovered pixels. Unconditionally clearing every run instead destroys the cached result on skipped runs. The API conditions individual launches/draws, not the clear plus pass as a semantic unit.",
+      "recommendation": "Provide a core representation for a conditional render region/pass or an equivalent explicit reset-and-render operation whose skipped path preserves the old map and active path clears and rebuilds it. Derive conditional hazards and render loads once in core.",
+      "acceptance": [
+        "Render an occluder, remove/move it, dirty the shadow map; uncovered depth resets correctly.",
+        "A clean frame preserves the map and performs no update work.",
+        "Validate both outcomes on Vulkan and Metal."
+      ],
+      "status": "new finding"
+    },
+    {
+      "id": "MR-09",
+      "priority": "P1",
+      "category": "API usability",
+      "title": "Missing Group propagation silently changes the meaning of model code",
+      "evidence": [
+        {
+          "file": "docs/api.md",
+          "line": 163
+        },
+        {
+          "file": "docs/recording-plan.md",
+          "line": 349
+        },
+        {
+          "file": "docs/examples.jl",
+          "line": 163
+        },
+        {
+          "file": "test/suite/areas/repeat.jl",
+          "line": 332
+        }
+      ],
+      "problem": "A normal broadcast or generic GPUArrays operation called while assembling a repeated model body declares into the parent graph and executes once. Omitting Group often produces a valid graph with wrong results rather than an error. Explicit leading-Group overloads cover only a subset of operations; the suite even expects unsupported Group operations to throw.",
+      "recommendation": "Use one consistent explicit execution-target contract through all composed operations, including broadcast and library adapters. Preserve the no-ambient-state principle. Add a construction-time validation or target-binding scheme that prevents work intended for a repeated region from silently escaping it; do not fix every consumer with separate dispatch paths.",
+      "acceptance": [
+        "A realistic model step using broadcast, reduction, view and matmul repeats in full.",
+        "A deliberately omitted/unsupported target is diagnosed at declaration instead of producing a plausible wrong graph."
+      ],
+      "status": "Known restriction, inadequate for the newly requested misuse-resistant API"
+    },
+    {
+      "id": "MR-10",
+      "priority": "P1",
+      "category": "API coverage/design",
+      "title": "Nested solver loops and reusable graph regions are forbidden",
+      "evidence": [
+        {
+          "file": "docs/api.md",
+          "line": 151
+        },
+        {
+          "file": "docs/recording-plan.md",
+          "line": 354
+        },
+        {
+          "file": "dev/PrintSim/src/dynamics/coupled.jl",
+          "line": 547
+        },
+        {
+          "file": "dev/PrintSim/src/dynamics/world_energy.jl",
+          "line": 429
+        }
+      ],
+      "problem": "repeat! rejects nested groups and nested loops, and builds cannot occur in repeated bodies. A FEM/Newton step containing CG and line-search loops cannot itself become a reusable repeated timestep region. Current consumers can manually unroll outer loops, but that is not clean library composition and magnifies plan size.",
+      "recommendation": "Retain structured regions/control flow in a core representation that can compose nested bounded loops and legal build phases. Lower a region through native capabilities or one shared portable expansion. Do not require backend-specific solver loops or consumer-owned graph partitioning.",
+      "acceptance": [
+        "Timestep -> Newton -> CG/line search with independent GPU termination and correct state reset.",
+        "Compose an existing solver/model region into another graph or repeated region without rewriting its launches."
+      ],
+      "status": "Intentional current restriction; conflicts with breadth and composability goals"
+    },
+    {
+      "id": "MR-11",
+      "priority": "P2",
+      "category": "performance",
+      "title": "Unrolling removes the representation needed for efficient native loops",
+      "evidence": [
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 207
+        },
+        {
+          "file": "docs/internals.jl",
+          "line": 583
+        },
+        {
+          "file": "docs/internals.jl",
+          "line": 619
+        },
+        {
+          "file": "docs/recording-plan.md",
+          "line": 2497
+        }
+      ],
+      "problem": "All loops are expanded before selection/rewrites into maximum-iterations times body-size nodes and slots. Stopped loops still incur predicated commands. Optional native loops are mentioned, but there is no retained loop region or pre-expansion choice through which to select them. A 1000-kernel decoder and 448 tokens implies roughly 448000 body nodes before heads/prepares.",
+      "recommendation": "Preserve structured control until core selects a valid native-region encoding or portable expansion. Treat compile time, executable size, argument memory and post-termination cost as acceptance metrics. CUDA supports nested conditional graph bodies; no blanket claim is made for HIP or for arbitrary node families.",
+      "acceptance": [
+        "Short early termination at a large maximum; compare CPU compile cost, GPU work and plan bytes.",
+        "Native and fallback encodings produce identical zero/one/many-iteration results and retain submission-budget semantics."
+      ],
+      "status": "Known fallback cost (F72), plus missing optimization seam"
+    },
+    {
+      "id": "MR-12",
+      "priority": "P2",
+      "category": "performance",
+      "title": "Dependency construction retains quadratic access history",
+      "evidence": [
+        {
+          "file": "docs/internals.jl",
+          "line": 682
+        },
+        {
+          "file": "docs/internals.jl",
+          "line": 666
+        },
+        {
+          "file": "docs/recording-plan.md",
+          "line": 533
+        }
+      ],
+      "problem": "dependencies! stores every past use and compares a new use with all earlier uses, then performs transitive reduction. A linear in-place chain creates O(N^2) candidate conflicts/edges; unrolled models multiply this. AnyWrite for every render/composite operation broadens the cost and suppresses unrelated overlap.",
+      "recommendation": "Maintain a correct per-resource/byte-range access frontier with conditional-state merging, reuse the same hazard algebra for DAG construction/barriers, and isolate conservative composite reservations to where required. Measure compile scaling, not just steady-state run!.",
+      "acceptance": [
+        "Long shared-resource chains and independent branches at increasing node counts.",
+        "Large material/plot sets and unrolled/native-loop variants; report edges, compile time and peak host memory."
+      ],
+      "status": "new finding"
+    },
+    {
+      "id": "MR-13",
+      "priority": "P2",
+      "category": "performance/API coverage",
+      "title": "Blanket no-capture and kernel-only regions exclude useful library recordings",
+      "evidence": [
+        {
+          "file": "docs/recording-plan.md",
+          "line": 293
+        },
+        {
+          "file": "docs/recording-plan.md",
+          "line": 887
+        },
+        {
+          "file": "docs/refactor-ledger.md",
+          "line": 835
+        },
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 675
+        }
+      ],
+      "problem": "cuBLAS is always classified foreign; Group candidates must be kernels; stream capture is universally deleted. Native cuBLAS supports graph capture for eligible operations, and NCCL also supplies a capture path. Rejecting every such construction can force slower portable kernels or extra host submissions even when an encapsulated library recording would be valid.",
+      "recommendation": "Keep one Mantle graph compiler and forbid consumer/runtime capture as an alternative execution model, but allow a qualified leaf adapter to return an owned native subgraph with declared accesses, workspace, parameter bounds and replay restrictions. Eligibility is capability-based; region controls still reject genuinely unsupported node families.",
+      "acceptance": [
+        "A caller-workspace cuBLAS candidate records/replays safely when supported.",
+        "A library recording with hidden allocations, unsupported host output or invalid conditional-body nodes is rejected before enqueue."
+      ],
+      "status": "Deliberate current restriction; native capability verified in primary documentation"
+    },
+    {
+      "id": "MR-14",
+      "priority": "P2",
+      "category": "performance/design",
+      "title": "Arena sharing is coupled to scheduling priority",
+      "evidence": [
+        {
+          "file": "docs/api.md",
+          "line": 116
+        },
+        {
+          "file": "docs/recording-plan.md",
+          "line": 817
+        },
+        {
+          "file": "docs/recording-plan.md",
+          "line": 630
+        }
+      ],
+      "problem": "All equal-priority graphs alias the same arena and serialize even when their data is independent and memory headroom is ample. Changing priority is the only documented way to request separate storage, conflating urgency with concurrency. One queue per kind per run also cannot place two branches on distinct queues of that same kind.",
+      "recommendation": "Keep the memory-saving default if desired, but separate priority from arena/concurrency policy in core. Make explicit or automatic concurrent placement obey memory budget and resource hazards. Preserve serial replay for stateful instances; independent invocation slots/instances can use disjoint storage.",
+      "acceptance": [
+        "Two independent equal-priority workloads with sufficient headroom versus memory-pressure mode.",
+        "An editor frame beside background compute; measure real overlap and latency instead of only host submit time."
+      ],
+      "status": "Known policy tradeoff, significant to the stated mixed-workload goal"
+    },
+    {
+      "id": "MR-15",
+      "priority": "P2",
+      "category": "modern GPU coverage",
+      "title": "GPU-driven command streams cannot be expressed by changing draw count alone",
+      "evidence": [
+        {
+          "file": "docs/api.md",
+          "line": 271
+        },
+        {
+          "file": "docs/recording-plan.md",
+          "line": 1306
+        },
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 358
+        }
+      ],
+      "problem": "draw! exposes count/instances and a fixed index-array binding, but no typed array of draw commands, GPU draw-count source, per-command firstIndex/baseVertex/baseInstance or GPU-selected pipeline/command sequences. One conditional recorded draw per potential object is insufficient to express the most capable GPU-driven rendering paths efficiently.",
+      "recommendation": "Add a typed core indirect-command/region representation with bounded command capacity and declared resource sets. Share command layout, validation and hazards; native verbs encode multidraw/Metal ICB/device-generated commands where enabled, with a core fallback. Keep ordinary draw! convenient.",
+      "acceptance": [
+        "GPU cull -> compact draw commands -> draw-indirect-count with heterogeneous mesh ranges.",
+        "GPU command ordering/pipeline selection where supported; no per-object CPU rerecord or host count download."
+      ],
+      "status": "new finding"
+    },
+    {
+      "id": "MR-16",
+      "priority": "P2",
+      "category": "modern GPU coverage",
+      "title": "Modern kernel execution features lack an explicit runtime contract",
+      "evidence": [
+        {
+          "file": "docs/api.md",
+          "line": 147
+        },
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 350
+        },
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 408
+        },
+        {
+          "file": "docs/refactor-ledger.md",
+          "line": 958
+        }
+      ],
+      "problem": "KI already supplies matrix/tensor primitives and F34 has native Vulkan/PTX evidence. Do not duplicate them in Mantle. However, the fixed runtime capability schema and launch signature do not describe cooperative/cluster launch constraints, dynamic shared-memory requirements, asynchronous-copy/tensor-descriptor resource effects, or device graph launch/command-generation eligibility. A raw compiled candidate alone cannot specify all associated scheduling and lifetime requirements.",
+      "recommendation": "Extend existing KI/compiler facts and core candidate/launch requirements only where runtime semantics are needed. Keep one common validation/selection/resource model and small native launch/descriptor verbs. Explicitly map modern features to enabled paths, fallbacks or unsupported raw operations.",
+      "acceptance": [
+        "One end-to-end optimized DNN kernel using asynchronous movement/tensor operations with descriptor/workspace lifetime checks.",
+        "A cooperative/cluster candidate is selected only with legal geometry/residency and cannot be arbitrarily split.",
+        "Retain F34 evidence; no claim that these primitives are wholly absent today."
+      ],
+      "status": "new finding"
+    },
+    {
+      "id": "MR-17",
+      "priority": "P2",
+      "category": "performance",
+      "title": "Whole-root and whole-plan hazards block disjoint resource work",
+      "evidence": [
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 16
+        },
+        {
+          "file": "docs/recording-plan.md",
+          "line": 665
+        },
+        {
+          "file": "docs/internals.jl",
+          "line": 232
+        }
+      ],
+      "problem": "Every view shares one hazard key and cross-graph conflicts wait for whole last runs. This is conservative and safe, but disjoint KV-cache pages/layers, FEM vectors, upload windows and image subresources cannot overlap when represented under one root. Bound(r) similarly groups all slots for a resource, potentially serializing earlier consumers against later metadata preparation.",
+      "recommendation": "Retain canonical root identity, but allow proven subrange/subresource uses beneath it and precise metadata-slot epochs in core. Fall back to whole-root when analysis is unknown. Do not create separate ownership states for aliases just to recover concurrency.",
+      "acceptance": [
+        "Disjoint views/pages overlap safely; overlapping or unknown mappings still order.",
+        "KV append with reads of independent regions; streamed upload/compute overlap; image mip/layer producer-consumer tests."
+      ],
+      "status": "Known conservative semantics; refinement opportunity rather than demonstrated wrong result"
+    },
+    {
+      "id": "MR-18",
+      "priority": "P2",
+      "category": "API coverage",
+      "title": "Image API is narrower than the stated general GPU/raster scope",
+      "evidence": [
+        {
+          "file": "docs/api.md",
+          "line": 233
+        },
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 165
+        },
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 625
+        }
+      ],
+      "problem": "Native image requirements mention mips/layers/samples, but the portable sampling contract is explicitly 2-D and mipmaps remain gated; the public resource/access surface does not specify image subresource views, storage-image loads/stores/atomics, 3-D/array/cube sampling or attachment feedback constructions. These cannot all be inferred from Image(dev,T,dims...). Existing volume rendering may use buffer-backed media; this is a target API coverage gap, not evidence that the current volume consumer is broken.",
+      "recommendation": "Specify typed image views/usages and eligible sampling/storage/attachment operations in core and KI, with format-specific capabilities. Ensure the public signature index includes samples and depth/stencil constructors already described in the execution companion.",
+      "acceptance": [
+        "Compute-generated image sampled by a following draw without a compulsory array-to-image workaround.",
+        "3-D/array/mip paths required by actual consumers; correct subresource hazards and descriptor retirement.",
+        "Picking/integer attachments, MSAA resolves, storage-image support and feedback qualification remain distinct."
+      ],
+      "status": "new finding"
+    },
+    {
+      "id": "MR-19",
+      "priority": "P2",
+      "category": "correctness/API coverage",
+      "title": "Recorded RNG semantics are not specified",
+      "evidence": [
+        {
+          "file": "docs/recording-plan.md",
+          "line": 204
+        },
+        {
+          "file": "docs/recording-plan.md",
+          "line": 212
+        },
+        {
+          "file": "docs/examples.jl",
+          "line": 184
+        }
+      ],
+      "problem": "The plan delegates random numbers to GPUArrays and notes host random draws become captured constants, but defines no explicit device RNG state/seed/counter ownership across replay, nested loops, concurrent graphs, recompilation or tuning. These semantics matter to Monte Carlo rendering, stochastic particles, sampling and training. The no-ambient-state rule makes relying on an unspecified default task RNG particularly problematic.",
+      "recommendation": "Define explicit RNG state or counter-stream ownership through existing resources; specify replay advancement, reset/reseed and reproducibility scope. Preserve existing numerical decisions and ensure tuning uses private RNG/recurrent state.",
+      "acceptance": [
+        "Successive replays advance samples; seeded replay from reset is reproducible within the promised scope.",
+        "Recompile and queue scheduling do not accidentally reset/reuse a stream.",
+        "Two sessions and repeated-body stochastic operations have intentional independent streams."
+      ],
+      "status": "new finding"
+    },
+    {
+      "id": "MR-20",
+      "priority": "P2",
+      "category": "use-case qualification",
+      "title": "FEM and general simulations are not first-class replacement consumer gates",
+      "evidence": [
+        {
+          "file": "docs/refactor-ledger.md",
+          "line": 858
+        },
+        {
+          "file": "docs/refactor-ledger.md",
+          "line": 913
+        },
+        {
+          "file": "docs/refactor-ledger.md",
+          "line": 919
+        }
+      ],
+      "problem": "The consumer matrix covers real DNN, LLM, rendering/editor and new AScanner contact/sparse paths, but full phase-11/12 gates do not name PrintSim/FEM. AScanner compaction tests do not validate nested nonlinear solvers, numerical convergence, FP64-sensitive assembly or timestep replay. Existing successful physics tests remain baseline evidence, not replacement qualification.",
+      "recommendation": "Add focused source-grounded replacement gates for actual FEM/particle/rigid/contact consumers, without starting a broad unrelated physics rewrite. Include sparse assembly/SpMV or matrix-free operators, preconditioning, Newton/Krylov/line search and state retention. Distinguish inference from optional training/AD scope.",
+      "acceptance": [
+        "A small independently checked FEM assembly/solve and convergence history.",
+        "A retained particle birth/death/contact timestep with GPU logical sizes.",
+        "Coupled simulation -> ray/raster display in one graph plus two-graph sharing."
+      ],
+      "status": "new finding"
+    },
+    {
+      "id": "MR-21",
+      "priority": "P2",
+      "category": "API coverage/performance",
+      "title": "Multi-GPU LLM/solver execution is outside the current graph boundary",
+      "evidence": [
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 927
+        },
+        {
+          "file": "docs/api.md",
+          "line": 302
+        },
+        {
+          "file": "docs/recording-plan.md",
+          "line": 2493
+        }
+      ],
+      "problem": "The synchronous host snapshot/read-store devicecopy! baseline is explicit and valid. It does not express asynchronous peer transfers or collective communication inside recorded per-device graphs. Thus current single-device LLM support does not establish tensor/pipeline parallel LLM or distributed FEM coverage.",
+      "recommendation": "Document this coverage boundary explicitly and provide a core-owned asynchronous transfer/collective node or external-channel integration for qualified peers/communication libraries. A single cross-driver scheduler is not automatically required; coordinated per-device graphs can preserve the model.",
+      "acceptance": [
+        "When this scope is enabled, two device graphs exchange device data without a mandatory host-sized snapshot and retain correct completion/ownership.",
+        "Collective participation and failure handling are qualified for the actual library/version."
+      ],
+      "status": "Explicit current scope limit; a gap against unrestricted use-case claims"
+    },
+    {
+      "id": "MR-22",
+      "priority": "P2",
+      "category": "inconsistency",
+      "title": "Readback appendix reintroduces the public Plan/record path and fixed-shape rebuild",
+      "evidence": [
+        {
+          "file": "docs/api.md",
+          "line": 956
+        },
+        {
+          "file": "docs/api.md",
+          "line": 980
+        },
+        {
+          "file": "docs/api.md",
+          "line": 118
+        },
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 1024
+        }
+      ],
+      "problem": "The target API appendix uses Plan(g;budget=Inf), record!, run!(plan), free!(plan), while the main contract makes Plan internal and run!(g) the public path. It requires a new graph on shape change while other sections preserve graph identity and dynamic array extents. This appears to mix current baseline limitations with the target contract.",
+      "recommendation": "Rewrite the target example around Graph/run!(g)/free!(g); explicitly label any retained baseline limitation. Specify whether a dynamic snapshot copies logical payload plus metadata using the existing size model, or rejects a request before mutation; do not silently require replacing the user's graph.",
+      "acceptance": [
+        "One public lifecycle example uses only final entry points.",
+        "Zero/nonzero GPU-sized snapshots and replay preserve coherent size/payload, or fail at the documented boundary.",
+        "Future teardown and prefailure accepted snapshots retain their existing lifetime guarantees."
+      ],
+      "status": "new finding"
+    },
+    {
+      "id": "MR-23",
+      "priority": "P2",
+      "category": "correctness/implementation boundary",
+      "title": "Multi-command recipes lose ordering when only barrier-shaped dependencies are emitted",
+      "evidence": [
+        {
+          "file": "docs/resizing-and-raytracing.jl",
+          "line": 1009
+        },
+        {
+          "file": "docs/internals.jl",
+          "line": 1248
+        },
+        {
+          "file": "docs/internals.jl",
+          "line": 2841
+        }
+      ],
+      "problem": "Build preparation recipes express internal sequencing as Deps with empty predecessor nodes plus memory barriers. The CUDA emitter only maps deps.preds to graph edges and does not use deps.barrier. Consequently the sketches do not establish ordering for dependent commands emitted within one logical node/change prefix. This is especially important to avoid each backend inventing its own recipe walker.",
+      "recommendation": "Expand multi-command recipes into a core command DAG with explicit command identities and internal predecessor edges before native emission. Derive barriers from those same effects for linear command-buffer APIs. Native emitters must not reconstruct sequencing policy.",
+      "acceptance": [
+        "A multi-kernel build prefix and cell/data copy sequence on a DAG backend produce identical results to the linear backend.",
+        "Randomize independent native-node execution; removing an internal edge must fail a negative control."
+      ],
+      "status": "Concrete disagreement between normative complete-Deps promise and pseudocode"
+    },
+    {
+      "id": "MR-24",
+      "priority": "P2",
+      "category": "API usability/correctness",
+      "title": "Producer writes need a bounded allocation view distinct from the old logical extent",
+      "evidence": [
+        {
+          "file": "docs/execution-contracts.md",
+          "line": 1056
+        },
+        {
+          "file": "docs/resizing-and-raytracing.jl",
+          "line": 127
+        },
+        {
+          "file": "test/suite/areas/lengthof.jl",
+          "line": 39
+        }
+      ],
+      "problem": "An output can have logical length zero and nonzero backing capacity. A compaction producer cannot use ordinary logical bounds checks to write newly produced elements beyond that old length. The sketch says kernels are bounds checked, while a representative producer test uses @inbounds specifically to write past the launch's logical extent. Updating the source Cell inside the same kernel also does not refresh that kernel's prepared descriptor.",
+      "recommendation": "Document the internal bounded producer descriptor/view or count-before-scatter preparation using the SAME array/storage model, then publish the logical result through lengthof with correct dependencies. No new public array type, dynamic-view API or general overflow-policy decision is required.",
+      "acceptance": [
+        "A checked compaction output grows from logical zero within known capacity without requiring raw unchecked writes.",
+        "Publish/prepare ordering covers same-kernel producers, empty inputs and multi-kernel scatter chains."
+      ],
+      "status": "Implementation obligation under the already settled GPU-size model"
+    }
+  ],
+  "coverage": [
+    {
+      "use_case": "DNN inference",
+      "baseline": "Real DNNKernels/JuliaVision ports and numerical/performance evidence exist",
+      "target_gaps": [
+        "MR-05",
+        "MR-09",
+        "MR-11",
+        "MR-13",
+        "MR-16"
+      ]
+    },
+    {
+      "use_case": "Ray tracing",
+      "baseline": "Real Hikari typed queues/closest-hit groups and traversal evidence exist",
+      "target_gaps": [
+        "MR-02",
+        "MR-03",
+        "MR-19",
+        "MR-23"
+      ]
+    },
+    {
+      "use_case": "Simulations",
+      "baseline": "Existing physics tests and AScanner retained-frame evidence exist",
+      "target_gaps": [
+        "MR-06",
+        "MR-10",
+        "MR-19",
+        "MR-20"
+      ]
+    },
+    {
+      "use_case": "FEM",
+      "baseline": "PrintSim FEM/Newton/Krylov/line-search source exists",
+      "target_gaps": [
+        "MR-10",
+        "MR-17",
+        "MR-20"
+      ]
+    },
+    {
+      "use_case": "Particles/contact/sparse conversion",
+      "baseline": "AScanner source fingerprints and valid native contact paths retained",
+      "target_gaps": [
+        "MR-03",
+        "MR-07",
+        "MR-20",
+        "MR-24"
+      ],
+      "already_specified": "KL-11..16 remain implementation/qualification gates, not new design questions"
+    },
+    {
+      "use_case": "Real-time raster / Makie",
+      "baseline": "Existing attachments/picking/FXAA/shadow/atlas and interop consumers mapped",
+      "target_gaps": [
+        "MR-08",
+        "MR-14",
+        "MR-15",
+        "MR-18"
+      ]
+    },
+    {
+      "use_case": "LLMs",
+      "baseline": "Bonsai and other session/KV/model source and acceptance baselines exist",
+      "target_gaps": [
+        "MR-05",
+        "MR-09",
+        "MR-11",
+        "MR-16",
+        "MR-17",
+        "MR-19",
+        "MR-21"
+      ]
+    },
+    {
+      "use_case": "Training / automatic differentiation",
+      "baseline": "Not established by inference-only gates",
+      "target_gaps": [
+        "MR-19",
+        "MR-20"
+      ],
+      "required_scope_statement": "Explicitly state intended coverage and add backward/optimizer/alias/precision gates if included; AD algorithms belong above Mantle"
+    }
+  ],
+  "secondary_consistency_notes": [
+    {
+      "file": "docs/recording-plan.md",
+      "line": 1073,
+      "note": "Still describes present as part of submitnative!, contradicting the separate presentnative! contract."
+    },
+    {
+      "file": "docs/recording-plan.md",
+      "line": 183,
+      "note": "Array prose still lists CUDA/HIP reserved-address growth beside queue-sparse backends; qualify against the committed/VMM boundary already fixed in execution-contracts \u00a73."
+    },
+    {
+      "file": "docs/internals.jl",
+      "line": 514,
+      "note": "kernel::Function excludes callable structs despite the promised functor/capture ABI."
+    },
+    {
+      "file": "docs/api.md",
+      "line": 152,
+      "note": "MantleArray{Bool,1} does not prove one element. Singleton flag shape must be validated, not claimed to be enforced solely by this type."
+    },
+    {
+      "file": "docs/refactor-ledger.md",
+      "line": 240,
+      "note": "P2.A11 still says one meaning of capacity (budget(dev)); distinguish array capacity from device headroom as the API already does."
+    },
+    {
+      "file": "docs/recording-plan.md",
+      "line": 28,
+      "note": "Only one declared public-signature owner should hold final spellings; architecture, sketches and ledger should reference those signatures to reduce drift."
+    }
+  ],
+  "native_sources": [
+    {
+      "title": "CUDA graphs: nested conditional nodes and device graph launch, with restrictions",
+      "url": "https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html",
+      "supports": [
+        "MR-11",
+        "MR-16"
+      ]
+    },
+    {
+      "title": "cuBLAS CUDA Graphs Support, including host output and workspace restrictions",
+      "url": "https://docs.nvidia.com/cuda/cublas/index.html#cuda-graphs-support",
+      "supports": [
+        "MR-13"
+      ]
+    },
+    {
+      "title": "Vulkan device-generated commands",
+      "url": "https://docs.vulkan.org/features/latest/features/proposals/VK_EXT_device_generated_commands.html",
+      "supports": [
+        "MR-15"
+      ]
+    },
+    {
+      "title": "Metal: encoding indirect command buffers on the GPU",
+      "url": "https://developer.apple.com/documentation/metal/encoding-indirect-command-buffers-on-the-gpu",
+      "supports": [
+        "MR-15"
+      ]
+    },
+    {
+      "title": "Vulkan vkWaitSemaphores return semantics",
+      "url": "https://docs.vulkan.org/refpages/latest/refpages/source/vkWaitSemaphores.html",
+      "supports": [
+        "MR-04"
+      ]
+    },
+    {
+      "title": "CUDA advanced kernel programming: asynchronous barriers and execution",
+      "url": "https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/advanced-kernel-programming.html",
+      "supports": [
+        "MR-16"
+      ]
+    },
+    {
+      "title": "NCCL CUDA graph capture and collective restrictions",
+      "url": "https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/cudagraph.html",
+      "supports": [
+        "MR-13",
+        "MR-21"
+      ]
+    }
+  ],
+  "recommended_resolution_order": [
+    [
+      "MR-01",
+      "MR-02",
+      "MR-03",
+      "MR-04",
+      "MR-23"
+    ],
+    [
+      "MR-05",
+      "MR-06",
+      "MR-07",
+      "MR-08",
+      "MR-09",
+      "MR-10"
+    ],
+    [
+      "MR-11",
+      "MR-12",
+      "MR-13",
+      "MR-14",
+      "MR-15",
+      "MR-16",
+      "MR-17",
+      "MR-18",
+      "MR-19",
+      "MR-20",
+      "MR-21",
+      "MR-22",
+      "MR-24"
+    ]
+  ],
+  "document_fingerprints": {
+    "docs/api.md": "93f0a4496e5b631605b86eb42caf7890270ac389087e42d7ca5a46ab5a6ef2bf",
+    "docs/examples.jl": "49e10ff1001832c2221b9c3db4d5654c18f95a4481ac150465b36a5841ec563a",
+    "docs/execution-contracts.md": "8d79475ce908dbd16cb603bc8d1bf44e37ac72740d33579556d3edb2bfe9a43e",
+    "docs/internals.jl": "0fca333c94510a924b6e0fb6571c1c5d6ade31bfa254d8685519d7cb1954d725",
+    "docs/recording-plan.md": "fbc7679fc64d916f33188dd26bd9399cd66e8324e361ae7b9496ac03bb29e047",
+    "docs/refactor-ledger.md": "3b96467d5d580d8571837314b28c377480f17adb638dfb21f47826df6392e19f",
+    "docs/resizing-and-raytracing.jl": "9ac89ffd4c6a9fbfb086ee9762f6ebce8795cd418aa340757f13e80f0b7c1746"
+  },
+  "evidence_path_roots": {
+    "docs/": "Mantle repository",
+    "test/": "Mantle repository",
+    "dev/": "VideoEdit workspace"
+  }
+}

@@ -1,0 +1,759 @@
+{
+  "date": "2026-10-29",
+  "scope": "Target plan reconciliation only; no Mantle runtime/compiler/native implementation changed",
+  "review_base": {
+    "report": "complete-plan-review.json",
+    "working_tree_archive": "plan-before-reconciliation.tar.gz",
+    "fingerprints": "reconciliation-before.json"
+  },
+  "authority": {
+    "architecture": "docs/recording-plan.md",
+    "public_signatures": "docs/api.md",
+    "protocols": "docs/execution-contracts.md",
+    "implementation_status": "docs/refactor-ledger.md",
+    "sketches": [
+      "docs/internals.jl",
+      "docs/resizing-and-raytracing.jl",
+      "docs/examples.jl"
+    ]
+  },
+  "principles": [
+    "One core policy/algorithm owner across backends",
+    "One public array family; one owning device; operation targets independent of storage lifetime/ownership",
+    "Base.length/size query logical dimensions; Base.resize! mutates them",
+    "Native acceleration extends the same resource/region/command model; native eligibility is measured, not assumed",
+    "No backend-specific user code; dispatch on enabled device capabilities",
+    "Seek representations improving compilation and execution; prefer runtime when a measured tradeoff remains unavoidable",
+    "Simple stable types with bounded code/ABI specialization, not graph topology/resource identities/dynamic extents in types",
+    "Standard eager methods and known-function call! share one Mantle operation definition/recipe",
+    "Shared Mantle layer owns device/compiler/semantic/execution capability selection; backends report facts and encode commands"
+  ],
+  "user_decisions_preserved": [
+    "Explicit scratch request instead of lifetime hidden in a device constructor",
+    "Persistent device-owned state/retained leaves shared directly across nodes and same-array foreign imports",
+    "Canonical GPU logical size plus capacity and internal Cell/prepare machinery",
+    "No public size-cell handle or new dynamic-view/overflow abstraction",
+    "No speculative staged restore; retain F74 direct-host evidence and investigation threshold"
+  ],
+  "additional_consistency_decisions": [
+    "Known operation definitions/recipes supply shared validation, effects, returns, candidate materialization and resource management; arbitrary Julia capture is not promised.",
+    "Return contracts are explicit per operation definition: mul! returns C; recorded Array returns a typed future; neither ! nor a universal-future heuristic determines this.",
+    "Array(a) is standard blocking eager conversion; call!(target,Array,a) declares a snapshot; Readback(previous_future) only requests its next execution. No separate public eager Readback(array).",
+    "Actual CPU work during replay uses explicit HostCall staging/host cuts; unsupported call! never falls back to it or eager execution.",
+    "The core selector intersects enabled hardware/compiler capability, precision/layout/shape/alias/workspace and recording/control requirements, then compares eligible candidates using measured evidence.",
+    "Eager calls materialize immediately; graph compile materializes/reselects retained recipes; replay uses baked choices without probing/tuning.",
+    "KA.get_backend(a) stays the owning Mantle Device; ordinary host length/size queries synchronize and return snapshots, never a recording target or hidden graph provenance."
+  ],
+  "findings": [
+    {
+      "id": "MR-01",
+      "title": "Aliased transient reuse needs a DAG frontier, not one last topological user",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Alias reuse follows all maximal old users and minimal new users; root spans and descriptor epochs use one shared frontier algebra.",
+      "ledger": [
+        "F76",
+        "P1.A12"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.4 One command DAG and complete alias frontiers"
+        }
+      ],
+      "acceptance": [
+        "Two readers on distinct queues, with the earlier-listed reader deliberately delayed; poison/reuse the bytes in a later transient.",
+        "Remove one frontier edge as a negative control."
+      ]
+    },
+    {
+      "id": "MR-02",
+      "title": "Automatic acceleration updates do not cover a writer and trace in the same segment",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Insert write -> matching build/refit -> AS-read edges inside a segment; accepted builds consume only covered dirty versions.",
+      "ledger": [
+        "F77",
+        "F44",
+        "P5.A4"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.5 Derived acceleration versions"
+        }
+      ],
+      "acceptance": [
+        "One graph: deform -> query/trace; results match an independently rebuilt scene.",
+        "Build -> deform -> external trace.",
+        "Deform -> failing host/preparation stage before build; a later independent trace must see the required update."
+      ]
+    },
+    {
+      "id": "MR-03",
+      "title": "A GPU-length writer makes its repeated group illegal in the sketch",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Infer device resize! effects, include internal prepares in controls, and validate/publish full declarations atomically.",
+      "ledger": [
+        "F78",
+        "P4.A12"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.1 Explicit targets, ownership and lifetime"
+        },
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.2 Size effects and producer descriptors"
+        }
+      ],
+      "acceptance": [
+        "Repeat a compact/length-publish/consume chain through zero and nonzero counts.",
+        "Declare a length writer both before and after repeat!; failed declarations leave nodes and holds unchanged."
+      ]
+    },
+    {
+      "id": "MR-04",
+      "title": "A host semaphore timeout is incorrectly treated as proven device loss",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "WaitTimeout preserves pending work and holds; native failure alone establishes DeviceLost. Costs are estimates unless independently justified as bounds.",
+      "ledger": [
+        "F79",
+        "P3.A26"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "Execution features and bounded submissions"
+        }
+      ],
+      "acceptance": [
+        "Several individually short upstream segments exceed the downstream queue's deadline in aggregate without poisoning the device.",
+        "Actual disposable-context device-loss tests still verify quarantine.",
+        "Profile calibration cannot turn a feasible launch into an error claimed to be mathematically necessary."
+      ]
+    },
+    {
+      "id": "MR-05",
+      "title": "Reselection on growth has no operation-reconstruction step",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Retain RegionNode recipes and stable outputs; materialization reselects the full command/workspace sequence.",
+      "ledger": [
+        "F80",
+        "P1.A4"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.3 Regions, recipes and native control"
+        }
+      ],
+      "acceptance": [
+        "Growth across two candidate domains with different node counts/workspaces; compare fresh declaration versus recompile.",
+        "Code/config invalidation and tuning affect a subsequent compile according to one documented policy."
+      ]
+    },
+    {
+      "id": "MR-06",
+      "title": "Graph construction still silently chooses transient lifetime",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Persistent by default on one owning Device; explicit scratch lifetime independent of constructor/operation target; graphs reference the same leaf directly, without adaptation.",
+      "ledger": [
+        "F81",
+        "P6.A19"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.1 Explicit targets, ownership and lifetime"
+        }
+      ],
+      "acceptance": [
+        "Recorded particle state survives replay and plan replacement.",
+        "A leaf retained by a second graph preserves allocation and size metadata.",
+        "An explicitly temporary array can be arena-aliased and cannot escape without a diagnosed lifetime transition."
+      ]
+    },
+    {
+      "id": "MR-07",
+      "title": "Native-array import has a qualification gate but no usable public entry",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "MantleArray(dev,foreign;copy=false,stream) imports allocation ownership/readiness and canonicalizes generation-aware aliases.",
+      "ledger": [
+        "F82"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.6 Imported allocations and explicit device communication"
+        }
+      ],
+      "acceptance": [
+        "An existing CuArray enters a CUDA Mantle graph without copying.",
+        "Two wrappers/views over the same allocation cannot evade hazards.",
+        "Drop the external Julia handle while work is in flight; no early free; completion is safely handed back to the foreign stream."
+      ]
+    },
+    {
+      "id": "MR-08",
+      "title": "Conditional draws cannot correctly implement the cached shadow-pass example",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Condition the complete clear+draw region; native control or a qualified core conditional-clear candidate resets active maps and preserves skipped maps.",
+      "ledger": [
+        "F83"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.7 Conditional render reset and image subresources"
+        }
+      ],
+      "acceptance": [
+        "Render an occluder, remove/move it, dirty the shadow map; uncovered depth resets correctly.",
+        "A clean frame preserves the map and performs no update work.",
+        "Validate both outcomes on Vulkan and Metal."
+      ]
+    },
+    {
+      "id": "MR-09",
+      "title": "Missing Group propagation silently changes the meaning of model code",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Known-function call!(Graph/Group,f,args...) lowers through the shared Mantle definition; library composition explicitly emits recorded calls/raw primitives. Arrays retain one Device and no recording context.",
+      "ledger": [
+        "F84",
+        "F35"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.1 Explicit targets, ownership and lifetime"
+        }
+      ],
+      "acceptance": [
+        "A realistic recorded model with broadcast, matmul and device-output reductions repeats in full.",
+        "Reuse operands directly in sibling Groups/other graphs without device/type/identity changes.",
+        "Unknown functions reject before publication or eager execution; per-definition return tests include a ! function not returning its destination."
+      ]
+    },
+    {
+      "id": "MR-10",
+      "title": "Nested solver loops and reusable graph regions are forbidden",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Nested Groups/loops and legal internal work compose; device-controlled HostCalls reject; native build controls require eligibility/equivalence.",
+      "ledger": [
+        "F85",
+        "P1.A19"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.3 Regions, recipes and native control"
+        }
+      ],
+      "acceptance": [
+        "Timestep -> Newton -> CG/line search with independent GPU termination and correct state reset.",
+        "Compose an existing solver/model region into another graph or repeated region without rewriting its launches."
+      ]
+    },
+    {
+      "id": "MR-11",
+      "title": "Unrolling removes the representation needed for efficient native loops",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Select native region encoding before portable bounded expansion; measure compile time, plan/slot bytes and stop overhead.",
+      "ledger": [
+        "F85",
+        "F72"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.3 Regions, recipes and native control"
+        }
+      ],
+      "acceptance": [
+        "Short early termination at a large maximum; compare CPU compile cost, GPU work and plan bytes.",
+        "Native and fallback encodings produce identical zero/one/many-iteration results and retain submission-budget semantics."
+      ]
+    },
+    {
+      "id": "MR-12",
+      "title": "Dependency construction retains quadratic access history",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Bounded access frontiers replace quadratic historical-use accumulation; unknown composite overlap remains explicitly conservative.",
+      "ledger": [
+        "F76",
+        "P1.A6"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.4 One command DAG and complete alias frontiers"
+        }
+      ],
+      "acceptance": [
+        "Long shared-resource chains and independent branches at increasing node counts.",
+        "Large material/plot sets and unrolled/native-loop variants; report edges, compile time and peak host memory."
+      ]
+    },
+    {
+      "id": "MR-13",
+      "title": "Blanket no-capture and kernel-only regions exclude useful library recordings",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Allow capability-qualified closed library/communication recordings with explicit effects/workspaces; no consumer capture or second graph runtime.",
+      "ledger": [
+        "F86",
+        "P10.D4"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.3 Regions, recipes and native control"
+        }
+      ],
+      "acceptance": [
+        "A caller-workspace cuBLAS candidate records/replays safely when supported.",
+        "A library recording with hidden allocations, unsupported host output or invalid conditional-body nodes is rejected before enqueue."
+      ]
+    },
+    {
+      "id": "MR-14",
+      "title": "Arena sharing is coupled to scheduling priority",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Separate share_scratch from priority and use core logical queue lanes capable of same-kind endpoint mapping.",
+      "ledger": [
+        "F87",
+        "P3.A25"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.4 One command DAG and complete alias frontiers"
+        }
+      ],
+      "acceptance": [
+        "Two independent equal-priority workloads with sufficient headroom versus memory-pressure mode.",
+        "An editor frame beside background compute; measure real overlap and latency instead of only host submit time."
+      ]
+    },
+    {
+      "id": "MR-15",
+      "title": "GPU-driven command streams cannot be expressed by changing draw count alone",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Typed DrawCommand/DispatchCommand and ExecutionSet expose bounded GPU command streams, live counts and declared program/resource sets.",
+      "ledger": [
+        "F88"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.8 Indirect streams and modern launch requirements"
+        }
+      ],
+      "acceptance": [
+        "GPU cull -> compact draw commands -> draw-indirect-count with heterogeneous mesh ranges.",
+        "GPU command ordering/pipeline selection where supported; no per-object CPU rerecord or host count download."
+      ]
+    },
+    {
+      "id": "MR-16",
+      "title": "Modern kernel execution features lack an explicit runtime contract",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Reuse KI facts/intrinsics in the shared Mantle operation selector; intersect device/compiler semantics and launch/recording/control/workspace requirements once for eager and recorded candidates.",
+      "ledger": [
+        "F89"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.8 Indirect streams and modern launch requirements"
+        }
+      ],
+      "acceptance": [
+        "One end-to-end optimized DNN kernel using asynchronous movement/tensor operations with descriptor/workspace lifetime checks.",
+        "A cooperative/cluster candidate is selected only with legal geometry/residency and cannot be arbitrarily split.",
+        "Retain F34 evidence; no claim that these primitives are wholly absent today."
+      ]
+    },
+    {
+      "id": "MR-17",
+      "title": "Whole-root and whole-plan hazards block disjoint resource work",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Proven ranges/subresources and descriptor epochs refine canonical root uses; unknown overlap remains root-conservative.",
+      "ledger": [
+        "F76",
+        "P6.A23"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.4 One command DAG and complete alias frontiers"
+        }
+      ],
+      "acceptance": [
+        "Disjoint views/pages overlap safely; overlapping or unknown mappings still order.",
+        "KV append with reads of independent regions; streamed upload/compute overlap; image mip/layer producer-consumer tests."
+      ]
+    },
+    {
+      "id": "MR-18",
+      "title": "Image API is narrower than the stated general GPU/raster scope",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Typed image views and sampling/storage/atomic families have explicit format/dimension/usage requirements and separate native gates.",
+      "ledger": [
+        "F90"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.7 Conditional render reset and image subresources"
+        }
+      ],
+      "acceptance": [
+        "Compute-generated image sampled by a following draw without a compulsory array-to-image workaround.",
+        "3-D/array/mip paths required by actual consumers; correct subresource hazards and descriptor retirement.",
+        "Picking/integer attachments, MSAA resolves, storage-image support and feedback qualification remain distinct."
+      ]
+    },
+    {
+      "id": "MR-19",
+      "title": "Recorded RNG semantics are not specified",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Explicit RNG counter resources advance only executed work, survive recompile, reset explicitly and stay isolated from tuning.",
+      "ledger": [
+        "F91"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.9 Explicit stochastic state"
+        }
+      ],
+      "acceptance": [
+        "Successive replays advance samples; seeded replay from reset is reproducible within the promised scope.",
+        "Recompile and queue scheduling do not accidentally reset/reuse a stream.",
+        "Two sessions and repeated-body stochastic operations have intentional independent streams."
+      ]
+    },
+    {
+      "id": "MR-20",
+      "title": "FEM and general simulations are not first-class replacement consumer gates",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Add actual FEM/particle and representative backward/update acceptance while preserving prior consumer baselines.",
+      "ledger": [
+        "F92",
+        "P12.G1"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.10 Qualification and scope"
+        }
+      ],
+      "acceptance": [
+        "A small independently checked FEM assembly/solve and convergence history.",
+        "A retained particle birth/death/contact timestep with GPU logical sizes.",
+        "Coupled simulation -> ray/raster display in one graph plus two-graph sharing."
+      ]
+    },
+    {
+      "id": "MR-21",
+      "title": "Multi-GPU LLM/solver execution is outside the current graph boundary",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Explicit recordable transfers/collectives connect per-device graphs; retain synchronous devicecopy! and qualify peer/host-cut/participation protocols.",
+      "ledger": [
+        "F93"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.6 Imported allocations and explicit device communication"
+        }
+      ],
+      "acceptance": [
+        "When this scope is enabled, two device graphs exchange device data without a mandatory host-sized snapshot and retain correct completion/ownership.",
+        "Collective participation and failure handling are qualified for the actual library/version."
+      ]
+    },
+    {
+      "id": "MR-22",
+      "title": "Readback appendix reintroduces the public Plan/record path and fixed-shape rebuild",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Standard eager Array conversion and recorded call!(target,Array,a) share a snapshot recipe; graph outputs/pending requests are stable and Readback(previous_future) requests the same existing output next run.",
+      "ledger": [
+        "F94"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "Graph-declared readback snapshots"
+        }
+      ],
+      "acceptance": [
+        "One public lifecycle example uses only final entry points.",
+        "Zero/nonzero GPU-sized snapshots and replay preserve coherent size/payload, or fail at the documented boundary.",
+        "Future teardown and prefailure accepted snapshots retain their existing lifetime guarantees."
+      ]
+    },
+    {
+      "id": "MR-23",
+      "title": "Multi-command recipes lose ordering when only barrier-shaped dependencies are emitted",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Core lowers every internal command with identity/effects/edges; native region callbacks preserve a single core child walk.",
+      "ledger": [
+        "F95"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.4 One command DAG and complete alias frontiers"
+        }
+      ],
+      "acceptance": [
+        "A multi-kernel build prefix and cell/data copy sequence on a DAG backend produce identical results to the linear backend.",
+        "Randomize independent native-node execution; removing an internal edge must fail a negative control."
+      ]
+    },
+    {
+      "id": "MR-24",
+      "title": "Producer writes need a bounded allocation view distinct from the old logical extent",
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open",
+      "decision": "Checked internal capacity descriptors support producers; final resize! publishes size, empty input publishes zero, no extra public metadata handle.",
+      "ledger": [
+        "F78",
+        "P6.A21"
+      ],
+      "contracts": [
+        {
+          "file": "docs/execution-contracts.md",
+          "section": "16.2 Size effects and producer descriptors"
+        }
+      ],
+      "acceptance": [
+        "A checked compaction output grows from logical zero within known capacity without requiring raw unchecked writes.",
+        "Publish/prepare ordering covers same-kernel producers, empty inputs and multi-kernel scatter chains."
+      ]
+    }
+  ],
+  "validation": {
+    "script": "check-plan-reconciliation.py",
+    "abstract_models": "Separate from native/runtime qualification",
+    "julia": "All three Julia sketches parsed with Meta.parseall via bt_julia_eval; no include, package load or GPU run",
+    "runtime_suites_started": 0
+  },
+  "remaining": "All mapped F76\u2013F95 runtime/native and suite-migration gates remain open; design text is not native evidence.",
+  "julia_parse_check": {
+    "status": "passed",
+    "files": [
+      "docs/internals.jl",
+      "docs/resizing-and-raytracing.jl",
+      "docs/examples.jl"
+    ],
+    "method": "Meta.parseall via bt_julia_eval, no include/runtime execution"
+  },
+  "execution_plan": {
+    "scope": "Frozen specifications and execution protocol only; MWE scripts/runtime implementation are open",
+    "authority": "docs/recording-plan.md: How we build it; execution-contracts.md: 16.11 Representation and performance qualification",
+    "ledger": [
+      "F97",
+      "F98",
+      "F99",
+      "F110",
+      "F111",
+      "F112",
+      "F113",
+      "F114"
+    ],
+    "batch_order": [
+      "B1",
+      "B2",
+      "B3",
+      "B4",
+      "B5"
+    ],
+    "phase_boundaries_are_test_sessions": false,
+    "persistent_julia_workers": true,
+    "full_suite_policy": "B5 per joined qualification target; repeat only for invalidated coverage",
+    "failure_policy": "Debug frozen expected results; retry only a new hypothesis/change; reconcile a proven contract defect before a design revision",
+    "checkpoint_policy": "Read accepted target hashes, ownership/deletion mapping and exact run evidence after compaction; old code is evidence, not target authority",
+    "fixed_mwes": [
+      {
+        "id": "MWE-01",
+        "first_batch": "B1",
+        "profiles": {
+          "lifecycle": "B1",
+          "gpu-snapshots": "B2"
+        },
+        "ledger": [
+          "F81",
+          "F94",
+          "F96"
+        ],
+        "use_cases": [
+          "Simulations",
+          "Particles"
+        ],
+        "runtime_status": "open"
+      },
+      {
+        "id": "MWE-02",
+        "first_batch": "B2",
+        "profiles": {
+          "gpu-size-control": "B2"
+        },
+        "ledger": [
+          "F78",
+          "F85"
+        ],
+        "use_cases": [
+          "Particles",
+          "FEM",
+          "Simulations"
+        ],
+        "runtime_status": "open"
+      },
+      {
+        "id": "MWE-03",
+        "first_batch": "B1",
+        "profiles": {
+          "queues-prefix": "B1",
+          "as-prefix": "B3"
+        },
+        "ledger": [
+          "F76",
+          "F77",
+          "F79",
+          "F87",
+          "F95"
+        ],
+        "use_cases": [
+          "Simulations",
+          "Raytracing"
+        ],
+        "runtime_status": "open"
+      },
+      {
+        "id": "MWE-04",
+        "first_batch": "B2",
+        "profiles": {
+          "composition-selection-rng": "B2",
+          "native-library": "B4"
+        },
+        "ledger": [
+          "F80",
+          "F84",
+          "F86",
+          "F91"
+        ],
+        "use_cases": [
+          "DNNs",
+          "LLMs",
+          "Training"
+        ],
+        "runtime_status": "open"
+      },
+      {
+        "id": "MWE-05",
+        "first_batch": "B3",
+        "profiles": {
+          "derived-as": "B3"
+        },
+        "ledger": [
+          "F77",
+          "F85"
+        ],
+        "use_cases": [
+          "Raytracing",
+          "Simulations"
+        ],
+        "runtime_status": "open"
+      },
+      {
+        "id": "MWE-06",
+        "first_batch": "B3",
+        "profiles": {
+          "images-indirect-raster": "B3"
+        },
+        "ledger": [
+          "F83",
+          "F88",
+          "F90"
+        ],
+        "use_cases": [
+          "Raster/Makie"
+        ],
+        "runtime_status": "open"
+      },
+      {
+        "id": "MWE-07",
+        "first_batch": "B3",
+        "profiles": {
+          "import": "B3",
+          "transport-collective": "B4"
+        },
+        "ledger": [
+          "F82",
+          "F93"
+        ],
+        "use_cases": [
+          "LLMs",
+          "FEM",
+          "Multi-device"
+        ],
+        "runtime_status": "open"
+      },
+      {
+        "id": "MWE-08",
+        "first_batch": "B1",
+        "profiles": {
+          "straight-line": "B1",
+          "control": "B2",
+          "large-scale": "B5"
+        },
+        "ledger": [
+          "F76",
+          "F85",
+          "F97"
+        ],
+        "use_cases": [
+          "DNNs",
+          "Raytracing",
+          "Simulations",
+          "FEM",
+          "Particles",
+          "Raster/Makie",
+          "LLMs"
+        ],
+        "runtime_status": "open"
+      }
+    ],
+    "qualification_separate_from_smoke": true
+  },
+  "followup_api_audit": "api-ergonomics-audit.json",
+  "explicit_routing_ruling": "explicit-routing-ruling.json",
+  "operation_layer_ruling": "explicit-routing-ruling.json",
+  "use_case_review": "use-case-review.json",
+  "use_case_review_status": "Eight open contract/migration/qualification obligations; raw-kernel expressibility is not full clean operation-layer coverage"
+}

@@ -1,0 +1,293 @@
+# `Mantle.gemv!` — batch-1 matrix-vector, ported from llama.cpp's mul_mat_vec.comp.
+#
+# The oracle is a Float64 host `A' * B`, which for a GEMV is exact enough to be a
+# reference rather than a competitor — unlike the FFT there is no algorithmic
+# restructuring to hide a bug behind, so the risk here is not the arithmetic but
+# the *decomposition*: which lane accumulates which slice of K, and whether the
+# two-level reduction (subgroup, then across subgroups through shared memory)
+# loses a partial.
+#
+# So the shapes below are chosen to break that decomposition, not to be
+# representative:
+#
+#   * `K` not a multiple of `4 * BLOCK` — exercises the tail bounds check, which
+#     is the one place a lane reads past the end.
+#   * `N` not a multiple of `NROWS` — the last workgroup has idle columns, and a
+#     missing guard there writes outside `C`.
+#   * `K < 4` — fewer elements than one thread's step.
+#   * `N < NROWS` — fewer output columns than one workgroup handles.
+#   * `BLOCK` at 32 exactly — one subgroup, so the cross-subgroup tree has a
+#     single entry and an off-by-one in `nsub` shows up as a zero rather than a
+#     wrong value.
+
+using Test, KernelAbstractions, LinearAlgebra
+include(joinpath(@__DIR__, "testbackend.jl"))
+# Relative GPU timings have no contract on a CPU Vulkan implementation.
+const GEMV_SOFTWARE_DEVICE = occursin("llvmpipe", lowercase(Mantle.devicename(Mantle.Device(TESTBACKEND))))
+const KA = KernelAbstractions
+
+"Host reference in Float64. `A` is length K, `B` is (K, N), result is length N."
+gemvref(A::Vector{Float32}, B::Matrix{Float32}) = vec(Float64.(A)' * Float64.(B))
+
+relerr(got, want) = maximum(abs, got .- want) / max(maximum(abs, want), eps())
+
+# Time of one call of `f`, with the device drained before and after, so it is the
+# work `f` submitted and not what was queued ahead of it. Wall clock, so the host's
+# launch path is in it too: on Windows (LapWin, 8060S) the transposed comparison
+# read 1.42x, 1.61x and 4.39x on three runs of the same build where per-dispatch
+# GPU timestamps held to within 1%. Hence a ratio with a floor under all of those,
+# and the fastest of several interleaved rounds. Timestamps per dispatch are one
+# backend's profiler, and this has to run on every device.
+function gputime(f, backend)
+    KA.synchronize(backend)
+    t = time_ns()
+    f()
+    KA.synchronize(backend)
+    return Float64(time_ns() - t)
+end
+
+# GPU time of `a` and of `b`, measured in alternation and each its fastest of
+# `rounds`. One measurement of each, one after the other, compares two different
+# clock states: inside the full suite the 8060S once timed `gemv!` at 25.9 us,
+# where it takes 9.9 us on its own, and an RTX 3070 laptop ramps its clock by an
+# order of magnitude within a testset. So both run back to back for `spin` seconds
+# first: that laptop's `(1280, 1280)` gemv took 358 us a call from idle and 20.7 us
+# after two seconds of calls, and inside the full suite the comparison below once
+# read 0.62 because the ramp landed between the two sides.
+function interleaved(a, b, backend; rounds = 5, spin = 0.5)
+    t0 = time()
+    while time() - t0 < spin
+        a(); b()
+    end
+    KA.synchronize(backend)
+    ts = [(gputime(a, backend), gputime(b, backend)) for _ in 1:rounds]
+    return minimum(first, ts), minimum(last, ts)
+end
+
+@testset "gemv" begin
+    backend = TESTBACKEND
+
+    function check(K, N; nrows = nothing, block = nothing)
+        ha = Float32.(randn(K))
+        hb = Float32.(randn(K, N))
+        A = KA.allocate(backend, Float32, K); copyto!(A, ha)
+        B = KA.allocate(backend, Float32, K, N); copyto!(B, hb)
+        C = KA.allocate(backend, Float32, N); fill!(C, 0.0f0)
+        Mantle.gemv!(C, A, B; nrows, block)
+        KA.synchronize(backend)
+        relerr(Float64.(Array(C)), gemvref(ha, hb))
+    end
+
+    @testset "the decoder's own shapes" begin
+        for (K, N) in ((1280, 1280), (1280, 5120), (5120, 1280), (1280, 51866))
+            @test check(K, N) < 1.0f-5
+        end
+    end
+
+    @testset "shapes that break the decomposition" begin
+        # tails in K, tails in N, and both at once
+        for (K, N) in ((1, 1), (3, 1), (7, 13), (129, 7), (1023, 33),
+                       (4096 + 1, 5), (5, 4096 + 1), (1279, 1281))
+            @test check(K, N) < 1.0f-5
+        end
+    end
+
+    @testset "every (nrows, block) agrees with every other" begin
+        # The configuration is a performance knob and must never be a
+        # correctness one. If `gemv_config` later picks a different pair on
+        # another device, this is what says that is safe.
+        for (K, N) in ((1280, 1280), (1023, 33))
+            ref = nothing
+            for nrows in (1, 2, 4, 8), block in (32, 64, 128, 256)
+                e = check(K, N; nrows, block)
+                @test e < 1.0f-5
+            end
+        end
+    end
+
+    # ── the other layout: matrix (M, K), reached as `transpose(W)`
+    #
+    # This is the one DNNKernels' graphs actually produce (`hoistpermutes`
+    # materialises weights contiguous along the OUTPUT axis), so it is the one
+    # the decoder's speed depends on. Same oracle, and deliberately the same
+    # awkward shapes: the failure modes are different — the tail is in `M` now,
+    # not `K`, and the reduction is inside a thread rather than across a subgroup
+    # — but a shape that breaks one decomposition is a fine probe for the other.
+    "Host reference: `W` is (M, K), `x` is length K, result is length M."
+    gemvnref(W::Matrix{Float32}, x::Vector{Float32}) = Float64.(W) * Float64.(x)
+
+    @testset "transposed layout" begin
+        function checkn(M, K; tm = nothing, block = nothing, unroll = nothing,
+                        withbias = false, epi = identity)
+            hw = Float32.(randn(M, K))
+            hx = Float32.(randn(K))
+            hb = withbias ? Float32.(randn(M)) : nothing
+            W = KA.allocate(backend, Float32, M, K); copyto!(W, hw)
+            x = KA.allocate(backend, Float32, K); copyto!(x, hx)
+            C = KA.allocate(backend, Float32, M); fill!(C, 0.0f0)
+            b = nothing
+            if withbias
+                b = KA.allocate(backend, Float32, M); copyto!(b, hb)
+            end
+            Mantle.gemv!(C, x, transpose(W); bias = b, epilogue = epi,
+                       tm, block, unroll)
+            KA.synchronize(backend)
+            want = gemvnref(hw, hx)
+            withbias && (want .+= Float64.(hb))
+            # Relative to the sum of absolute products, which bounds a dot
+            # product's rounding error; the result itself can be near zero by
+            # chance (M = 1 exceeded 1e-5 in 2 of 300 random draws).
+            scale = maximum(abs.(Float64.(hw)) * abs.(Float64.(hx)))
+            withbias && (scale += maximum(abs, hb))
+            maximum(abs, Float64.(Array(C)) .- epi.(want)) / scale
+        end
+
+        @testset "the decoder's own shapes" begin
+            for (M, K) in ((1280, 1280), (5120, 1280), (1280, 5120), (51866, 1280))
+                @test checkn(M, K) < 1.0f-5
+            end
+        end
+
+        @testset "shapes that break the decomposition" begin
+            # M not a multiple of TM leaves idle rows in the last workgroup; K
+            # shorter than one unrolled step skips the main loop entirely; K
+            # shorter than the K-group count leaves whole groups with no work at
+            # all, and their zero partials must still be summed.
+            for (M, K) in ((1, 1), (1, 1280), (31, 7), (33, 3), (1279, 1281),
+                           (65, 5), (7, 4097), (4097, 7))
+                @test checkn(M, K) < 1.0f-5
+            end
+        end
+
+        @testset "bias and epilogue land in the store" begin
+            for (M, K) in ((1280, 1280), (33, 129))
+                @test checkn(M, K; withbias = true) < 1.0f-5
+                @test checkn(M, K; withbias = true, epi = v -> max(v, 0.0f0)) < 1.0f-5
+            end
+        end
+
+        @testset "every (tm, block, unroll) agrees with every other" begin
+            for (M, K) in ((1280, 1280), (1279, 129))
+                for tm in (32,), block in (32, 64, 128, 256, 512), unroll in (1, 2, 4, 8)
+                    @test checkn(M, K; tm, block, unroll) < 1.0f-5
+                end
+            end
+        end
+
+        @testset "it is not slower than mul! at one column" begin
+            # The reason this second kernel exists. `mul!` on this shape measured
+            # 3.5% of roofline when it ran one thread per output: 1280 threads,
+            # five workgroups, and the device latency-bound however well it reads.
+            # It now takes the split-K GEMV and its reduction, which narrowed the
+            # gap. Measured on the 8060S in GPU time over five runs: 1.79-1.81x
+            # under RADV, 1.30-1.56x under AMD's Windows driver, which runs the
+            # split-K kernels faster (13-16 us against RADV's 18) and `gemv!` no
+            # faster. 2.5x in wall clock on RADV when the measure became the
+            # device sync rather than per-dispatch timestamps.
+            #
+            # The claim on every device is that the decoder's kernel is never the
+            # slower choice, which is what the decoder relies on. How much faster
+            # depends on how far the GENERAL path is from the memory floor, and
+            # that is the backend's: Metal's `mul!` is a library product already at
+            # the floor, 1.17x on the M5. A floor of 1.1 or 1.5, set where the
+            # general path is slow, failed there for that reason alone.
+            M, K, iters = 1280, 1280, 50
+            hw = fill(0.01f0, M, K)
+            W = KA.allocate(backend, Float32, M, K); copyto!(W, hw)
+            x = KA.allocate(backend, Float32, K); fill!(x, 0.01f0)
+            x2 = KA.allocate(backend, Float32, K, 1); fill!(x2, 0.01f0)
+            C = KA.allocate(backend, Float32, M); fill!(C, 0.0f0)
+            C2 = KA.allocate(backend, Float32, M, 1); fill!(C2, 0.0f0)
+            rg() = (for _ in 1:iters; Mantle.gemv!(C, x, transpose(W)); end)
+            rm() = (for _ in 1:iters; mul!(C2, W, x2); end)
+            for _ in 1:3; rg(); rm(); end
+            KA.synchronize(backend)
+            tg, tm_ = interleaved(rg, rm, backend)
+            @info "gemv(transposed) vs mul! at ($M,$K)" gemv_us=tg/iters/1e3 mul_us=tm_/iters/1e3 speedup=tm_/tg
+            @test tm_ / tg >= 1 skip=GEMV_SOFTWARE_DEVICE
+        end
+    end
+
+    @testset "dimension mismatches are caught" begin
+        A = KA.allocate(backend, Float32, 8)
+        B = KA.allocate(backend, Float32, 8, 4)
+        @test_throws DimensionMismatch Mantle.gemv!(KA.allocate(backend, Float32, 5), A, B)
+        @test_throws DimensionMismatch Mantle.gemv!(KA.allocate(backend, Float32, 4),
+                                                  KA.allocate(backend, Float32, 9), B)
+    end
+
+    @testset "configuration and empty outputs" begin
+        for limit in (1,7,16,31,32,64,96,128,256,384,512,768,1024)
+            tm,bl,u = Mantle.gemv_ncontig_config(79,131,limit)
+            @test 0 < tm <= bl <= limit
+            @test bl % tm == 0 && ispow2(bl÷tm)
+            nr,kbl = Mantle.gemv_config(129,4097,limit)
+            @test 0 < nr <= kbl <= limit
+        end
+        for args in ((0,128,32),(8,4,32),(4,128,0))
+            @test_throws ArgumentError Mantle.gemv_kcontig_kernel(args...)
+        end
+        for args in ((0,128,4),(32,128,0),(32,96,4),(32,129,4))
+            @test_throws ArgumentError Mantle.gemv_ncontig_kernel(args...)
+        end
+        @test_throws DimensionMismatch Mantle.gemv_ncontig_launches(
+            zeros(Float32,3),zeros(Float32,4),zeros(Float32,2),3,4,128)
+        A = KA.allocate(backend,Float32,7)
+        B = KA.allocate(backend,Float32,7,0)
+        C = KA.allocate(backend,Float32,0)
+        @test Mantle.gemv!(C,A,B) === C
+        @test Mantle.gemv!(C,A,transpose(KA.allocate(backend,Float32,0,7))) === C
+    end
+
+    @testset "recorded GEMV shares generated kernels and keeps range tails" begin
+        dev = Mantle.Device(backend)
+        for (tm,bl,u) in ((24,192,3),(16,64,2))
+            M,K = 79,131
+            hw = randn(Float32,M,K); hx = randn(Float32,K); hb = randn(Float32,M)
+            W = Mantle.Buffer(dev,hw); x = Mantle.Buffer(dev,hx)
+            bias = Mantle.Buffer(dev,hb); out = Mantle.Buffer(dev,Float32,M)
+            g = Mantle.Graph(dev)
+            Mantle.gemv_dispatch!(g,out,x,W,M,K;bias,epilogue=abs,tm,block=bl,unroll=u)
+            pl = Mantle.Plan(g;budget=Inf)
+            try
+                Mantle.record!(pl)
+                for factor in (1f0,2f0)
+                    x[:] = factor .* hx
+                    Mantle.run!(pl); Mantle.waitfor!(pl)
+                    want = abs.(Float64.(hw)*(factor .* Float64.(hx)) .+ hb)
+                    @test relerr(Float64.(Array(out)),want) < 1f-5
+                end
+            finally
+                Mantle.free!(pl)
+                foreach(Mantle.free!,(W,x,bias,out))
+            end
+        end
+    end
+
+    @testset "it is not slower than mul! at M = 1" begin
+        # The reason the kernel exists. Interleaved, both live kernels, same
+        # allocation — a sequential A/B on this box drifts by 5-10%.
+        #
+        # NOT a roofline claim: at these sizes most of `B` is L2-resident, and an
+        # earlier version of this measurement reported 186% "of roofline" because
+        # the denominator was a DRAM copy. The claim is only the ratio.
+        K, N, iters = 1280, 1280, 50
+        A = KA.allocate(backend, Float32, K); fill!(A, 0.01f0)
+        A2 = KA.allocate(backend, Float32, 1, K); fill!(A2, 0.01f0)
+        B = KA.allocate(backend, Float32, K, N); fill!(B, 0.01f0)
+        C = KA.allocate(backend, Float32, N); fill!(C, 0.0f0)
+        C2 = KA.allocate(backend, Float32, 1, N); fill!(C2, 0.0f0)
+        rg() = (for _ in 1:iters; Mantle.gemv!(C, A, B); end)
+        rm() = (for _ in 1:iters; mul!(C2, A2, B); end)
+        for _ in 1:3; rg(); rm(); end
+        KA.synchronize(backend)
+        tg, tm = interleaved(rg, rm, backend)
+        @info "gemv vs mul! at (1,$K)@($K,$N)" gemv_us=tg/iters/1e3 mul_us=tm/iters/1e3 speedup=tm/tg
+        # Measured 6.4x in GPU time on the 8060S, 3.5x in wall clock when the
+        # kernel was written, 5.2x through the device sync on RADV, and 1.12x on
+        # the M5, where `mul!` is Metal's library product and both read `B` at the
+        # memory floor. The claim is the decoder's: this kernel is never the
+        # slower choice. The margin is the general path's, not this kernel's.
+        @test tm / tg >= 1 skip=GEMV_SOFTWARE_DEVICE
+    end
+end

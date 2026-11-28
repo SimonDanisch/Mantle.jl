@@ -1,0 +1,80 @@
+DIAGNOSE AMD Radeon RX 7900 XTX (RADV NAVI31) bytes=4096
+SOURCE private_anon raw_properties=VK_SUCCESS type_bits=32 ptr_alignment=0
+┌ Error: Validation (VUID-VkExternalBufferProperties-sType-sType): vkGetPhysicalDeviceExternalBufferProperties(): pExternalBufferProperties->sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES.
+│ The Vulkan spec states: sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES (https://docs.vulkan.org/spec/latest/chapters/capabilities.html#VUID-VkExternalBufferProperties-sType-sType)
+└ @ Vulkan /sim/Programmieren/VideoEdit/dev/Vulkan/src/validation.jl:46
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=1965
+RAW_ALLOCATE kind=private_anon type=5 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_SUCCESS
+SOURCE file_private_rw raw_properties=VK_SUCCESS type_bits=32 ptr_alignment=0
+┌ Error: Validation (VUID-VkExternalBufferProperties-sType-sType): vkGetPhysicalDeviceExternalBufferProperties(): pExternalBufferProperties->sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES.
+│ The Vulkan spec states: sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES (https://docs.vulkan.org/spec/latest/chapters/capabilities.html#VUID-VkExternalBufferProperties-sType-sType)
+└ @ Vulkan /sim/Programmieren/VideoEdit/dev/Vulkan/src/validation.jl:46
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=1965
+RAW_ALLOCATE kind=file_private_rw type=5 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_ERROR_INVALID_EXTERNAL_HANDLE
+SOURCE file_shared_rw raw_properties=VK_SUCCESS type_bits=32 ptr_alignment=0
+┌ Error: Validation (VUID-VkExternalBufferProperties-sType-sType): vkGetPhysicalDeviceExternalBufferProperties(): pExternalBufferProperties->sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES.
+│ The Vulkan spec states: sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES (https://docs.vulkan.org/spec/latest/chapters/capabilities.html#VUID-VkExternalBufferProperties-sType-sType)
+└ @ Vulkan /sim/Programmieren/VideoEdit/dev/Vulkan/src/validation.jl:46
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=1965
+RAW_ALLOCATE kind=file_shared_rw type=5 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_ERROR_INVALID_EXTERNAL_HANDLE
+SOURCE file_private_ro raw_properties=VK_SUCCESS type_bits=32 ptr_alignment=0
+┌ Error: Validation (VUID-VkExternalBufferProperties-sType-sType): vkGetPhysicalDeviceExternalBufferProperties(): pExternalBufferProperties->sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES.
+│ The Vulkan spec states: sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES (https://docs.vulkan.org/spec/latest/chapters/capabilities.html#VUID-VkExternalBufferProperties-sType-sType)
+└ @ Vulkan /sim/Programmieren/VideoEdit/dev/Vulkan/src/validation.jl:46
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=1965
+RAW_ALLOCATE kind=file_private_ro type=5 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_ERROR_INVALID_EXTERNAL_HANDLE
+PRIVATE_RO_WITH_RW_PROTECTION type=5 result=VK_ERROR_INVALID_EXTERNAL_HANDLE
+SOURCE file_shared_ro raw_properties=VK_SUCCESS type_bits=32 ptr_alignment=0
+┌ Error: Validation (VUID-VkExternalBufferProperties-sType-sType): vkGetPhysicalDeviceExternalBufferProperties(): pExternalBufferProperties->sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES.
+│ The Vulkan spec states: sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES (https://docs.vulkan.org/spec/latest/chapters/capabilities.html#VUID-VkExternalBufferProperties-sType-sType)
+└ @ Vulkan /sim/Programmieren/VideoEdit/dev/Vulkan/src/validation.jl:46
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=1965
+RAW_ALLOCATE kind=file_shared_ro type=5 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_ERROR_INVALID_EXTERNAL_HANDLE
+DIAGNOSE NVIDIA RTX 4000 Ada Generation bytes=4096
+SOURCE private_anon raw_properties=VK_SUCCESS type_bits=12 ptr_alignment=0
+┌ Error: Validation (VUID-VkExternalBufferProperties-sType-sType): vkGetPhysicalDeviceExternalBufferProperties(): pExternalBufferProperties->sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES.
+│ The Vulkan spec states: sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES (https://docs.vulkan.org/spec/latest/chapters/capabilities.html#VUID-VkExternalBufferProperties-sType-sType)
+└ @ Vulkan /sim/Programmieren/VideoEdit/dev/Vulkan/src/validation.jl:46
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=15
+RAW_ALLOCATE kind=private_anon type=2 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) result=VK_SUCCESS
+RAW_ALLOCATE kind=private_anon type=3 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_SUCCESS
+SOURCE file_private_rw raw_properties=VK_SUCCESS type_bits=12 ptr_alignment=0
+┌ Error: Validation (VUID-VkExternalBufferProperties-sType-sType): vkGetPhysicalDeviceExternalBufferProperties(): pExternalBufferProperties->sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES.
+│ The Vulkan spec states: sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES (https://docs.vulkan.org/spec/latest/chapters/capabilities.html#VUID-VkExternalBufferProperties-sType-sType)
+└ @ Vulkan /sim/Programmieren/VideoEdit/dev/Vulkan/src/validation.jl:46
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=15
+RAW_ALLOCATE kind=file_private_rw type=2 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) result=VK_SUCCESS
+RAW_ALLOCATE kind=file_private_rw type=3 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_SUCCESS
+SOURCE file_shared_rw raw_properties=VK_SUCCESS type_bits=12 ptr_alignment=0
+┌ Error: Validation (VUID-VkExternalBufferProperties-sType-sType): vkGetPhysicalDeviceExternalBufferProperties(): pExternalBufferProperties->sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES.
+│ The Vulkan spec states: sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES (https://docs.vulkan.org/spec/latest/chapters/capabilities.html#VUID-VkExternalBufferProperties-sType-sType)
+└ @ Vulkan /sim/Programmieren/VideoEdit/dev/Vulkan/src/validation.jl:46
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=15
+RAW_ALLOCATE kind=file_shared_rw type=2 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) result=VK_SUCCESS
+RAW_ALLOCATE kind=file_shared_rw type=3 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_SUCCESS
+SOURCE file_private_ro raw_properties=VK_SUCCESS type_bits=12 ptr_alignment=0
+┌ Error: Validation (VUID-VkExternalBufferProperties-sType-sType): vkGetPhysicalDeviceExternalBufferProperties(): pExternalBufferProperties->sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES.
+│ The Vulkan spec states: sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES (https://docs.vulkan.org/spec/latest/chapters/capabilities.html#VUID-VkExternalBufferProperties-sType-sType)
+└ @ Vulkan /sim/Programmieren/VideoEdit/dev/Vulkan/src/validation.jl:46
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=15
+RAW_ALLOCATE kind=file_private_ro type=2 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) result=VK_ERROR_OUT_OF_DEVICE_MEMORY
+PRIVATE_RO_WITH_RW_PROTECTION type=2 result=VK_ERROR_OUT_OF_DEVICE_MEMORY
+RAW_ALLOCATE kind=file_private_ro type=3 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_ERROR_OUT_OF_DEVICE_MEMORY
+PRIVATE_RO_WITH_RW_PROTECTION type=3 result=VK_ERROR_OUT_OF_DEVICE_MEMORY
+SOURCE file_shared_ro raw_properties=VK_SUCCESS type_bits=12 ptr_alignment=0
+┌ Error: Validation (VUID-VkExternalBufferProperties-sType-sType): vkGetPhysicalDeviceExternalBufferProperties(): pExternalBufferProperties->sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES.
+│ The Vulkan spec states: sType must be VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES (https://docs.vulkan.org/spec/latest/chapters/capabilities.html#VUID-VkExternalBufferProperties-sType-sType)
+└ @ Vulkan /sim/Programmieren/VideoEdit/dev/Vulkan/src/validation.jl:46
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=15
+RAW_ALLOCATE kind=file_shared_ro type=2 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) result=VK_ERROR_OUT_OF_DEVICE_MEMORY
+RAW_ALLOCATE kind=file_shared_ro type=3 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_ERROR_OUT_OF_DEVICE_MEMORY

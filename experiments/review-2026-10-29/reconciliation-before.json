@@ -1,0 +1,9 @@
+{
+  "docs/api.md": "93f0a4496e5b631605b86eb42caf7890270ac389087e42d7ca5a46ab5a6ef2bf",
+  "docs/examples.jl": "49e10ff1001832c2221b9c3db4d5654c18f95a4481ac150465b36a5841ec563a",
+  "docs/execution-contracts.md": "8d79475ce908dbd16cb603bc8d1bf44e37ac72740d33579556d3edb2bfe9a43e",
+  "docs/internals.jl": "0fca333c94510a924b6e0fb6571c1c5d6ade31bfa254d8685519d7cb1954d725",
+  "docs/recording-plan.md": "fbc7679fc64d916f33188dd26bd9399cd66e8324e361ae7b9496ac03bb29e047",
+  "docs/refactor-ledger.md": "3b96467d5d580d8571837314b28c377480f17adb638dfb21f47826df6392e19f",
+  "docs/resizing-and-raytracing.jl": "9ac89ffd4c6a9fbfb086ee9762f6ebce8795cd418aa340757f13e80f0b7c1746"
+}

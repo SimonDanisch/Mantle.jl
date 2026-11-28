@@ -1,0 +1,5 @@
+device	policy	host_bytes	median_us
+AMD Radeon RX 7900 XTX (RADV NAVI31)	legacy	80	0.03611999999999999
+AMD Radeon RX 7900 XTX (RADV NAVI31)	owned	608	0.7857749999999999
+NVIDIA RTX 4000 Ada Generation	legacy	80	0.031709999999999995
+NVIDIA RTX 4000 Ada Generation	owned	608	0.78302

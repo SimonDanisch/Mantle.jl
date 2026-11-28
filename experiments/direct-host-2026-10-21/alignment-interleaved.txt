@@ -1,0 +1,9 @@
+Start 2026-10-21T13:54:56.815
+ALIGNMENT device=NVIDIA RTX 4000 Ada Generation variant=aligned import_bytes=67108864 payload_bytes=67108864 upload_gpu_ms=10.472992 min_ms=10.46512 max_ms=10.473344
+ALIGNMENT device=NVIDIA RTX 4000 Ada Generation variant=exact import_bytes=67108864 payload_bytes=67108852 upload_gpu_ms=12.413344 min_ms=12.40944 max_ms=101.221504
+ALIGNMENT device=NVIDIA RTX 4000 Ada Generation variant=split import_bytes=67108864 payload_bytes=67108852 upload_gpu_ms=10.480576 min_ms=10.48032 max_ms=84.373216
+Test Summary:                                  | Pass  Total   Time
+copy alignment: NVIDIA RTX 4000 Ada Generation |    4      4  19.2s
+End 2026-10-21T13:55:16.283
+
+SHA256 08816a0316775faaa20f5f79d9cbdbf41938f99fa4e94ac88e4f2336427ded47 alignment.jl

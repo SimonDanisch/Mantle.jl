@@ -1,0 +1,35 @@
+{
+  "date": "2026-10-30",
+  "document": "docs/api-guide.md",
+  "scope": "Consolidated target API usage/implementation/tradeoff guide; not an implemented release",
+  "sha256": "970584398e1504dc1962d388f14c6c77f6fc5625625d264642226b952846c371",
+  "words": 3620,
+  "lines": 601,
+  "checks": {
+    "julia_blocks_parsed": 17,
+    "consumer_call_names_checked": 65,
+    "undocumented_consumer_calls": [],
+    "document_consistency": "pass: eight docs, local links, 755 unique ledger items, existing nine abstract models",
+    "whitespace": "git diff --check pass"
+  },
+  "julia_version": "1.12.7",
+  "coverage": [
+    "devices/arrays/lifetime",
+    "eager/recorded/builders/CPU callbacks",
+    "GPU control/parameters/reductions",
+    "GPU lengths/views/growth",
+    "snapshots/replay request lifetime",
+    "RT tables/streamed intersections/attributes",
+    "AS memory/maintenance",
+    "raster/images/indirect/mesh",
+    "windows/picking/presentation",
+    "foreign/native leases/multi-device",
+    "RNG/tuning/diagnostics/domain boundaries",
+    "shared core/native implementation",
+    "performance/feature tradeoffs"
+  ],
+  "runtime_execution": false,
+  "new_public_api_added": false,
+  "remaining": "Implementation and actual native/compiler/consumer/performance qualification are ledger obligations.",
+  "hostcall_and_mul_followup": "User-selected hostcall! replaces public dispatch!/HostCall. Expanded recipe -> candidate -> selected emitter -> GPU kernel, same materialization context for eager/recorded. 17 guide blocks and three sketches parse; existing routing controls pass. No code executed."
+}

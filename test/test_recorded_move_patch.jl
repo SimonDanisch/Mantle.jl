@@ -1,0 +1,266 @@
+# A recorded plan survives the storage underneath it MOVING.
+#
+# A recording's command buffer holds the ADDRESS of the plan's argument memory,
+# and the argument memory holds the addresses of everything else — so a resource
+# that moves is not a new recording, it is eight bytes per packed pointer,
+# written by `cmd_update_buffer` in the next run's own submission. The table
+# that says where each address landed is baked once, at `record!`, from the same
+# pack that wrote the blob (`recpatch!`); a move is announced where it happens
+# (`resize!` and arena growth both reach `notify_move!`), and
+# `notify_move!` turns it into pending patches. Nothing is walked per run.
+#
+# What cannot be patched is an image: the commands name the `VkImage` and its
+# view directly. An images arena growing under a recorded plan drops the
+# recording instead, and the next `run!` writes it again.
+#
+# Both halves are pinned here from the outside: same plan object, right numbers.
+
+using Test, Mantle, KernelAbstractions
+import KernelInterface as KI
+import Lava   # the extension trigger
+using ColorTypes: RGBA
+using GeometryBasics: Vec4f
+include(joinpath(@__DIR__, "testbackend.jl"))
+
+const KA = KernelAbstractions
+const M = Mantle
+
+@kernel function _movepatch_copy!(dst, @Const(src))
+    i = @index(Global)
+    @inbounds dst[i] = src[i]
+end
+
+"""out[i] = src[i], n lanes, as a recordable one-pass plan."""
+function _movepatch_plan(dev, src, out, n)
+    g = M.Graph(dev)
+    M.dispatch!(g, _movepatch_copy!, (out, src), n; name = "copy")
+    # `budget = Inf`: recorded whole from the first run, which is what these tests
+    # are about. How a plan is cut by its budget is `test_partitioned_recording.jl`.
+    M.record!(M.Plan(g; budget = Inf))
+end
+
+# A chain of transients (stage k reads t[k], writes t[k+1]) so the plan has
+# arena-placed storage at all; `out` ends at `nstage + 2`.
+@kernel function _movepatch_bump!(dst, @Const(src))
+    i = @index(Global)
+    @inbounds dst[i] = src[i] + 1f0
+end
+
+function _movepatch_chainplan(dev, n, nstage)
+    g = M.Graph(dev)
+    seed = M.Buffer(dev, zeros(Float32, n))
+    t = [M.Transient.Buffer(g, Float32, n) for _ in 1:(nstage + 1)]
+    M.dispatch!(g, _movepatch_bump!, (t[1], seed), n; name = "seed")
+    for k in 1:nstage
+        M.dispatch!(g, _movepatch_bump!, (t[k + 1], t[k]), n; name = "s$k")
+    end
+    out = M.Buffer(dev, zeros(Float32, n))
+    M.dispatch!(g, _movepatch_bump!, (out, t[end]), n; name = "out")
+    (; out, plan = M.record!(M.Plan(g; budget = Inf)), keep = (seed, t))
+end
+
+# The same copy as a plain KernelInterface kernel, which has no KA context argument.
+function _movepatch_kicopy!(dst, src)
+    i = KI.get_global_id().x
+    i <= length(dst) && (@inbounds dst[i] = src[i])
+    return nothing
+end
+
+"""Both copies and a render pass: where a device records no render pass, the plan
+is walked, and every run calls the kernels itself."""
+function _movepatch_walkedplan(dev, src, out, kiout, n)
+    g = M.Graph(dev)
+    M.dispatch!(g, _movepatch_copy!, (out, src), n; name = "copy")
+    M.dispatch!(g, _movepatch_kicopy!, (kiout, src), n; name = "kicopy")
+    img = M.Transient.Image(g, RGBA{Float16}, (8, 8))
+    M.render!(g, "tri", img => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+        M.draw!(p, _MOVEPATCH_TRI, (), 3)
+    end
+    M.copy!(g, "read", M.Buffer(dev, zeros(RGBA{Float16}, 64)), img)
+    pl = M.Plan(g; budget = Inf)
+    M.recordable(dev, pl) && M.record!(pl)
+    return pl
+end
+
+@kernel function movepatch_mark!(dst, n)
+    i = @index(Global)
+    @inbounds if i <= n[1]
+        dst[i] = 1.0f0
+    end
+end
+
+"""Mark the first `n[1]` of `dst`, sized on the device: the prepare reads `n` too."""
+function _movepatch_rangeplan(dev, dst, n, cap)
+    g = M.Graph(dev)
+    M.dispatch!(g, movepatch_mark!, (dst, n), M.DeviceRange(n; max = cap);
+                group = 64, name = "mark")
+    M.record!(M.Plan(g; budget = Inf))
+end
+
+"""Two transients alive at once — the placement that forces the arena to grow."""
+function _movepatch_fatplan(dev, n)
+    g = M.Graph(dev)
+    seed = M.Buffer(dev, zeros(Float32, 16))
+    t1 = M.Transient.Buffer(g, Float32, n)
+    t2 = M.Transient.Buffer(g, Float32, n)
+    M.dispatch!(g, _movepatch_bump!, (t1, seed), 16; name = "a")
+    M.dispatch!(g, _movepatch_bump!, (t2, t1), 16; name = "b")
+    (; plan = M.record!(M.Plan(g; budget = Inf)), keep = (seed, t1, t2))
+end
+
+function _movepatch_tri_vertex()
+    v = Mantle.vertex_index() - Int32(1)
+    x = v == Int32(1) ? 3f0 : -1f0
+    y = v == Int32(2) ? 3f0 : -1f0
+    (position = Vec4f(x, y, 0f0, 1f0), color = Vec4f(0.25f0, 0.5f0, 0.75f0, 1f0))
+end
+_movepatch_tri_fragment(inputs) = inputs.color
+const _MOVEPATCH_TRI = M.Rasterizer(; vertex = M.VertexShader(_movepatch_tri_vertex; outputs = (color = Vec4f,)),
+                                      fragment = M.FragmentShader(_movepatch_tri_fragment),
+                                      topology = M.TriangleList(),
+                                      blend = M.Opaque(),
+                                      cull = M.NoCull(),
+                                      depth = M.DepthOff())
+
+@testset "a resize!d buffer under a recorded plan is patched, not re-recorded" begin
+    dev = M.Device(TESTBACKEND)
+    be = dev
+    n = 64
+    src = M.Buffer(dev, ones(Float32, n))          # capacity == n, so a grow moves it
+    out = M.Buffer(dev, zeros(Float32, n))
+    pl = Base.invokelatest(_movepatch_plan, dev, src, out, n)
+
+    M.run!(pl)                                      # recorded at build
+    KA.synchronize(be)
+    @test Array(M.storage(out)) == ones(Float32, n)
+    rec = pl.recording
+    @test rec !== nothing
+
+    # Move the store out from under the recording, then change the CONTENTS, so
+    # a run that still reads the vacated region reads the wrong numbers, not a
+    # copy of the right ones.
+    M.resize!(src, 4n)
+    copyto!(M.storage(src), fill(2f0, 4n))
+    M.run!(pl)
+    KA.synchronize(be)
+
+    @test pl.recording === rec                      # patched: the same recording ran
+    @test Array(M.storage(out)) == fill(2f0, n)     # …and it read the NEW store
+    M.free!(pl)
+end
+
+# The count of a device-sized dispatch is read twice: by the dispatch, whose
+# arguments live in the plan's memory, and by the prepare that sizes it, whose
+# arguments Metal keeps in the recording's auxiliary memory. Only the first was
+# registered for patching there, so after a move the prepare read the vacated
+# count and the dispatch ran its old 64 lanes.
+@testset "a resize!d DeviceRange count is patched where its prepare reads it" begin
+    dev = M.Device(TESTBACKEND)
+    cap = 4096
+    dst = M.Buffer(dev, zeros(Float32, cap))
+    n = M.Buffer(dev, Int32[64])                    # capacity 1, so a grow moves it
+    pl = Base.invokelatest(_movepatch_rangeplan, dev, dst, n, cap)
+    M.run!(pl)
+    M.waitfor!(pl)
+    @test count(==(1f0), Array(M.storage(dst))) == 64
+    rec = pl.recording
+
+    M.resize!(n, cap)
+    copyto!(M.storage(n), fill(Int32(1000), cap))
+    fill!(M.storage(dst), 0f0)
+    M.run!(pl)
+    M.waitfor!(pl)
+    @test pl.recording === rec
+    @test count(==(1f0), Array(M.storage(dst))) == 1000
+    M.free!(pl)
+end
+
+@testset "a resize!d buffer reaches the next run of a walked plan" begin
+    dev = M.Device(TESTBACKEND)
+    be = dev
+    n = 64
+    src = M.Buffer(dev, ones(Float32, n))
+    out = M.Buffer(dev, zeros(Float32, n))
+    kiout = M.Buffer(dev, zeros(Float32, n))
+    pl = Base.invokelatest(_movepatch_walkedplan, dev, src, out, kiout, n)
+    M.run!(pl)
+    KA.synchronize(be)
+    @test Array(M.storage(out)) == ones(Float32, n)
+    @test Array(M.storage(kiout)) == ones(Float32, n)
+    # A walked plan has no recording to patch: its next run must resolve `src`
+    # again rather than read the store it was compiled against.
+    M.resize!(src, 4n)
+    copyto!(M.storage(src), fill(2f0, 4n))
+    M.run!(pl)
+    KA.synchronize(be)
+    @test Array(M.storage(out)) == fill(2f0, n)
+    @test Array(M.storage(kiout)) == fill(2f0, n)
+    M.free!(pl)
+end
+
+@testset "a buffers arena growing under a recorded plan patches it" begin
+    dev = M.Device(TESTBACKEND)
+    be = dev
+    n = 250_000
+    small = Base.invokelatest(_movepatch_chainplan, dev, n, 3)
+    M.run!(small.plan)                               # recorded at build
+    KA.synchronize(be)
+    @test Array(M.storage(small.out)) == fill(Float32(3 + 2), n)
+    rec = small.plan.recording
+    @test rec !== nothing
+
+    # Grow the shared buffers arena underneath the recording: `big` needs far
+    # more than `small`'s peak, so its `Plan` re-reserves the arena.
+    big = Base.invokelatest(_movepatch_fatplan, dev, 8_000_000)
+    M.run!(big.plan)
+    KA.synchronize(be)
+
+    # The same recording still answers — patched to the arena's new base.
+    M.run!(small.plan)
+    KA.synchronize(be)
+    @test small.plan.recording === rec
+    @test Array(M.storage(small.out)) == fill(Float32(3 + 2), n)
+    M.free!(small.plan)
+    M.free!(big.plan)
+end
+
+@testset "an images arena growing under a recorded plan re-records it" begin
+    dev = M.Device(TESTBACKEND)
+    be = dev
+    N = 64
+    g = M.Graph(dev)
+    img = M.Transient.Image(g, RGBA{Float16}, (N, N))
+    out = M.Buffer(dev, zeros(RGBA{Float16}, N * N))
+    M.render!(g, "tri", img => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+        M.draw!(p, _MOVEPATCH_TRI, (), 3)
+    end
+    M.copy!(g, "read", out, img)
+    pl = M.Plan(g; budget = Inf)
+    # A recording to drop exists only where this device records a render pass.
+    if M.recordable(dev, pl)
+        M.record!(pl)
+        M.run!(pl)
+        KA.synchronize(be)
+        @test pl.recording !== nothing
+        px = Array(M.storage(out))
+        @test all(p -> Float32(p.r) ≈ 0.25f0 && Float32(p.g) ≈ 0.5f0, px)
+
+        # Grow the images arena out from under the recording. The commands name the
+        # old VkImage and view — nothing to patch — so the recording is DROPPED…
+        g2 = M.Graph(dev)
+        big_img = M.Transient.Image(g2, RGBA{Float16}, (4096, 4096))
+        M.render!(g2, "big", big_img => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+            M.draw!(p, _MOVEPATCH_TRI, (), 3)
+        end
+        pl2 = M.record!(M.Plan(g2; budget = Inf))
+        @test pl.recording === nothing
+
+        # …and the next run writes it again, against the new placement.
+        M.run!(pl)
+        KA.synchronize(be)
+        @test pl.recording !== nothing
+        @test Array(M.storage(out)) == px
+        M.free!(pl2)
+    end
+    M.free!(pl)
+end

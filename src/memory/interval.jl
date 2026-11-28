@@ -1,13 +1,9 @@
 """
     Span(lower, upper)
 
-A half-open interval `[lower, upper)`.
-
-Three projects we read use two conventions: MiniMalloc is half-open
-(`minimalloc.h:47-51`), while RPS (`rps_memory_schedule.hpp:418`) and our own
-`DNNKernels/src/plan.jl:256` are closed. Getting this wrong aliases two live
-resources onto the same bytes, which is silent, so the convention is carried by
-the type and asserted at construction rather than left to a comment.
+A half-open interval `[lower, upper)`, checked at construction. MiniMalloc is
+half-open while RPS and DNNKernels' planner are closed ([`from_closed`](@ref));
+mixing them silently aliases two live resources.
 """
 struct Span
     lower::Int

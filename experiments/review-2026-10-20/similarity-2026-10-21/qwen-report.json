@@ -1,0 +1,1082 @@
+{
+  "model": "Qwen/Qwen3-Embedding-0.6B",
+  "revision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+  "index_sha256": "7b1907cefefaace43e3d1fff19a3143b305da809198ba242e3e93c7a952976c7",
+  "chunks": 1987,
+  "calibration": [
+    {
+      "name": "memory selector",
+      "semantic_rank": 1,
+      "lexical_rank": 1,
+      "score": 0.9019193649291992,
+      "source": "src/vulkan/runtime/memory.jl:1346-1357 (method)",
+      "target": "src/vulkan/runtime/memory.jl:1359-1374 (method)",
+      "top": [
+        {
+          "location": "src/vulkan/runtime/memory.jl:1359-1374 (method)",
+          "score": 0.9019193649291992
+        },
+        {
+          "location": "src/vulkan/runtime/video.jl:320-327 (method)",
+          "score": 0.7892006635665894
+        },
+        {
+          "location": "src/vulkan/graphics/framebuffer.jl:126-159 (method)",
+          "score": 0.6117473244667053
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:159-176 (method)",
+          "score": 0.5947839021682739
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:198-202 (method)",
+          "score": 0.5532032251358032
+        },
+        {
+          "location": "src/vulkan/graph.jl:939-945 (method)",
+          "score": 0.5392700433731079
+        },
+        {
+          "location": "src/vulkan/graphics/framebuffer.jl:187-190 (method)",
+          "score": 0.5380856990814209
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:553-592 (region)",
+          "score": 0.5365782976150513
+        },
+        {
+          "location": "src/vulkan/runtime/device.jl:2054-2065 (method)",
+          "score": 0.5351735353469849
+        },
+        {
+          "location": "src/vulkan/graphics/framebuffer.jl:115-118 (method)",
+          "score": 0.5345979332923889
+        }
+      ]
+    },
+    {
+      "name": "borrowed Metal array",
+      "semantic_rank": 1,
+      "lexical_rank": 1,
+      "score": 0.8202227354049683,
+      "source": "src/metal/memory.jl:33-39 (method)",
+      "target": "src/metal/ka.jl:111-115 (method)",
+      "top": [
+        {
+          "location": "src/metal/ka.jl:111-115 (method)",
+          "score": 0.8202227354049683
+        },
+        {
+          "location": "ext/MantleROCmExt.jl:469-470 (method)",
+          "score": 0.8143236637115479
+        },
+        {
+          "location": "src/vulkan/graph.jl:315-316 (method)",
+          "score": 0.778731107711792
+        },
+        {
+          "location": "src/metal/ka.jl:139-140 (method)",
+          "score": 0.764316201210022
+        },
+        {
+          "location": "src/metal/graphics.jl:1363-1368 (method)",
+          "score": 0.7336851954460144
+        },
+        {
+          "location": "src/memory/array.jl:36-41 (method)",
+          "score": 0.7282982468605042
+        },
+        {
+          "location": "ext/MantleROCmExt.jl:277-278 (method)",
+          "score": 0.7190690040588379
+        },
+        {
+          "location": "src/memory/resources.jl:168-171 (method)",
+          "score": 0.7169903516769409
+        },
+        {
+          "location": "src/metal/memory.jl:77-78 (method)",
+          "score": 0.7067603468894958
+        },
+        {
+          "location": "src/metal/device.jl:1504-1516 (method)",
+          "score": 0.7005741596221924
+        }
+      ]
+    },
+    {
+      "name": "raster/mesh shared setup",
+      "semantic_rank": 2,
+      "lexical_rank": 1,
+      "score": 0.8783233165740967,
+      "source": "src/metal/graphics.jl:665-745 (method)",
+      "target": "src/metal/mesh.jl:350-425 (method)",
+      "top": [
+        {
+          "location": "src/metal/mesh.jl:350-389 (region)",
+          "score": 0.886635959148407
+        },
+        {
+          "location": "src/metal/mesh.jl:350-425 (method)",
+          "score": 0.8783233165740967
+        },
+        {
+          "location": "src/vulkan/graphics/api.jl:58-107 (method)",
+          "score": 0.8467363119125366
+        },
+        {
+          "location": "src/vulkan/graphics/api.jl:128-157 (method)",
+          "score": 0.8351051211357117
+        },
+        {
+          "location": "src/metal/mesh.jl:374-413 (region)",
+          "score": 0.8290579915046692
+        },
+        {
+          "location": "src/vulkan/graphics/api.jl:46-56 (method)",
+          "score": 0.77068030834198
+        },
+        {
+          "location": "src/metal/graphics.jl:1164-1176 (method)",
+          "score": 0.7632284164428711
+        },
+        {
+          "location": "src/metal/mesh.jl:567-577 (method)",
+          "score": 0.7616170048713684
+        },
+        {
+          "location": "src/vulkan/graphics/api.jl:116-126 (method)",
+          "score": 0.7602277398109436
+        },
+        {
+          "location": "src/metal/mesh.jl:503-512 (method)",
+          "score": 0.7575501203536987
+        }
+      ]
+    },
+    {
+      "name": "TLAS batch transforms",
+      "semantic_rank": 1,
+      "lexical_rank": 1,
+      "score": 0.9060447216033936,
+      "source": "src/metal/hwtlas.jl:529-538 (method)",
+      "target": "src/vulkan/raytracing/hwtlas.jl:521-532 (method)",
+      "top": [
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:521-532 (method)",
+          "score": 0.9060447216033936
+        },
+        {
+          "location": "src/metal/hwtlas.jl:550-554 (method)",
+          "score": 0.904824435710907
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:572-589 (method)",
+          "score": 0.8803415298461914
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:611-617 (method)",
+          "score": 0.8760076761245728
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:535-538 (method)",
+          "score": 0.8484543561935425
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:542-545 (method)",
+          "score": 0.8333505392074585
+        },
+        {
+          "location": "src/metal/hwtlas.jl:540-542 (method)",
+          "score": 0.8272900581359863
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:591-593 (method)",
+          "score": 0.8036755323410034
+        },
+        {
+          "location": "src/metal/hwtlas.jl:546-547 (method)",
+          "score": 0.8033387660980225
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:599-602 (method)",
+          "score": 0.7848958969116211
+        }
+      ]
+    },
+    {
+      "name": "TLAS single transform",
+      "semantic_rank": 2,
+      "lexical_rank": 1,
+      "score": 0.8921493291854858,
+      "source": "src/metal/hwtlas.jl:550-554 (method)",
+      "target": "src/vulkan/raytracing/hwtlas.jl:611-617 (method)",
+      "top": [
+        {
+          "location": "src/metal/hwtlas.jl:529-538 (method)",
+          "score": 0.9002326726913452
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:611-617 (method)",
+          "score": 0.8921493291854858
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:521-532 (method)",
+          "score": 0.8864877223968506
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:572-589 (method)",
+          "score": 0.858379602432251
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:535-538 (method)",
+          "score": 0.8265016674995422
+        },
+        {
+          "location": "src/metal/hwtlas.jl:546-547 (method)",
+          "score": 0.8216074705123901
+        },
+        {
+          "location": "src/metal/hwtlas.jl:540-542 (method)",
+          "score": 0.820343554019928
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:542-545 (method)",
+          "score": 0.8003133535385132
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:591-593 (method)",
+          "score": 0.7821593284606934
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:619-620 (method)",
+          "score": 0.7734536528587341
+        }
+      ]
+    },
+    {
+      "name": "GC pressure policy",
+      "semantic_rank": 1,
+      "lexical_rank": 20,
+      "score": 0.7275347113609314,
+      "source": "src/memory/pool.jl:1051-1068 (method)",
+      "target": "src/vulkan/runtime/memory.jl:253-322 (method)",
+      "top": [
+        {
+          "location": "src/vulkan/runtime/memory.jl:253-322 (method)",
+          "score": 0.7275347113609314
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:253-292 (region)",
+          "score": 0.7168567776679993
+        },
+        {
+          "location": "src/memory/pool.jl:989-1011 (method)",
+          "score": 0.6649375557899475
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:301-322 (region)",
+          "score": 0.6300590634346008
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:277-316 (region)",
+          "score": 0.627001166343689
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:1010-1014 (method)",
+          "score": 0.5988436937332153
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:1007-1008 (method)",
+          "score": 0.5872581601142883
+        },
+        {
+          "location": "src/memory/pool.jl:1028-1034 (method)",
+          "score": 0.5815389752388
+        },
+        {
+          "location": "src/graph/lifetime.jl:591-595 (method)",
+          "score": 0.5586789846420288
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:245-251 (method)",
+          "score": 0.5521277189254761
+        }
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "query": "Find code that chooses the first GPU memory type allowed by a bit mask and required property flags.",
+      "top": [
+        {
+          "location": "src/vulkan/runtime/memory.jl:1359-1374 (method)",
+          "score": 0.8417744636535645
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:1346-1357 (method)",
+          "score": 0.8077601194381714
+        },
+        {
+          "location": "src/vulkan/runtime/video.jl:320-327 (method)",
+          "score": 0.6885167956352234
+        },
+        {
+          "location": "src/vulkan/runtime/device.jl:2027-2046 (method)",
+          "score": 0.6478838920593262
+        },
+        {
+          "location": "src/vulkan/graph.jl:939-945 (method)",
+          "score": 0.6429441571235657
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:159-176 (method)",
+          "score": 0.6390427947044373
+        },
+        {
+          "location": "src/vulkan/graphics/framebuffer.jl:126-159 (method)",
+          "score": 0.6324527263641357
+        },
+        {
+          "location": "src/vulkan/runtime/device.jl:695-717 (method)",
+          "score": 0.6188430786132812
+        },
+        {
+          "location": "src/vulkan/runtime/device.jl:2054-2065 (method)",
+          "score": 0.6154051423072815
+        },
+        {
+          "location": "ext/MantleROCmExt.jl:385-385 (method)",
+          "score": 0.6093035340309143
+        }
+      ]
+    },
+    {
+      "query": "Find code that constructs a borrowed GPU array view from an existing native Metal buffer with a byte offset and dimensions.",
+      "top": [
+        {
+          "location": "src/metal/memory.jl:33-39 (method)",
+          "score": 0.7653759717941284
+        },
+        {
+          "location": "src/metal/ka.jl:111-115 (method)",
+          "score": 0.7486394047737122
+        },
+        {
+          "location": "src/vulkan/array/lavaarray.jl:37-42 (method)",
+          "score": 0.7118878364562988
+        },
+        {
+          "location": "src/metal/record.jl:62-67 (method)",
+          "score": 0.7108781337738037
+        },
+        {
+          "location": "ext/MantleROCmExt.jl:437-460 (method)",
+          "score": 0.6996746063232422
+        },
+        {
+          "location": "src/metal/memory.jl:102-102 (method)",
+          "score": 0.6988335847854614
+        },
+        {
+          "location": "src/memory/resources.jl:160-166 (method)",
+          "score": 0.6934998631477356
+        },
+        {
+          "location": "src/metal/graphics.jl:1363-1368 (method)",
+          "score": 0.6893414258956909
+        },
+        {
+          "location": "src/metal/memory.jl:13-14 (method)",
+          "score": 0.6804028749465942
+        },
+        {
+          "location": "src/metal/device.jl:1504-1516 (method)",
+          "score": 0.6762595176696777
+        }
+      ]
+    },
+    {
+      "query": "Find implementations of garbage collection decisions based on GPU memory pressure and time spent collecting.",
+      "top": [
+        {
+          "location": "src/vulkan/runtime/memory.jl:253-292 (region)",
+          "score": 0.8126499652862549
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:253-322 (method)",
+          "score": 0.7944316864013672
+        },
+        {
+          "location": "src/memory/pool.jl:1051-1068 (method)",
+          "score": 0.7248545289039612
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:277-316 (region)",
+          "score": 0.6486362218856812
+        },
+        {
+          "location": "src/metal/graphics.jl:948-967 (method)",
+          "score": 0.6327114105224609
+        },
+        {
+          "location": "src/vulkan/graph.jl:1264-1301 (method)",
+          "score": 0.627682626247406
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:1010-1014 (method)",
+          "score": 0.6175225973129272
+        },
+        {
+          "location": "src/vulkan/runtime/diagnostics.jl:22-43 (method)",
+          "score": 0.6160447597503662
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:301-322 (region)",
+          "score": 0.6054028272628784
+        },
+        {
+          "location": "src/vulkan/runtime/memory.jl:1007-1008 (method)",
+          "score": 0.603561282157898
+        }
+      ]
+    },
+    {
+      "query": "Find code that updates transforms for a batch of ray tracing instances and marks the acceleration structure dirty.",
+      "top": [
+        {
+          "location": "src/metal/hwtlas.jl:529-538 (method)",
+          "score": 0.7777302265167236
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:521-532 (method)",
+          "score": 0.7633610367774963
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:572-589 (method)",
+          "score": 0.7473596930503845
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:611-617 (method)",
+          "score": 0.7421879768371582
+        },
+        {
+          "location": "src/metal/hwtlas.jl:550-554 (method)",
+          "score": 0.7243609428405762
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:535-538 (method)",
+          "score": 0.7111977338790894
+        },
+        {
+          "location": "src/raytracing/instances.jl:41-47 (method)",
+          "score": 0.6979898810386658
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:706-730 (method)",
+          "score": 0.6956881284713745
+        },
+        {
+          "location": "src/metal/hwtlas.jl:625-664 (region)",
+          "score": 0.6915285587310791
+        },
+        {
+          "location": "src/vulkan/raytracing/hwtlas.jl:382-389 (method)",
+          "score": 0.6909142732620239
+        }
+      ]
+    },
+    {
+      "query": "Find the Vulkan Float32 depth attachment format mapping.",
+      "top": [
+        {
+          "location": "src/vulkan/graphics/record.jl:34-36 (method)",
+          "score": 0.7372425198554993
+        },
+        {
+          "location": "src/vulkan/lowering.jl:192-194 (method)",
+          "score": 0.7047466039657593
+        },
+        {
+          "location": "src/vulkan/lowering.jl:239-239 (method)",
+          "score": 0.7028743028640747
+        },
+        {
+          "location": "src/metal/graphics.jl:379-380 (method)",
+          "score": 0.6836177110671997
+        },
+        {
+          "location": "src/vulkan/lowering.jl:235-236 (method)",
+          "score": 0.6791732311248779
+        },
+        {
+          "location": "src/vulkan/lowering.jl:181-185 (method)",
+          "score": 0.6781868934631348
+        },
+        {
+          "location": "src/vulkan/lowering.jl:158-165 (method)",
+          "score": 0.6613444089889526
+        },
+        {
+          "location": "src/vulkan/graph.jl:414-416 (method)",
+          "score": 0.6567054986953735
+        },
+        {
+          "location": "src/vulkan/graphics/textures.jl:218-226 (method)",
+          "score": 0.6461091637611389
+        },
+        {
+          "location": "src/graphics/record.jl:333-333 (method)",
+          "score": 0.6419777870178223
+        }
+      ]
+    },
+    {
+      "query": "Find the Vulkan Float32 sampled color texture format mapping.",
+      "top": [
+        {
+          "location": "src/vulkan/lowering.jl:239-239 (method)",
+          "score": 0.7379292249679565
+        },
+        {
+          "location": "src/vulkan/lowering.jl:235-236 (method)",
+          "score": 0.7262557148933411
+        },
+        {
+          "location": "src/vulkan/lowering.jl:242-243 (method)",
+          "score": 0.7135704755783081
+        },
+        {
+          "location": "src/vulkan/lowering.jl:240-241 (method)",
+          "score": 0.6978691816329956
+        },
+        {
+          "location": "src/vulkan/lowering.jl:233-234 (method)",
+          "score": 0.6976134777069092
+        },
+        {
+          "location": "src/vulkan/lowering.jl:229-230 (method)",
+          "score": 0.68895024061203
+        },
+        {
+          "location": "src/vulkan/lowering.jl:231-232 (method)",
+          "score": 0.6866689920425415
+        },
+        {
+          "location": "src/vulkan/graphics/textures.jl:218-226 (method)",
+          "score": 0.676888108253479
+        },
+        {
+          "location": "src/metal/graphics.jl:379-380 (method)",
+          "score": 0.6685644388198853
+        },
+        {
+          "location": "src/vulkan/graphics/pipeline.jl:250-250 (method)",
+          "score": 0.6684188842773438
+        }
+      ]
+    }
+  ],
+  "candidates": [
+    {
+      "score": 0.9966297149658203,
+      "a": "src/vulkan/runtime/video.jl:805-805 (method)",
+      "b": "src/vulkan/runtime/video_h265.jl:529-529 (method)"
+    },
+    {
+      "score": 0.9777292013168335,
+      "a": "src/vulkan/runtime/video.jl:500-514 (method)",
+      "b": "src/vulkan/runtime/video_h265.jl:495-509 (method)"
+    },
+    {
+      "score": 0.9763095378875732,
+      "a": "src/graphics/mesh.jl:76-79 (method)",
+      "b": "src/graphics/pipeline.jl:89-92 (method)"
+    },
+    {
+      "score": 0.9757804274559021,
+      "a": "src/vulkan/runtime/video.jl:796-974 (method)",
+      "b": "src/vulkan/runtime/video_h265.jl:520-636 (method)"
+    },
+    {
+      "score": 0.9748435020446777,
+      "a": "src/metal/hwtlas.jl:358-368 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:262-272 (method)"
+    },
+    {
+      "score": 0.9735897779464722,
+      "a": "src/metal/graphics.jl:1164-1176 (method)",
+      "b": "src/metal/mesh.jl:503-512 (method)"
+    },
+    {
+      "score": 0.972298264503479,
+      "a": "src/vulkan/runtime/video.jl:806-806 (method)",
+      "b": "src/vulkan/runtime/video_h265.jl:530-530 (method)"
+    },
+    {
+      "score": 0.9717977046966553,
+      "a": "src/vulkan/runtime/video.jl:815-815 (method)",
+      "b": "src/vulkan/runtime/video_h265.jl:531-531 (method)"
+    },
+    {
+      "score": 0.9697519540786743,
+      "a": "src/metal/graphics.jl:1164-1176 (method)",
+      "b": "src/metal/mesh.jl:567-577 (method)"
+    },
+    {
+      "score": 0.9697266221046448,
+      "a": "src/vulkan/runtime/video.jl:796-835 (region)",
+      "b": "src/vulkan/runtime/video_h265.jl:520-559 (region)"
+    },
+    {
+      "score": 0.9680405855178833,
+      "a": "src/metal/hwtlas.jl:500-508 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:462-474 (method)"
+    },
+    {
+      "score": 0.9665008783340454,
+      "a": "src/vulkan/graphics/pipeline.jl:252-256 (method)",
+      "b": "src/vulkan/raytracing/pipeline.jl:361-365 (method)"
+    },
+    {
+      "score": 0.965701699256897,
+      "a": "src/metal/hwtlas.jl:568-573 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:646-651 (method)"
+    },
+    {
+      "score": 0.9648430347442627,
+      "a": "src/graph/build.jl:1012-1016 (method)",
+      "b": "src/runtime/dispatch.jl:315-319 (method)"
+    },
+    {
+      "score": 0.9640375375747681,
+      "a": "src/graph/backend.jl:621-622 (method)",
+      "b": "src/vulkan/graph.jl:1619-1620 (method)"
+    },
+    {
+      "score": 0.9630522131919861,
+      "a": "src/graph/access.jl:1237-1245 (method)",
+      "b": "src/vulkan/access.jl:36-42 (method)"
+    },
+    {
+      "score": 0.9625245332717896,
+      "a": "src/vulkan/runtime/video.jl:892-931 (region)",
+      "b": "src/vulkan/runtime/video_h265.jl:592-631 (region)"
+    },
+    {
+      "score": 0.961427628993988,
+      "a": "src/metal/hwtlas.jl:463-469 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:433-439 (method)"
+    },
+    {
+      "score": 0.9613747000694275,
+      "a": "src/metal/hwtlas.jl:479-489 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:413-422 (method)"
+    },
+    {
+      "score": 0.9612955451011658,
+      "a": "ext/MantleROCmExt.jl:1022-1035 (method)",
+      "b": "src/metal/ka.jl:193-206 (method)"
+    },
+    {
+      "score": 0.9611929655075073,
+      "a": "src/vulkan/runtime/video.jl:807-807 (method)",
+      "b": "src/vulkan/runtime/video_h265.jl:530-530 (method)"
+    },
+    {
+      "score": 0.9602652192115784,
+      "a": "src/vulkan/runtime/video.jl:637-676 (region)",
+      "b": "src/vulkan/runtime/video_h265.jl:389-428 (region)"
+    },
+    {
+      "score": 0.9589298963546753,
+      "a": "src/vulkan/runtime/video.jl:796-835 (region)",
+      "b": "src/vulkan/runtime/video_h265.jl:520-636 (method)"
+    },
+    {
+      "score": 0.9580175280570984,
+      "a": "src/vulkan/runtime/video.jl:796-974 (method)",
+      "b": "src/vulkan/runtime/video_h265.jl:520-559 (region)"
+    },
+    {
+      "score": 0.9577401876449585,
+      "a": "src/metal/hwtlas.jl:433-440 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:394-402 (method)"
+    },
+    {
+      "score": 0.9568672180175781,
+      "a": "src/vulkan/runtime/video.jl:991-1004 (method)",
+      "b": "src/vulkan/runtime/video_h265.jl:645-654 (method)"
+    },
+    {
+      "score": 0.9558370113372803,
+      "a": "ext/MantleROCmExt.jl:950-970 (method)",
+      "b": "src/metal/ka.jl:347-374 (method)"
+    },
+    {
+      "score": 0.9557052850723267,
+      "a": "src/vulkan/runtime/video.jl:637-786 (method)",
+      "b": "src/vulkan/runtime/video_h265.jl:389-493 (method)"
+    },
+    {
+      "score": 0.954291582107544,
+      "a": "src/vulkan/runtime/video.jl:422-427 (method)",
+      "b": "src/vulkan/runtime/video_h265.jl:327-339 (method)"
+    },
+    {
+      "score": 0.9542825222015381,
+      "a": "src/metal/hwtlas.jl:517-525 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:489-501 (method)"
+    },
+    {
+      "score": 0.9533382654190063,
+      "a": "src/metal/hwtlas.jl:577-578 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:284-285 (method)"
+    },
+    {
+      "score": 0.9516122341156006,
+      "a": "src/metal/hwtlas.jl:500-508 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:489-501 (method)"
+    },
+    {
+      "score": 0.9509311318397522,
+      "a": "src/graph/kalaunch.jl:636-656 (method)",
+      "b": "src/vulkan/graph.jl:965-1007 (method)"
+    },
+    {
+      "score": 0.9500554800033569,
+      "a": "ext/MantleROCmExt.jl:1289-1289 (method)",
+      "b": "src/metal/record.jl:1459-1459 (method)"
+    },
+    {
+      "score": 0.9481337070465088,
+      "a": "ext/MantleROCmExt.jl:666-697 (method)",
+      "b": "src/vulkan/graph.jl:1032-1068 (method)"
+    },
+    {
+      "score": 0.9475729465484619,
+      "a": "src/metal/hwtlas.jl:176-186 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:1004-1010 (method)"
+    },
+    {
+      "score": 0.9462699890136719,
+      "a": "src/metal/hwtlas.jl:188-198 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:1004-1010 (method)"
+    },
+    {
+      "score": 0.9462021589279175,
+      "a": "src/metal/graphics.jl:1250-1277 (method)",
+      "b": "src/metal/mesh.jl:525-549 (method)"
+    },
+    {
+      "score": 0.9455258846282959,
+      "a": "src/graph/access.jl:1237-1245 (method)",
+      "b": "src/metal/ka.jl:460-467 (method)"
+    },
+    {
+      "score": 0.9455080628395081,
+      "a": "src/metal/hwtlas.jl:425-429 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:382-389 (method)"
+    },
+    {
+      "score": 0.9432137608528137,
+      "a": "src/vulkan/array/ka_backend.jl:345-346 (method)",
+      "b": "src/vulkan/array/kernelinterface_host.jl:94-95 (method)"
+    },
+    {
+      "score": 0.9405755996704102,
+      "a": "src/metal/hwtlas.jl:463-469 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:404-411 (method)"
+    },
+    {
+      "score": 0.9405705332756042,
+      "a": "src/metal/hwtlas.jl:556-560 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:627-633 (method)"
+    },
+    {
+      "score": 0.9405692219734192,
+      "a": "src/metal/hwtlas.jl:479-489 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:404-411 (method)"
+    },
+    {
+      "score": 0.9394802451133728,
+      "a": "src/metal/hwtlas.jl:463-469 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:413-422 (method)"
+    },
+    {
+      "score": 0.9380425214767456,
+      "a": "src/metal/hwtlas.jl:517-525 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:462-474 (method)"
+    },
+    {
+      "score": 0.9379485845565796,
+      "a": "src/runtime/backendhooks.jl:102-103 (method)",
+      "b": "src/vulkan/graph.jl:138-139 (method)"
+    },
+    {
+      "score": 0.9374781847000122,
+      "a": "ext/MantleROCmExt.jl:666-697 (method)",
+      "b": "src/metal/record.jl:386-479 (method)"
+    },
+    {
+      "score": 0.9373376369476318,
+      "a": "src/metal/hwtlas.jl:471-477 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:404-411 (method)"
+    },
+    {
+      "score": 0.9372135400772095,
+      "a": "src/metal/hwtlas.jl:550-554 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:611-617 (method)"
+    },
+    {
+      "score": 0.9360360503196716,
+      "a": "src/metal/hwtlas.jl:471-477 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:413-422 (method)"
+    },
+    {
+      "score": 0.9343650937080383,
+      "a": "src/metal/hwtlas.jl:218-228 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:1012-1019 (method)"
+    },
+    {
+      "score": 0.9335964322090149,
+      "a": "src/vulkan/graph.jl:138-139 (method)",
+      "b": "src/vulkan/runtime/videoapi.jl:39-40 (method)"
+    },
+    {
+      "score": 0.9335072636604309,
+      "a": "src/metal/graphics.jl:1250-1277 (method)",
+      "b": "src/metal/mesh.jl:589-650 (method)"
+    },
+    {
+      "score": 0.9334073066711426,
+      "a": "src/geometry/epa.jl:44-52 (method)",
+      "b": "src/geometry/gjk.jl:82-92 (method)"
+    },
+    {
+      "score": 0.9333634376525879,
+      "a": "src/vulkan/graph.jl:177-191 (method)",
+      "b": "src/vulkan/runtime/device.jl:993-1052 (method)"
+    },
+    {
+      "score": 0.9327749013900757,
+      "a": "src/metal/hwtlas.jl:529-538 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:521-532 (method)"
+    },
+    {
+      "score": 0.9318727850914001,
+      "a": "src/metal/ka.jl:460-467 (method)",
+      "b": "src/vulkan/access.jl:36-42 (method)"
+    },
+    {
+      "score": 0.9313946962356567,
+      "a": "src/vulkan/runtime/video.jl:685-724 (region)",
+      "b": "src/vulkan/runtime/video_h265.jl:413-452 (region)"
+    },
+    {
+      "score": 0.9308906197547913,
+      "a": "ext/MantleROCmExt.jl:929-930 (method)",
+      "b": "src/metal/ka.jl:307-311 (method)"
+    },
+    {
+      "score": 0.930812418460846,
+      "a": "src/metal/raytracing.jl:328-367 (method)",
+      "b": "src/vulkan/raytracing/acceleration.jl:391-453 (method)"
+    },
+    {
+      "score": 0.9299801588058472,
+      "a": "src/metal/graphics.jl:1250-1277 (method)",
+      "b": "src/metal/mesh.jl:589-628 (region)"
+    },
+    {
+      "score": 0.9297428131103516,
+      "a": "src/vulkan/runtime/video.jl:637-786 (method)",
+      "b": "src/vulkan/runtime/video_h265.jl:389-428 (region)"
+    },
+    {
+      "score": 0.9297250509262085,
+      "a": "src/graph/kalaunch.jl:1478-1490 (method)",
+      "b": "src/vulkan/graph.jl:1956-1970 (method)"
+    },
+    {
+      "score": 0.9296828508377075,
+      "a": "src/metal/raytracing.jl:279-293 (method)",
+      "b": "src/vulkan/raytracing/acceleration.jl:203-211 (method)"
+    },
+    {
+      "score": 0.9296791553497314,
+      "a": "src/metal/kernelinterface.jl:38-47 (method)",
+      "b": "src/vulkan/array/kernelinterface_host.jl:109-142 (method)"
+    },
+    {
+      "score": 0.929232120513916,
+      "a": "src/vulkan/runtime/video.jl:309-314 (method)",
+      "b": "src/vulkan/runtime/video_h265.jl:306-325 (method)"
+    },
+    {
+      "score": 0.9285954236984253,
+      "a": "src/metal/graphics.jl:665-745 (method)",
+      "b": "src/metal/mesh.jl:350-425 (method)"
+    },
+    {
+      "score": 0.9276278018951416,
+      "a": "src/metal/images.jl:127-144 (method)",
+      "b": "src/vulkan/graph.jl:1451-1478 (method)"
+    },
+    {
+      "score": 0.9272604584693909,
+      "a": "src/vulkan/runtime/video.jl:868-907 (region)",
+      "b": "src/vulkan/runtime/video_h265.jl:568-607 (region)"
+    },
+    {
+      "score": 0.9270936250686646,
+      "a": "src/metal/hwtlas.jl:374-415 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:312-369 (method)"
+    },
+    {
+      "score": 0.9254417419433594,
+      "a": "src/vulkan/runtime/video.jl:685-724 (region)",
+      "b": "src/vulkan/runtime/video_h265.jl:437-476 (region)"
+    },
+    {
+      "score": 0.9250467419624329,
+      "a": "ext/MantleROCmExt.jl:781-794 (method)",
+      "b": "src/graph/backend.jl:533-542 (method)"
+    },
+    {
+      "score": 0.9246954917907715,
+      "a": "src/metal/kernelinterface.jl:36-36 (method)",
+      "b": "src/vulkan/array/kernelinterface_host.jl:78-78 (method)"
+    },
+    {
+      "score": 0.9240586757659912,
+      "a": "src/metal/trace.jl:134-170 (method)",
+      "b": "src/vulkan/raytracing/raycore_compat.jl:126-130 (method)"
+    },
+    {
+      "score": 0.9233022928237915,
+      "a": "src/metal/hwtlas.jl:230-240 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:1012-1019 (method)"
+    },
+    {
+      "score": 0.9224533438682556,
+      "a": "src/metal/raytracing.jl:279-293 (method)",
+      "b": "src/vulkan/raytracing/acceleration.jl:213-224 (method)"
+    },
+    {
+      "score": 0.9222695827484131,
+      "a": "src/metal/hwtlas.jl:339-342 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:250-253 (method)"
+    },
+    {
+      "score": 0.9222545027732849,
+      "a": "src/metal/hwtlas.jl:479-489 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:433-439 (method)"
+    },
+    {
+      "score": 0.9218381643295288,
+      "a": "ext/MantleROCmExt.jl:666-697 (method)",
+      "b": "src/metal/record.jl:386-425 (region)"
+    },
+    {
+      "score": 0.9202343225479126,
+      "a": "src/vulkan/graph.jl:965-1007 (method)",
+      "b": "src/vulkan/graphics/record.jl:90-112 (method)"
+    },
+    {
+      "score": 0.9197843670845032,
+      "a": "src/metal/hwtlas.jl:500-508 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:413-422 (method)"
+    },
+    {
+      "score": 0.9184547662734985,
+      "a": "src/metal/record.jl:386-479 (method)",
+      "b": "src/vulkan/graph.jl:1032-1068 (method)"
+    },
+    {
+      "score": 0.9181715846061707,
+      "a": "src/vulkan/array/kernelinterface_host.jl:94-95 (method)",
+      "b": "src/vulkan/array/lavaarray.jl:317-319 (method)"
+    },
+    {
+      "score": 0.9177411794662476,
+      "a": "src/metal/record.jl:1179-1186 (method)",
+      "b": "src/vulkan/graph.jl:1324-1337 (method)"
+    },
+    {
+      "score": 0.9170854091644287,
+      "a": "src/metal/hwtlas.jl:471-477 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:433-439 (method)"
+    },
+    {
+      "score": 0.9168883562088013,
+      "a": "src/metal/hwtlas.jl:529-538 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:611-617 (method)"
+    },
+    {
+      "score": 0.9163942933082581,
+      "a": "src/metal/device.jl:1447-1462 (method)",
+      "b": "src/vulkan/runtime/device.jl:1933-1951 (method)"
+    },
+    {
+      "score": 0.9161226749420166,
+      "a": "src/metal/hwtlas.jl:540-542 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:599-602 (method)"
+    },
+    {
+      "score": 0.9159114360809326,
+      "a": "src/metal/hwtlas.jl:550-554 (method)",
+      "b": "src/vulkan/raytracing/hwtlas.jl:521-532 (method)"
+    },
+    {
+      "score": 0.9156346321105957,
+      "a": "src/vulkan/runtime/video.jl:637-676 (region)",
+      "b": "src/vulkan/runtime/video_h265.jl:389-493 (method)"
+    },
+    {
+      "score": 0.9154541492462158,
+      "a": "src/vulkan/raytracing/pipeline.jl:327-357 (method)",
+      "b": "src/vulkan/raytracing/shaders.jl:127-165 (method)"
+    },
+    {
+      "score": 0.9153188467025757,
+      "a": "src/metal/graphics.jl:665-745 (method)",
+      "b": "src/metal/mesh.jl:350-389 (region)"
+    },
+    {
+      "score": 0.9147046208381653,
+      "a": "src/vulkan/raytracing/acceleration.jl:1364-1597 (method)",
+      "b": "src/vulkan/raytracing/raycore_compat.jl:57-62 (method)"
+    },
+    {
+      "score": 0.9139029383659363,
+      "a": "src/array/gemm.jl:2434-2436 (method)",
+      "b": "src/vulkan/array/gemm.jl:79-93 (method)"
+    },
+    {
+      "score": 0.912819504737854,
+      "a": "ext/MantleROCmExt.jl:637-652 (method)",
+      "b": "src/vulkan/graph.jl:1088-1102 (method)"
+    },
+    {
+      "score": 0.9125654697418213,
+      "a": "src/array/gemm.jl:2301-2301 (method)",
+      "b": "src/vulkan/array/gemm.jl:16-17 (method)"
+    },
+    {
+      "score": 0.9123435020446777,
+      "a": "src/vulkan/runtime/video.jl:661-700 (region)",
+      "b": "src/vulkan/runtime/video_h265.jl:413-452 (region)"
+    },
+    {
+      "score": 0.9120264053344727,
+      "a": "src/array/gemm.jl:2588-2592 (method)",
+      "b": "src/array/gemm_cm2.jl:339-371 (method)"
+    },
+    {
+      "score": 0.911902129650116,
+      "a": "src/metal/memory.jl:51-52 (method)",
+      "b": "src/vulkan/graph.jl:333-334 (method)"
+    }
+  ]
+}

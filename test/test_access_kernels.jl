@@ -1,0 +1,475 @@
+# What a kernel does to its arguments, read off the kernel.
+#
+# This is the analysis every declaration now comes from, so what it has to be is
+# not "usually right": EXACT where it can be, and CONSERVATIVE where it cannot —
+# claiming an access that does not happen costs a barrier, and missing one costs
+# a race. Both halves are pinned here, on kernels small enough that the answer is
+# obvious by reading them.
+#
+# The cases are the ones a walk over typed IR gets wrong:
+#
+#   * a scalar argument came back read+write, because an argument was tainted
+#     before its type was asked whether it could reach memory at all;
+#   * an argument whose LENGTH a kernel reads came back read, for the same
+#     reason one step later;
+#   * a kernel written `f(queue, args...)` — which is every wavefront stage —
+#     gave all twenty arguments whatever any one of them got, because the
+#     inferred IR collapses a vararg tail into one argument;
+#   * an atomic came back as an ordinary read-write, because a backend's atomics
+#     are `llvmcall` and the module is named by a `GlobalRef` rather than inline.
+#
+# Per backend because every testset below builds a device and runs the walk
+# through the interpreter THAT backend compiles with — which is the whole point
+# of the analysis (see `accessof`). The half that is a question about types and
+# not about a device is `test/test_access.jl`. This file was
+# `test/vulkan/test_access.jl`.
+using Test, Mantle, KernelAbstractions, StructArrays
+import Atomix, Adapt
+import KernelInterface as KI
+const M = Mantle
+include(joinpath(@__DIR__, "testbackend.jl"))
+
+using StaticArrays: MVector
+@noinline function acc_object_scratch_value(data::MVector{4,Float32}, index)
+    GC.@preserve data unsafe_load(Ptr{Float32}(pointer_from_objref(data)), index)
+end
+function acc_object_scratch!(dst, src)
+    i = KI.get_global_id().x
+    i > length(dst) && return nothing
+    x = @inbounds src[i]
+    data = MVector{4,Float32}(x, x + 1f0, x + 2f0, x + 3f0)
+    j = (i - 1) % 4 + 1
+    @inbounds dst[i] = acc_object_scratch_value(data, j)
+    return nothing
+end
+
+struct AccScratchWrapper
+    data::MVector{4,Float32}
+end
+@noinline function acc_wrapped_scratch_value(wrapper::AccScratchWrapper, index)
+    data = wrapper.data
+    GC.@preserve data unsafe_load(Ptr{Float32}(pointer_from_objref(data)), index)
+end
+function acc_wrapped_scratch!(dst, src)
+    i = KI.get_global_id().x
+    i > length(dst) && return nothing
+    x = @inbounds src[i]
+    data = MVector{4,Float32}(x, x + 1f0, x + 2f0, x + 3f0)
+    j = (i - 1) % 4 + 1
+    @inbounds dst[i] = acc_wrapped_scratch_value(AccScratchWrapper(data), j)
+    return nothing
+end
+
+@testset "local object-data pointers preserve dispatch accesses" begin
+    dev = M.Device(TESTBACKEND)
+    dst = M.devicearray(dev, zeros(Float32, 64))
+    src = M.devicearray(dev, Float32.(1:64))
+    try
+        for kernel in (acc_object_scratch!, acc_wrapped_scratch!)
+            @test M.argument_usage(dev, kernel, (dst, src), 64, nothing) == [M.WRITE,M.READ]
+            KI.@launch dev ndrange=64 kernel(dst, src)
+            M.waitidle(dev)
+            @test Array(dst) == Float32[i + (i - 1) % 4 for i in 1:64]
+        end
+    finally
+        M.unsafe_free!(dst)
+        M.unsafe_free!(src)
+    end
+end
+
+@kernel function acc_mixed!(dst, @Const(src), @Const(unused), scale::Float32)
+    i = @index(Global)
+    @inbounds dst[i] = src[i] * scale
+end
+
+@kernel function acc_atomic!(sums, @Const(src))
+    i = @index(Global)
+    @inbounds Atomix.@atomic :monotonic sums[i] += src[i]
+end
+
+@kernel function acc_lengthonly!(dst, @Const(other))
+    i = @index(Global)
+    @inbounds dst[i] = Float32(length(other))
+end
+
+# Not inlined, so the walk has to follow the call to find the store.
+@noinline function acc_fill_one!(v, i)
+    @inbounds v[i] = 1f0
+    return nothing
+end
+@kernel function acc_helper!(dst)
+    i = @index(Global)
+    acc_fill_one!(dst, i)
+end
+
+struct AccPair{A}
+    a::A
+    b::A
+end
+Adapt.@adapt_structure AccPair
+
+@kernel function acc_struct!(q::AccPair, @Const(src))
+    i = @index(Global)
+    @inbounds q.a[i] = src[i]
+end
+
+# A work queue's append, which is the shape the wavefront stages have: claim a
+# slot with an atomic, then store the payload at it. The payload store is an
+# ORDINARY store and no two invocations can collide, which is what makes the
+# whole queue unordered against another pass doing the same.
+struct AccQueue{I,S}
+    items::I
+    size::S
+end
+Adapt.@adapt_structure AccQueue
+
+@kernel function acc_append!(q::AccQueue, @Const(src))
+    i = @index(Global)
+    v = @inbounds src[i]
+    slot = Atomix.@atomic :monotonic q.size[1] += Int32(1)
+    @inbounds q.items[slot] = v
+end
+
+# The same append with the payload store in a callee the inliner left standing.
+# Where it stops is the backend's cost model: StructArrays' `setindex!` hands the
+# slot to `foreachfield_gen` inside a closure, and Metal's array store costs
+# enough that the call stays, so on the M5 every Hikari queue append came back
+# ordered and every shade pass of a bounce waited for the one before it.
+@noinline function acc_store_at!(items, v, slot)
+    @inbounds items[slot] = v
+    return nothing
+end
+@noinline function acc_apply!(f, items, v)
+    f(items, v)
+    return nothing
+end
+
+@kernel function acc_append_outlined!(q::AccQueue, @Const(src))
+    i = @index(Global)
+    v = @inbounds src[i]
+    slot = Atomix.@atomic :monotonic q.size[1] += Int32(1)
+    acc_store_at!(q.items, v, slot)
+end
+
+@kernel function acc_append_captured!(q::AccQueue, @Const(src))
+    i = @index(Global)
+    v = @inbounds src[i]
+    slot = Atomix.@atomic :monotonic q.size[1] += Int32(1)
+    acc_apply!((items, x) -> (@inbounds items[slot] = x), q.items, v)
+end
+
+# Ordered: the callee stores at the invocation's own index, which nothing claimed.
+@kernel function acc_store_unclaimed!(q::AccQueue, @Const(src))
+    i = @index(Global)
+    v = @inbounds src[i]
+    Atomix.@atomic :monotonic q.size[1] += Int32(1)
+    acc_store_at!(q.items, v, i)
+end
+
+# Ordered: a slot claimed from `p`'s counter says nothing about `q`'s payload.
+@kernel function acc_store_foreign!(q::AccQueue, p::AccQueue, @Const(src))
+    i = @index(Global)
+    v = @inbounds src[i]
+    slot = Atomix.@atomic :monotonic p.size[1] += Int32(1)
+    acc_store_at!(q.items, v, slot)
+end
+
+struct AccRecord
+    a::Float32
+    b::Int32
+end
+
+# A record written whole at a claimed slot: Hikari's queue shape with a
+# struct-of-arrays payload, and with a plain array of records, whose element store
+# Metal spells as an `llvmcall` storing an aggregate type.
+@kernel function acc_append_record!(q::AccQueue, @Const(src))
+    i = @index(Global)
+    v = @inbounds src[i]
+    slot = Atomix.@atomic :monotonic q.size[1] += Int32(1)
+    @inbounds q.items[slot] = AccRecord(v, Int32(i))
+end
+
+# The higher-order shape: the kernel takes the real kernel and a tail of
+# arguments, and splats them. Every stage of Hikari's integrator is this.
+@kernel function acc_map!(f, n::Int32, args...)
+    i = @index(Global)
+    i <= n && f(i, args...)
+end
+acc_inner!(i, dst, src, spare) = (@inbounds dst[i] = src[i]; nothing)
+
+"""`Touch` as a string: `R`, `W`, and `~` for a write nothing can collide with."""
+show_t(t) = (t.read ? "R" : "-") * (t.write ? "W" : "-") * (t.write && t.atomic ? "~" : "")
+touches(dev, k, args, nd; group = nothing) =
+    show_t.(M.kerneltouches(dev, k, args, nd, group))
+
+@testset "inferred access: exact where it can be" begin
+    dev = M.Device(TESTBACKEND)
+    n = 256
+    dst = M.devicearray(dev, Float32, n)
+    src = M.devicearray(dev, fill(1f0, n))
+    other = M.devicearray(dev, Float32, n)
+
+    # Written, read, untouched, and a scalar that has no bytes to touch.
+    @test touches(dev, acc_mixed!, (dst, src, other, 2f0), n) == ["-W", "R-", "--", "--"]
+
+    # An argument a kernel only asks the LENGTH of is not read: the size is a
+    # by-value field of the array handle, not a load from its storage.
+    @test touches(dev, acc_lengthonly!, (dst, other), n) == ["-W", "--"]
+
+    # Through a call the optimiser left standing.
+    @test touches(dev, acc_helper!, (dst,), n) == ["-W"]
+
+    # Through a struct of arrays: `q.a` is written, and `q` is what the graph
+    # declares, so the whole container is written and `src` is only read.
+    q = AccPair(M.devicearray(dev, Float32, n), M.devicearray(dev, Float32, n))
+    @test touches(dev, acc_struct!, (q, src), n) == ["-W", "R-"]
+end
+
+@testset "inferred access: an atomic is a write nothing can collide with" begin
+    dev = M.Device(TESTBACKEND)
+    n = 256
+    sums = M.devicearray(dev, Float32, n)
+    src = M.devicearray(dev, fill(1f0, n))
+    @test touches(dev, acc_atomic!, (sums, src), n) == ["RW~", "R-"]
+
+    # …and so is a plain store at an index claimed from one. The counter and the
+    # payload are fields of ONE argument, which is what makes the disjointness
+    # provable: a slot claimed from this queue's counter is a slot in this
+    # queue's payload, and no two invocations — or two passes appending to it —
+    # can be handed the same one.
+    q = AccQueue(M.devicearray(dev, Float32, n), M.devicearray(dev, Int32, 1))
+    @test touches(dev, acc_append!, (q, src), n) == ["RW~", "R-"]
+
+    # A claimed slot stays claimed into a callee: passed as an argument, or
+    # captured by a closure the callee calls.
+    @test touches(dev, acc_append_outlined!, (q, src), n) == ["RW~", "R-"]
+    @test touches(dev, acc_append_captured!, (q, src), n) == ["RW~", "R-"]
+    soa = AccQueue(StructArray{AccRecord}((M.devicearray(dev, Float32, n),
+                                           M.devicearray(dev, Int32, n))),
+                   M.devicearray(dev, Int32, 1))
+    @test touches(dev, acc_append_record!, (soa, src), n) == ["RW~", "R-"]
+    records = AccQueue(M.devicearray(dev, AccRecord, n), M.devicearray(dev, Int32, 1))
+    @test touches(dev, acc_append_record!, (records, src), n) == ["RW~", "R-"]
+
+    # And only a claim on the store's own target counts.
+    @test touches(dev, acc_store_unclaimed!, (q, src), n) == ["RW", "R-"]
+    p = AccQueue(M.devicearray(dev, Float32, n), M.devicearray(dev, Int32, 1))
+    @test touches(dev, acc_store_foreign!, (q, p, src), n) == ["-W", "RW~", "R-"]
+end
+
+@testset "inferred access: the value an llvmcall stores" begin
+    # The stored type comes first and may hold spaces; the value follows it.
+    @test M.storedvalue("""
+        %3 = getelementptr inbounds { [1 x [3 x float]], float }, ptr addrspace(1) %0, i64 %2
+        store { [1 x [3 x float]], float } %1, ptr addrspace(1) %3, align 4, !tbaa !0
+        ret void""") == "%1"
+    @test M.storedvalue("store [2 x i32] %1, ptr addrspace(1) %3, align 4") == "%1"
+    @test M.storedvalue("store <4 x float> %1, ptr %3, align 16") == "%1"
+    @test M.storedvalue("store i32 %1, ptr addrspace(1) %3, align 4") == "%1"
+    @test M.storedvalue("store atomic i32 %1, ptr %0 monotonic, align 4") == "%1"
+    @test M.storedvalue("store ptr addrspace(1) %1, ptr %0, align 8") == "%1"
+    @test M.storedvalue("store float 0.0, ptr %0, align 4") == "0.0"
+    @test M.storedvalue("ret void") === nothing
+    @test M.storedvalue("store i32 %1, ptr %0\nstore i32 %1, ptr %2") === nothing
+end
+
+@testset "inferred access: a vararg tail is not one argument" begin
+    dev = M.Device(TESTBACKEND)
+    n = 64
+    dst = M.devicearray(dev, Float32, n)
+    src = M.devicearray(dev, fill(2f0, n))
+    spare = M.devicearray(dev, Float32, n)
+    # `acc_map!` has FIVE arguments in the inferred IR — the kernel, the
+    # iteration context, `f`, `n`, and one tuple holding the other three — while
+    # the signature has seven. Without the element index, `dst`, `src` and
+    # `spare` would all answer whatever any one of them got.
+    @test touches(dev, acc_map!, (acc_inner!, Int32(n), dst, src, spare), n) ==
+          ["--", "--", "-W", "R-", "--"]
+end
+
+# A kernel calling an intrinsic this backend does not implement — which is what
+# `KI.localmemory` WAS, before its signature grew a call-site id. Every path
+# through the body throws, so it infers to `Union{}` and its IR is unreachable
+# from the first statement on.
+function acc_missing_intrinsic end
+
+function acc_uninferable!(dst, n::Int)
+    i = KI.get_global_id().x
+    v = acc_missing_intrinsic(Float32(i))
+    @inbounds dst[i] = v
+    return
+end
+
+@testset "inferred access: a kernel that does not infer is refused" begin
+    dev = M.Device(TESTBACKEND)
+    n = 64
+    dst = M.devicearray(dev, Float32, n)
+    # "No store" is the one answer that must never be a guess — it is the answer
+    # that removes a barrier. Widened to read+write it is safe for the barrier
+    # phase and indistinguishable from a proof; the kernel does
+    # not compile either, so the refusal is the same error arriving earlier with
+    # the argument named.
+    err = try
+        touches(dev, acc_uninferable!, (dst, n), n)
+        nothing
+    catch e
+        e
+    end
+    @test err isa M.UnanalysableAccess
+    msg = sprint(showerror, err)
+    @test occursin("cannot infer", msg)
+    @test occursin("acc_uninferable!", msg)
+    @test occursin("will not guess", msg)
+end
+
+@testset "inferred access: a device array carries" begin
+    # The one `carries` answer that belongs to a backend: the type a device
+    # array arrives in a kernel as. The rest of them, and everything else the
+    # walk decides from types alone, is in the portable `test/test_access.jl`.
+    dev = M.Device(TESTBACKEND)
+    @test M.carries(M.devicebuffertype(dev, Float32, 1)) === true
+end
+
+@testset "inferred access: what a dispatch declares" begin
+    dev = M.Device(TESTBACKEND)
+    n = 64
+    g = M.Graph(dev)
+    dst = M.Buffer(dev, zeros(Float32, n))
+    src = M.Buffer(dev, fill(1f0, n))
+    p = M.dispatch!(g, acc_mixed!, (dst, src, src, 2f0), n)
+
+    byid = Dict(id => U for (id, U) in p.usages)
+    @test byid[M.resourceid(g, dst)] === Storage{BufferKind, WriteOnly}
+    @test byid[M.resourceid(g, src)] === Storage{BufferKind, ReadOnly}
+    @test p.name == "acc_mixed!"          # the kernel names its own pass
+
+    # A container is declared by its LEAVES, which is what a barrier is scoped to.
+    #
+    # Built from `devicearray` and not from `Buffer`, and that is a real
+    # constraint rather than a preference: `resolve`/`storage` descends into a
+    # `Tuple` but not into a struct, so an `AccPair{Buffer}` reaches the walk
+    # with graph handles still inside it, `setindex!` has no method for one, and
+    # the kernel infers to nothing but its throw path. It cannot RUN either --
+    # the packer would be handed a non-isbits `AccPair{Buffer}` and GPUCompiler
+    # would refuse it -- so a walk that widens that throw path to read+write
+    # makes this assertion pass on a dispatch that can never execute.
+    #
+    # Resolving a struct of resources elementwise is the remaining half of what
+    # `storage(::Tuple)` did; until then a container argument holds device
+    # arrays, which is what every consumer of this shape already passes.
+    qa = M.devicearray(dev, zeros(Float32, n))
+    qb = M.devicearray(dev, zeros(Float32, n))
+    q = AccPair(qa, qb)
+    p2 = M.dispatch!(g, acc_struct!, (q, src), n; name = "struct")
+    # A device array is declared by the bytes of its owner it covers (`usageid`).
+    @test M.usageid(g, qa) in first.(p2.usages)
+    @test M.usageid(g, qb) in first.(p2.usages)
+    # And `src` is only read, which is the half that the widening hid: with the
+    # container's write coming from a throw path, everything in the pass looked
+    # read+write.
+    byid2 = Dict(id => U for (id, U) in p2.usages)
+    @test byid2[M.resourceid(g, src)] === Storage{BufferKind, ReadOnly}
+    @test byid2[M.usageid(g, qa)] === Storage{BufferKind, WriteOnly}
+
+    # A slice is an argument, and it is the slice the pass is recorded touching.
+    sl = M.slice(g, dst, 1:32)
+    p3 = M.dispatch!(g, acc_mixed!, (sl, src, src, 3f0), 32; name = "sliced")
+    @test M.resourceid(g, sl) in first.(p3.usages)
+    @test !(M.resourceid(g, dst) in first.(p3.usages))
+end
+
+@testset "inferred access: the device answers from a cache" begin
+    dev = M.Device(TESTBACKEND)
+    n = 64
+    dst = M.devicearray(dev, Float32, n)
+    src = M.devicearray(dev, fill(1f0, n))
+    M.kerneltouches(dev, acc_mixed!, (dst, src, src, 1f0), n, nothing)
+    c = M.accesscache(dev)
+    @test c isa M.AccessCache
+    # The second ask is a lookup, not an inference pass — the difference is
+    # seconds per kernel on a wavefront stage, so it is worth pinning that it
+    # happens at all. Measured rather than counted, because the cache is dropped
+    # whole when the world age moves and a test file moves it constantly.
+    t = @elapsed M.kerneltouches(dev, acc_mixed!, (dst, src, src, 1f0), n, nothing)
+    @test t < 0.1
+end
+
+# One cooperative-matrix tile, the shape of the staged GEMM's inner loop: load A
+# and B, multiply-add into a zero accumulator, store C. Never compiled here, only
+# inferred.
+function acc_tile!(C, A, B, ld::Int, ::Val{T}) where {T}
+    a = AcceleratedMatrix{Float16,T,T,MatrixA}(pointer(A), 1, ld)
+    b = AcceleratedMatrix{Float16,T,T,MatrixB}(pointer(B), 1, ld)
+    c = muladd(a, b, zero(AcceleratedMatrix{Float32,T,T,Accumulator}))
+    copyto!(pointer(C), 1, ld, c)
+    return
+end
+
+@testset "inferred access: a device intrinsic declares what it does" begin
+    # A cooperative-matrix load is not a `load` instruction, and the module it
+    # lives in has none: an `llvmcall` for a backend intrinsic is a `declare`
+    # plus a `call`, so there is nothing in the IR that says a load is a read.
+    # The NAME is the only thing left, and the backend that emitted it is what
+    # says what it means (`intrinsic_usage`). Classified by
+    # `occursin("load ", src)`, Lava's `_lava_coopmat_load_f16_16x16_a` missed by
+    # a space and fell through to read+write.
+    #
+    # The classification reads INSTRUCTIONS, anchored, and not substrings
+    # anywhere in the text. The first of these is the shape every backend
+    # intrinsic has and the name is the only thing in it that mentions loading.
+    ext = """
+        declare i32 @_vendor_tile_load_f16(i64, i32) #0
+        define i32 @entry(i64 %p, i32 %o) #0 {
+            %r = call i32 @_vendor_tile_load_f16(i64 %p, i32 %o)
+            ret i32 %r
+        }
+        """
+    @test M.llvmcallee(ext) === :_vendor_tile_load_f16
+    @test M.llvmcallusage("""
+        define i32 @entry(ptr %p) {
+            %r = load i32, ptr %p
+            ret i32 %r
+        }
+        """) === M.READ
+    @test M.llvmcallusage("""
+        define void @entry(ptr %p, i32 %v) {
+            store i32 %v, ptr %p
+            ret void
+        }
+        """) === M.WRITE
+    @test M.llvmcallusage("""
+        define i32 @entry(ptr %p, i32 %v) {
+            %r = atomicrmw add ptr %p, i32 %v acq_rel
+            ret i32 %r
+        }
+        """) === M.ATOMIC
+    # An intrinsic nobody declared: `nothing`, and the walk refuses on it rather
+    # than widening to read+write, because read+write is indistinguishable from
+    # a proof. No backend knows `_vendor_tile_load_f16`, so the module above is
+    # exactly that.
+    @test M.llvmcallusage(ext) === nothing
+    @test M.intrinsic_usage(:llvm_pow_f32) === nothing
+
+    # And the whole of it on a kernel built from this device's own matrix
+    # intrinsics: the walk must agree with what the kernel does — C written, A
+    # and B only read. It did not: Lava's `gemm_cm2!` came out with all three
+    # read+write, and every pass sharing a weight matrix with another got a
+    # barrier for it. Only on a device whose cooperative-matrix kernels this
+    # build runs: Metal reports matrix shapes but implements no
+    # `KernelInterface` cooperative matrix.
+    if hasstagedgemm()
+        dev = M.Device(TESTBACKEND)
+        t = Mantle.staged_gemm_tile()
+        n = 64
+        C = M.devicearray(dev, zeros(Float32, n, n))
+        A = M.devicearray(dev, ones(Float16, n, n))
+        B = M.devicearray(dev, ones(Float16, n, n))
+        tt = M.kerneltouches(dev, acc_tile!, (C, A, B, n, Val(t)), 32, 32)
+        @test tt[1] === M.WRITE          # C
+        @test tt[2] === M.READ           # A
+        @test tt[3] === M.READ           # B
+        # The extent and the `Val` are not accesses, which is the property the
+        # scalar cases above pin and which a coopmat kernel must not break.
+        @test all(u -> u === M.NOTOUCH, tt[4:end])
+    end
+end

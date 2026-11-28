@@ -1,0 +1,703 @@
+# The suballocator, exercised with no backend whatsoever.
+#
+# That this file needs neither Lava nor KernelAbstractions is the assertion: if
+# `Pool` ever needs a real device to be tested, some policy has leaked into a
+# backend and a second backend will have to copy it.
+
+using Test, Random
+import Mantle
+const M = Mantle
+
+"""
+A device that allocates nothing and counts what it was asked for.
+
+`allocs` is the whole point of the fixture — the headline property is "a second
+acquire does not reach the device", and that is only observable by counting.
+"""
+# `<: M.Device`, because that is what it stands in for: `Buffer` normalises its
+# device argument with `todevice`, which accepts a `Device` and a KA backend and
+# nothing else — deliberately, so a mistake fails where it is made. A test double
+# that plays a device has to be one.
+struct FakeDev <: M.Device
+    allocs::Vector{Int}
+end
+FakeDev() = FakeDev(Int[])
+
+M.rawalloc(d::FakeDev, kind, bytes, c) = (push!(d.allocs, bytes); zeros(UInt8, bytes))
+# Every device the pool drives has to answer `deviceaddress` — there is no core
+# default, which is the point of it: the hook it replaced could be left
+# unimplemented and a moved buffer then silently kept its old address. A fake
+# whose memory is a `Vector` answers with the vector's own pointer.
+M.deviceaddress(::FakeDev, mem::Vector{UInt8}) = UInt64(pointer(mem))
+M.rawfree(::FakeDev, mem) = nothing
+M.constraintof(::FakeDev, kind, ts) = kind          # kind IS the constraint here
+M.compatible(::FakeDev, a, b) = a === b
+# `nothing` = "this element type asks for nothing beyond the ordinary", which
+# sends `acquire!` back to `constraintof` above — the behaviour these tests were
+# written against. Needed because `persistentarray` now ASKS every device this;
+# it always should have, and until it did, `bufferusage` was a hook that both
+# real backends implemented and nothing ever called.
+M.bufferusage(::FakeDev, ::Type) = nothing
+
+@testset "Pool: a second acquire does not reach the device" begin
+    d, p = FakeDev(), M.Pool()
+    r1 = M.acquire!(p, d, :buf, nothing, 1000; blocksize = 4096)
+    @test d.allocs == [4096]                        # one block, rounded to blocksize
+    r2 = M.acquire!(p, d, :buf, nothing, 1000; blocksize = 4096)
+    @test d.allocs == [4096]                        # THE POINT
+    @test M.offset(r1) != M.offset(r2)
+    @test length(r1) == length(r2) == 1000
+end
+
+@testset "Pool: release coalesces" begin
+    d, p = FakeDev(), M.Pool()
+    a = M.acquire!(p, d, :buf, nothing, 1000; blocksize = 4096)
+    b = M.acquire!(p, d, :buf, nothing, 1000; blocksize = 4096)
+    M.release!(a); M.release!(b)
+    # Only correct if the two freed spans merged: neither alone has room for 2048
+    # at offset 0, and a plan that recompiles at the same size must find the span
+    # it gave back whole rather than walking up the block.
+    c = M.acquire!(p, d, :buf, nothing, 2048; blocksize = 4096)
+    @test d.allocs == [4096]
+    @test M.offset(c) == 0
+end
+
+@testset "Pool: growth adds a block and moves nothing already placed" begin
+    d, p = FakeDev(), M.Pool()
+    held = M.acquire!(p, d, :buf, nothing, 3000; blocksize = 4096)
+    where_it_was = M.offset(held)
+    M.acquire!(p, d, :buf, nothing, 4096; blocksize = 4096)     # cannot fit; must grow
+    @test length(d.allocs) == 2
+    # The reason the pool is a LIST of blocks: a plan holding offsets must not
+    # have the ground move because another plan needed more room.
+    @test M.offset(held) == where_it_was
+end
+
+@testset "Pool: incompatible kinds never share a block" begin
+    d, p = FakeDev(), M.Pool()
+    M.acquire!(p, d, :buf, nothing, 8; blocksize = 512)
+    M.acquire!(p, d, :img, nothing, 8; blocksize = 512)
+    @test length(d.allocs) == 2
+    @test M.reserved(p) == 1024
+end
+
+@testset "Pool: alignment, and the skipped bytes are not leaked" begin
+    d, p = FakeDev(), M.Pool()
+    M.acquire!(p, d, :buf, nothing, 1; blocksize = 8192)         # sits at 0
+    r = M.acquire!(p, d, :buf, nothing, 1; align = 1024, blocksize = 8192)
+    @test M.offset(r) % 1024 == 0
+    @test M.offset(r) > 0
+    # The gap alignment skipped went back on the free list rather than vanishing:
+    # something small must still fit in front of `r`.
+    small = M.acquire!(p, d, :buf, nothing, 1; blocksize = 8192)
+    @test M.offset(small) < M.offset(r)
+    @test d.allocs == [8192]
+end
+
+@testset "Pool: trim! frees only fully-unused blocks" begin
+    d, p = FakeDev(), M.Pool()
+    a = M.acquire!(p, d, :buf, nothing, 8; blocksize = 512)
+    M.acquire!(p, d, :img, nothing, 8; blocksize = 512)
+    M.release!(a)
+    M.trim!(p, d)
+    # `:buf`'s block is now entirely free and goes back; `:img`'s is still held.
+    @test M.reserved(p) == 512
+end
+
+# ── DeviceArray: a typed handle that owns nothing ─────────────────────────────
+
+@testset "DeviceArray: typed view on a region, owning nothing" begin
+    d, p = FakeDev(), M.Pool()
+    a = M.allocate(p, d, :buf, Float32, 16, 4; blocksize = 4096)
+    @test eltype(a) == Float32
+    @test size(a) == (16, 4) && length(a) == 64 && sizeof(a) == 256
+    @test M.offset(a) == M.offset(M.region(a))
+
+    # Dropping the handle frees NOTHING. No finalizer, nothing for the GC thread
+    # to race — which is the failure this codebase has paid for three times.
+    a = nothing; GC.gc()
+    @test M.reserved(p) == 4096
+    b = M.allocate(p, d, :buf, Float32, 16, 4; blocksize = 4096)
+    @test M.offset(b) != 0                       # the first region is still held
+
+    # Freeing is explicit, and only through the region.
+    M.release!(M.region(b))
+    c = M.allocate(p, d, :buf, Float32, 16, 4; blocksize = 4096)
+    @test M.offset(c) == M.offset(b)             # reused exactly
+    @test d.allocs == [4096]
+end
+
+@testset "DeviceArray: a region too small is an error, not a silent overrun" begin
+    d, p = FakeDev(), M.Pool()
+    r = M.acquire!(p, d, :buf, nothing, 16; blocksize = 4096)
+    @test_throws ArgumentError M.DeviceArray{Float32}(r, (16,))   # needs 64, has 16
+    @test M.DeviceArray{Float32}(r, (4,)) isa M.DeviceArray{Float32,1}
+    @test_throws ArgumentError M.DeviceArray{Float32,1}(r,(16,))
+    @test_throws ArgumentError M.DeviceArray{UInt8,2}(r,(-1,-1))
+    @test_throws OverflowError M.DeviceArray{UInt8,2}(r,(1 << (Sys.WORD_SIZE-2),4))
+end
+
+# ── persistent resources: one implementation, no backend ──────────────────────
+
+M.rawalloc(d::FakeDev, ::M.Persistent, bytes, c) = (push!(d.allocs, bytes); zeros(UInt8, bytes))
+M.blocksize(::FakeDev) = 1 << 16
+# A slab is host memory, so the three transfer verbs are core's over one answer.
+# Written out here with `reinterpret` they would be a fourth copy of what the
+# host and Metal backends each have, and the broken spelling of it:
+# `reinterpret` refuses any element type with padding, so this fixture could
+# only ever move `Float32`. The testset below is the one that would have caught
+# that, and it is here rather than beside a backend because it needs no device.
+M.hostspan(::FakeDev, slab::Vector{UInt8}) = (pointer(slab), length(slab))
+M.awaitwrites(::FakeDev) = nothing        # nothing is queued, so nothing to wait for
+M.upload!(d::FakeDev, a::M.DeviceArray, first, data) = M.hostupload!(d, a, first, data)
+M.download(d::FakeDev, a::M.DeviceArray) = M.hostdownload(d, a)
+M.devicecopy!(d::FakeDev, dst, src, n) = M.hostdevicecopy!(d, dst, src, n)
+M.deviceview(d::FakeDev, a) = a
+
+# One transfer path, and the element type a per-backend copy of it fails on.
+#
+# `hostview`, `upload!`, `download` and `devicecopy!` lived three times: in the
+# host backend as `wrapbytes`, in the Metal backend as its own `hostview`, and
+# here as a `reinterpret`. The Metal copy's own comment named the reason they
+# had to agree — `reinterpret` throws "Padding of type X is not compatible with
+# type UInt8", and Hikari's `LightBVHNode` is 60 bytes holding 54 of fields, so
+# every scene with a light BVH failed on it. They are one function over
+# `hostspan` now, and this pins the property that made merging them safe.
+#
+# No device: a `FakeDev` is a slab and two one-line answers, which is the whole
+# interface a host-addressable backend implements.
+struct Padded
+    a::Int32
+    b::Int8
+end
+
+@testset "the shared transfer path moves a padded struct" begin
+    d = FakeDev(); p = M.Pool()
+    @eval M.pool(::$(typeof(d))) = $p
+    vals = [Padded(Int32(i), Int8(2i)) for i in 1:8]
+
+    b = M.Buffer(d, vals)
+    @test M.download(d, b.store) == vals            # reinterpret threw here
+
+    M.upload!(d, b.store, 3, [Padded(Int32(99), Int8(7))])
+    got = M.download(d, b.store)
+    @test got[3] == Padded(Int32(99), Int8(7))
+    @test got[[1, 2, 4, 5, 6, 7, 8]] == vals[[1, 2, 4, 5, 6, 7, 8]]
+
+    dst = M.Buffer(d, fill(Padded(Int32(0), Int8(0)), 8))
+    M.devicecopy!(d, dst.store, b.store, 8)
+    @test M.download(d, dst.store) == got
+
+    # The bounds check is why this is one function and not an `unsafe_wrap` per
+    # call site: a region the placer overlapped is caught, not silently read.
+    @test_throws ArgumentError M.hostview(Int64, pointer(zeros(UInt8, 8)), 8, 0, (100,))
+    @test_throws ArgumentError M.hostview(Int64, pointer(zeros(UInt8, 64)), 64, 8, (8,))
+end
+
+@testset "Buffer/GPURef are core types over pool regions" begin
+    d = FakeDev(); p = M.Pool(); dev = d
+    # the pool has to be reachable from the device, as it is for a real one
+    @eval M.pool(::$(typeof(d))) = $p
+
+    b = M.Buffer(dev, Float32[1, 2, 3]; capacity = 8)
+    @test length(b) == 3 && M.capacity(b) == 8 && eltype(b) == Float32
+    @test Array(b) == Float32[1, 2, 3]
+    @test length(d.allocs) == 1                     # ONE block, not one per resource
+
+    s = M.GPURef(dev, 7.0f0)
+    @test length(d.allocs) == 1                     # …shared with the buffer
+    M.update!(s, 9.0f0)
+
+    # within capacity: no reallocation, no new region
+    M.update!(b, 4:6, Float32[4, 5, 6])
+    @test length(b) == 6 && Array(b) == Float32[1, 2, 3, 4, 5, 6]
+    @test length(d.allocs) == 1
+
+    # past capacity: a fresh region, the contents carried over, the previous one back
+    before = M.offset(M.region(b.store))
+    resize!(b, 32)
+    @test M.capacity(b) == 32 && length(b) == 32
+    @test Array(b)[1:6] == Float32[1, 2, 3, 4, 5, 6] # devicecopy! ran before release!
+    @test M.offset(M.region(b.store)) != before
+end
+
+@testset "release! catches a double release instead of corrupting" begin
+    d, p = FakeDev(), M.Pool()
+    a = M.acquire!(p, d, :buf, nothing, 64; blocksize = 4096)
+    b = M.acquire!(p, d, :buf, nothing, 64; blocksize = 4096)
+    M.release!(a)
+    # Without the guard this puts a's span back twice, and the NEXT two acquires
+    # hand out the same bytes — corruption with no error anywhere near it.
+    @test_throws ErrorException M.release!(a)
+    # …and a legitimate release of a different region still works.
+    M.release!(b)
+    c = M.acquire!(p, d, :buf, nothing, 128; blocksize = 4096)
+    @test M.offset(c) == 0                      # both spans coalesced back
+    @test d.allocs == [4096]
+end
+
+@testset "release! catches a double release the free list cannot see" begin
+    # The case a neighbour check cannot reach, and the reason the block keeps a
+    # `live` ledger. Release `a`, then release its neighbour `b`: `b`
+    # coalesces with `a`, so no free span starts where `b` did any more. A second
+    # release of `b` finds nothing that looks like itself, and on the free list
+    # alone it reads as a fresh region being given back.
+    d, p = FakeDev(), M.Pool()
+    a = M.acquire!(p, d, :buf, nothing, 64; blocksize = 4096)
+    b = M.acquire!(p, d, :buf, nothing, 64; blocksize = 4096)
+    c = M.acquire!(p, d, :buf, nothing, 64; blocksize = 4096)
+    M.release!(a)
+    M.release!(b)
+    @test_throws ErrorException M.release!(b)
+    M.release!(c)
+end
+
+# ── The rewrite, checked against its own invariants ───────────────────────────
+#
+# `Block`'s free list stopped being a sorted `Vector{Span}` and became size-class
+# bins plus two adjacency dictionaries, so that carving and releasing are O(1)
+# rather than O(number of live regions in the block). The tests above pin the
+# behaviours that were already understood; this one exists because a suballocator
+# is exactly the kind of code whose bugs are silent — two live regions on the
+# same bytes produces no error anywhere, only wrong data somewhere else later.
+#
+# So it is a randomised sequence checked against the properties that must hold no
+# matter what the internals do, rather than against a second implementation:
+# every live region disjoint, in range and aligned; every byte accounted for; and
+# a pool that has given everything back holding exactly one free span per block.
+
+"""Every free span in `blk`, recovered from the bins, sorted."""
+freespans(blk) = sort([M.Span(lo, hi) for (lo, hi) in blk.free.bylower]; by = s -> s.lower)
+
+"""
+Are `blk`'s live regions and free spans a partition of it?
+
+The single strongest statement about an allocator: disjoint, in range, and
+covering every byte. Overlap is the corruption, and a gap is a leak.
+"""
+function partitions(blk)
+    pieces = vcat(freespans(blk),
+                  [M.Span(lo, hi) for (lo, hi) in blk.live])
+    sort!(pieces; by = s -> s.lower)
+    at = 0
+    for s in pieces
+        s.lower == at || return false          # a gap, or an overlap
+        at = s.upper
+    end
+    return at == blk.bytes
+end
+
+@testset "Pool: randomised acquire/release keeps the block partitioned" begin
+    for seed in 1:40
+        rng = Random.Xoshiro(seed)
+        d, p = FakeDev(), M.Pool()
+        live = Any[]
+        for _ in 1:400
+            if !isempty(live) && rand(rng) < 0.45
+                M.release!(popat!(live, rand(rng, 1:length(live))))
+            else
+                n = rand(rng, 1:3000)
+                a = rand(rng, (1, 8, 64, 256, 1024))
+                push!(live, M.acquire!(p, d, :buf, nothing, n; align = a, blocksize = 1 << 16))
+            end
+        end
+
+        blocks = M.blocksof(p, :buf)
+        @test all(partitions, blocks)
+
+        # Alignment and length are what the caller was promised, and they have to
+        # survive every split and merge the sequence above performed.
+        @test all(r -> M.offset(r) + length(r) <= r.block.bytes, live)
+        @test all(r -> r.block.live[M.offset(r)] == M.offset(r) + length(r), live)
+
+        # Regions are pairwise disjoint WITHIN a block — implied by the partition
+        # above, but asserted directly so a failure says which property broke.
+        byblock = Dict{Any, Vector{Any}}()
+        for r in live
+            push!(get!(Vector{Any}, byblock, r.block), r)
+        end
+        for (_, rs) in byblock
+            sort!(rs; by = M.offset)
+            @test all(i -> M.offset(rs[i]) + length(rs[i]) <= M.offset(rs[i + 1]),
+                      1:(length(rs) - 1))
+        end
+
+        # Give everything back: each block collapses to one free span, and every
+        # block is then trimmable. A leaked byte shows up here as a block that
+        # will not go.
+        foreach(M.release!, live)
+        @test all(b -> freespans(b) == [M.Span(0, b.bytes)], blocks)
+        @test all(b -> isempty(b.live), blocks)
+        M.trim!(p, d)
+        @test M.reserved(p) == 0
+    end
+end
+
+@testset "Pool: alignment is honoured under fragmentation" begin
+    # The bounded per-bin scan can decline a span it could have used, which costs
+    # a block and never a wrong offset. This is the assertion that separates the
+    # two: whatever it hands back is aligned.
+    rng = Random.Xoshiro(7)
+    d, p = FakeDev(), M.Pool()
+    live = Any[]
+    for _ in 1:600
+        if !isempty(live) && rand(rng) < 0.4
+            M.release!(popat!(live, rand(rng, 1:length(live))))
+        else
+            a = rand(rng, (256, 512, 4096))
+            r = M.acquire!(p, d, :buf, nothing, rand(rng, 1:5000); align = a,
+                           blocksize = 1 << 16)
+            @test M.offset(r) % a == 0
+            push!(live, r)
+        end
+    end
+end
+
+@testset "Pool: bins" begin
+    # `binof` is the bin a length lands in; `binceil` is the first bin every one
+    # of whose members is long enough. `carve!` takes an entry unseen from
+    # `binceil` upward, so the two disagreeing by one is a span handed out that
+    # is too short — silent, and the worst failure this file can have.
+    @test M.binof(1) == 1 && M.binof(2) == 2 && M.binof(3) == 2 && M.binof(4) == 3
+    for n in 1:2048
+        k = M.binceil(n)
+        @test k == 1 || (1 << (k - 2)) < n          # not needlessly high
+        @test (1 << (k - 1)) >= n                   # every span in bin k fits n
+        @test M.binof(n) <= k
+        # and the bin a length reports really does contain it
+        @test (1 << (M.binof(n) - 1)) <= n < (1 << M.binof(n))
+    end
+end
+
+@testset "the sharing invariant: transients share, persistents never do" begin
+    # The property that makes a device-owned arena safe to use rather than a
+    # footgun. `reserve!` hands every tenant the SAME bytes because a transient
+    # is scratch scoped to one run; `acquire!` — and so `allocate`, and so every
+    # `Buffer` and `GPURef` — hands out a private slice because a persistent
+    # resource holds data between runs. Which one you get is decided by WHAT you
+    # allocate, never by an argument, so there is no flag to get it wrong with.
+    #
+    # Asserted rather than documented: the failure mode of getting this backwards
+    # is two live buffers silently on the same bytes, which no test of either one
+    # would notice.
+    d, p = FakeDev(), M.Pool()
+
+    a = M.reserve!(p, d, :buf, nothing, 1024; blocksize = 4096)
+    b = M.reserve!(p, d, :buf, nothing, 512; blocksize = 4096)
+    @test M.offset(a) == M.offset(b)            # same arena, same bytes
+    @test p.arenas[:buf].bytes == 1024          # sized to the LARGEST, not the sum
+
+    # …and growing past the first tenant moves the arena, which is why a tenant
+    # that cannot be moved has to say so.
+    c = M.reserve!(p, d, :buf, nothing, 4096; blocksize = 4096)
+    @test p.arenas[:buf].bytes == 4096
+    @test length(c) >= 4096
+
+    x = M.allocate(p, d, :buf, Float32, (64,); blocksize = 4096)
+    y = M.allocate(p, d, :buf, Float32, (64,); blocksize = 4096)
+    xr, yr = M.region(x), M.region(y)
+    @test M.offset(xr) != M.offset(yr)          # private: two buffers, two slices
+    lo1, hi1 = M.offset(xr), M.offset(xr) + length(xr)
+    lo2, hi2 = M.offset(yr), M.offset(yr) + length(yr)
+    @test hi1 <= lo2 || hi2 <= lo1              # …and genuinely disjoint
+
+    # a tenant that refuses to move stops the arena growing, rather than being
+    # re-materialised under a recording that names the previous addresses
+    struct Nailed end
+    M.remappable(::Nailed) = false
+    M.tenant!(p, :buf, Nailed())
+    @test_throws ArgumentError M.reserve!(p, d, :buf, nothing, 1 << 20; blocksize = 4096)
+end
+
+# A device whose constraints behave like a real one's: usage bits that must be
+# PERMITTED (so they union), against a fake whose kind was its own constraint.
+struct BitDev
+    allocs::Vector{Int}
+end
+BitDev() = BitDev(Int[])
+M.rawalloc(d::BitDev, kind, bytes, c) = (push!(d.allocs, bytes); zeros(UInt8, bytes))
+M.deviceaddress(::BitDev, mem::Vector{UInt8}) = UInt64(pointer(mem))
+M.rawfree(::BitDev, mem) = nothing
+M.constraintof(::BitDev, kind, ts) = ts === nothing ? UInt32(0) : UInt32(ts)
+M.compatible(::BitDev, blk::UInt32, req::UInt32) = (blk & req) == req
+M.mergeconstraints(::BitDev, kind, a::UInt32, b::UInt32) = a | b
+
+@testset "an arena reconciles what all its tenants need" begin
+    # `reserve!`'s fast path must not return the existing region on SIZE alone:
+    # an arena outlives the plan that sized it, so a block created for one plan's
+    # usage bits may not permit what the next plan does with them — memory that
+    # works until the one transient whose bit was missing is used.
+    d, p = BitDev(), M.Pool()
+    r1 = M.reserve!(p, d, :buf, 0b0001, 1024; blocksize = 4096)
+    @test p.arenas[:buf].constraint == 0b0001
+
+    # smaller, but needs a bit the block does not have: must NOT reuse it
+    r2 = M.reserve!(p, d, :buf, 0b0010, 512; blocksize = 4096)
+    @test p.arenas[:buf].constraint == 0b0011        # union, so both are served
+    @test M.offset(r2) != M.offset(r1) || r2.block !== r1.block
+    @test length(d.allocs) == 2                      # a second block was needed
+
+    # smaller AND already permitted: now the fast path is right to reuse
+    before = length(d.allocs)
+    r3 = M.reserve!(p, d, :buf, 0b0001, 256; blocksize = 4096)
+    @test r3 === p.arenas[:buf].region
+    @test length(d.allocs) == before                 # reached no device
+
+    # `nothing` is a CONSTRAINT, not a failure signal. The host backend's is
+    # exactly that — its memory is just memory — and using `nothing` to mean
+    # "irreconcilable" made every host graph unplaceable. Caught by the editor's
+    # fuzz suite, which is the only thing that runs two host plans in one pool.
+    struct NilDev end
+    M.rawalloc(::NilDev, kind, bytes, c) = zeros(UInt8, bytes)
+    M.rawfree(::NilDev, mem) = nothing
+    M.constraintof(::NilDev, kind, ts) = nothing
+    M.compatible(::NilDev, a, b) = true
+    p3 = M.Pool()
+    r4 = M.reserve!(p3, NilDev(), :any, nothing, 64; blocksize = 4096)
+    r5 = M.reserve!(p3, NilDev(), :any, nothing, 64; blocksize = 4096)
+    @test r4 === r5                                  # shared, and neither threw
+    @test p3.arenas[:any].constraint === nothing
+
+    # and a device that cannot reconcile says so, instead of handing back memory
+    # that satisfies only one of them
+    struct PickyDev end
+    M.rawalloc(::PickyDev, kind, bytes, c) = zeros(UInt8, bytes)
+    M.rawfree(::PickyDev, mem) = nothing
+    M.constraintof(::PickyDev, kind, ts) = ts
+    M.compatible(::PickyDev, a, b) = a === b
+    p2 = M.Pool()
+    M.reserve!(p2, PickyDev(), :img, :typeA, 64; blocksize = 4096)
+    @test_throws ArgumentError M.reserve!(p2, PickyDev(), :img, :typeB, 64; blocksize = 4096)
+end
+
+# ── What `reclaim!` costs a frame that releases nothing ──────────────────────
+#
+# `run!` calls `reclaim!` every frame, and `reclaim!` walks everything retired
+# that the device has not finished with. That walk has to be free, because the
+# list is long exactly when the renderer is busy: a screen that was closed leaves
+# its regions retired until the device is known to be past them, and on a backend
+# whose timeline only advances on an explicit wait, they stay.
+#
+# It is not free. A `retiring` of `Vector{Tuple{Region,Any}}` — `Any` because
+# what a fence IS belongs to the backend — has a boxed field in every element,
+# so the loop pays a boxed read and a boxed write for
+# each entry it KEPT. Measured through RayMakie with four dropped screens' worth
+# in the list: 1200 allocations and 48 KB per frame, on a frame whose own cost is
+# 240 bytes. The fix is two parallel vectors; this pins the property.
+mutable struct TimelineDev <: M.Device
+    next::UInt64
+    completed::UInt64
+    asked::Int          # how many times `reclaim!` had to ask about a fence
+end
+TimelineDev(next, completed) = TimelineDev(next, completed, 0)
+M.rawalloc(::TimelineDev, kind, bytes, c) = zeros(UInt8, bytes)
+M.rawfree(::TimelineDev, mem) = nothing
+M.constraintof(::TimelineDev, kind, ts) = kind
+M.compatible(::TimelineDev, a, b) = a === b
+M.bufferusage(::TimelineDev, ::Type) = nothing
+M.fence(d::TimelineDev) = (d.next += UInt64(1); d.next)
+M.passed(d::TimelineDev, f) = (d.asked += 1; UInt64(f) <= d.completed)
+
+@testset "Pool: reclaim! allocates nothing for what it cannot release yet" begin
+    d, p = TimelineDev(0, 0), M.Pool()
+    rs = [M.acquire!(p, d, :buf, nothing, 256; blocksize = 1 << 20) for _ in 1:200]
+    for r in rs
+        M.retire!(p, d, r)
+    end
+    @test M.reclaim!(p, d) == 0            # stamped, and nothing has passed
+    @test length(p.retiring) == 200
+    @test length(p.retiring_at) == 200
+
+    M.reclaim!(p, d)                       # warm the walk
+    bytes = [(@allocated M.reclaim!(p, d)) for _ in 1:5]
+    @test maximum(bytes) == 0
+    @test length(p.retiring) == 200        # still nothing released
+
+    # And it ASKS ONCE, not 200 times: the fences are monotone, so what the device
+    # is through with is a prefix, and the first entry that fails answers for the
+    # rest. Counted rather than timed, because the claim is about the shape of the
+    # loop — a frame that releases nothing must not walk what it cannot release.
+    d.asked = 0
+    M.reclaim!(p, d)
+    @test d.asked == 1
+
+    # …and it still releases, and empties both halves, once the device is past them.
+    d.completed = d.next
+    @test M.reclaim!(p, d) == 200
+    @test isempty(p.retiring)
+    @test isempty(p.retiring_at)
+end
+
+# ── A finalizer hands a region back without taking the lock ─────────────────
+#
+# `retire!` and `retireplan!` run from finalizers, and they appended under the
+# pool's lock. When another task held it — `reclaim!(; wait = true)` holds it
+# while it waits for the device, which yields — the finalizer had to wait too,
+# which is a task switch: "task switch not allowed from inside gc finalizer", and
+# the region was never retired. Three of those, three leaks, in one run of the
+# isubd demo's GUI test.
+retire_from_finalizer!(p, d, r) = (finalizer(_ -> M.retire!(p, d, r), Ref(0)); nothing)
+
+@testset "Pool: a finalizer retires while another task holds the lock" begin
+    d, p = TimelineDev(0, 0), M.Pool()
+    r = M.acquire!(p, d, :buf, nothing, 256; blocksize = 1 << 20)
+    holding, done = Base.Event(), Base.Event()
+    holder = @async lock(p.lock) do
+        notify(holding)
+        wait(done)
+    end
+    wait(holding)
+    retire_from_finalizer!(p, d, r)
+    GC.gc(true); GC.gc(true)
+    notify(done)
+    wait(holder)
+    @test M.reclaim!(p, d) == 0          # it arrived, and was stamped
+    @test p.retiring == [r]
+end
+
+# ── Out of memory is thrown only after the pressure steps ─────────────────────
+#
+# `docs/api.md`: an allocation beyond the budget throws only after the pool has
+# trimmed its empty blocks and collected. The pool's own growth skipped them and
+# threw on the first refusal: TRELLIS.2's shape decoder on a 7900 XTX, with 3.9 GB
+# of empty transient blocks left by earlier stages, lost its 1.7 GB arena to the
+# driver's budget. Here the budget is two blocks, one of them empty, and a request
+# of another kind has to grow: it fits only if the empty block goes back first.
+# Not a `Device`: nothing here batches, so `makeroom!` has no channel to flush.
+mutable struct BudgetDev
+    budget::Int
+    held::Int
+    freed::Vector{Int}
+    attempts::Int
+end
+BudgetDev(budget) = BudgetDev(budget, 0, Int[], 0)
+function M.rawalloc(d::BudgetDev, kind, bytes, c)
+    d.attempts += 1
+    d.held + bytes > d.budget && throw(OutOfMemoryError())
+    d.held += bytes
+    return zeros(UInt8, bytes)
+end
+M.rawfree(d::BudgetDev, mem) = (d.held -= length(mem); push!(d.freed, length(mem)); nothing)
+M.deviceaddress(::BudgetDev, mem::Vector{UInt8}) = UInt64(pointer(mem))
+M.constraintof(::BudgetDev, kind, ts) = kind
+M.compatible(::BudgetDev, a, b) = a === b
+M.bufferusage(::BudgetDev, ::Type) = nothing
+M.maxalloc(d::BudgetDev) = d.budget
+
+@testset "Pool: an out-of-memory trims empty blocks before it is final" begin
+    for grow in (:acquire, :reserve)
+        d, p = BudgetDev(8192), M.Pool()
+        spent = M.acquire!(p, d, :buf, nothing, 4096; blocksize = 4096)
+        kept = M.acquire!(p, d, :buf, nothing, 4096; blocksize = 4096)
+        M.release!(spent)                     # its block is empty, and still held
+        @test d.held == 8192
+        r = grow === :acquire ? M.acquire!(p, d, :other, nothing, 4096; blocksize = 4096) :
+                                M.reserve!(p, d, :other, nothing, 4096; blocksize = 4096)
+        @test length(r) == 4096
+        @test d.attempts == 4                  # two initial blocks, refusal, retry
+        @test d.freed == [4096]               # the empty block, and only it
+        @test d.held == 8192
+    end
+
+    # Genuinely full: the second refusal is the answer, and it is the device's.
+    d, p = BudgetDev(4096), M.Pool()
+    M.acquire!(p, d, :buf, nothing, 4096; blocksize = 4096)
+    @test_throws OutOfMemoryError M.acquire!(p, d, :other, nothing, 4096; blocksize = 4096)
+    @test d.attempts == 3                      # initial block, then two refusals
+
+    # Not where waiting is refused: that caller is mid-recording (see `carveorgrow!`).
+    d, p = BudgetDev(8192), M.Pool()
+    spent = M.acquire!(p, d, :buf, nothing, 4096; blocksize = 4096)
+    M.acquire!(p, d, :buf, nothing, 4096; blocksize = 4096)
+    M.release!(spent)
+    @test_throws OutOfMemoryError M.acquire!(p, d, :other, nothing, 4096; blocksize = 4096,
+                                             maywait = false)
+    @test isempty(d.freed)
+    @test d.attempts == 3                      # no reclaim/retry while recording
+end
+
+@testset "Pool: a single-allocation limit is checked before the driver" begin
+    d, p = BudgetDev(4096), M.Pool()
+    @test_throws ArgumentError M.acquire!(p, d, :buf, nothing, 4097)
+    @test d.attempts == 0
+    # An ordinary small request must not grow a default 64 MiB block on a
+    # device whose native allocations are limited to 4 KiB.
+    r = M.acquire!(p, d, :buf, nothing, 256)
+    @test length(r) == 256
+    @test d.held == 4096
+    @test d.attempts == 1
+end
+
+@testset "Pool: returning collected capacity does not collect again" begin
+    d, p = BudgetDev(4096), M.Pool()
+    r = M.acquire!(p, d, :buf, nothing, 4096; blocksize=4096)
+    M.release!(r)
+    @test M.trimcollected!(p, d)
+    @test d.freed == [4096]
+    @test p.policy.gc_count == 0
+    @test !M.trimcollected!(p, d)
+end
+
+# Model a queue that keeps a dropped owner alive until its submission drains.
+mutable struct HeldDev
+    memory::BudgetDev
+    holds::Vector{Any}
+    flushes::Int
+end
+M.rawalloc(d::HeldDev, kind, bytes, c) = M.rawalloc(d.memory, kind, bytes, c)
+M.rawfree(d::HeldDev, mem) = M.rawfree(d.memory, mem)
+M.deviceaddress(d::HeldDev, mem::Vector{UInt8}) = M.deviceaddress(d.memory, mem)
+M.constraintof(::HeldDev, kind, ts) = kind
+M.compatible(::HeldDev, a, b) = a === b
+M.maxalloc(d::HeldDev) = d.memory.budget
+M.supports_batch_queue(::HeldDev) = true
+M.flush!(d::HeldDev) = (d.holds = Any[]; d.flushes += 1; nothing)
+M.fence(::HeldDev) = UInt64(0)
+M.passed(::HeldDev, ::UInt64) = true
+M.batchqueue(::HeldDev) = nothing
+
+Base.@noinline function holdregion!(d::HeldDev, p)
+    owner = Ref(M.acquire!(p, d, :buf, nothing, 4096; blocksize=4096))
+    weak = WeakRef(owner)
+    finalizer(x -> M.retire!(p, d, x[]), owner)
+    push!(d.holds, owner)
+    return weak
+end
+
+# Keep the allocation/recovery in compiled functions: top-level evaluation can
+# retain interpreter temporaries across the collection this fixture exercises.
+function check_held_recovery()
+    d, p = HeldDev(BudgetDev(4096), Any[], 0), M.Pool()
+    owner = holdregion!(d, p)
+    r = M.acquire!(p, d, :other, nothing, 4096; blocksize=4096)
+    @test owner.value === nothing
+    @test length(r) == 4096
+    @test d.flushes == 1
+    @test d.memory.attempts == 3
+    @test d.memory.freed == [4096]
+    @test d.memory.held == 4096
+end
+
+function check_channel_recovery()
+    d, p = HeldDev(BudgetDev(4096), Any[], 0), M.Pool()
+    owner = holdregion!(d, p)
+    flushes, drains = Ref(0), Ref(0)
+    flush = () -> (empty!(d.holds); flushes[] += 1; nothing)
+    drain = () -> (drains[] += 1; nothing)
+    onpressure = () -> M.makeroom!(
+        () -> M.quiesce_pool!(flush, drain, p, d), p, d)
+    r = M.acquire!(p, d, :other, nothing, 4096; blocksize=4096, onpressure)
+    @test owner.value === nothing
+    @test length(r) == 4096
+    @test (flushes[], drains[], d.flushes) == (1, 1, 0)
+    @test d.memory.attempts == 3
+    @test d.memory.freed == [4096]
+end
+
+@testset "Pool: retry releases owners kept alive until the queue drains" begin
+    check_held_recovery()
+end
+
+@testset "Pool: recovery uses the allocating channel's collection scope" begin
+    check_channel_recovery()
+end

@@ -1,0 +1,580 @@
+# The device-owned arena and the recorded plan. Needs a GPU, but no display:
+# every graph here is headless, which is also the only kind `record!` takes
+# today.
+using Mantle, Test, KernelAbstractions, Statistics
+const M = Mantle
+include(joinpath(@__DIR__, "testbackend.jl"))
+
+
+@kernel function bump!(dst, @Const(src))
+    i = @index(Global)
+    @inbounds dst[i] = src[i] + 1f0
+end
+
+"""
+A chain of `nstage + 1` transients: stage k reads t[k] and writes t[k+1], so only
+adjacent ones are ever live together and the plan's peak is about two buffers
+however long the chain is. `out` ends at `nstage + 2` — seed writes 1 and every
+stage adds 1 — which is what makes a wrong answer legible rather than merely
+different.
+"""
+function chainplan(dev, n, nstage)
+    g = M.Graph(dev)
+    seed = M.Buffer(dev, zeros(Float32, n))
+    t = [M.Transient.Buffer(g, Float32, n) for _ in 1:(nstage + 1)]
+    M.dispatch!(g, bump!, (t[1], seed), n; name = "seed")
+    for k in 1:nstage
+        M.dispatch!(g, bump!, (t[k + 1], t[k]), n; name = "s$k")
+    end
+    out = M.Buffer(dev, zeros(Float32, n))
+    M.dispatch!(g, bump!, (out, t[end]), n; name = "out")
+    # `budget = Inf`: recorded whole from the first run, which is what these tests
+    # are about. How a plan is cut by its budget is `test_partitioned_recording.jl`.
+    (; g, out, seed, plan = M.record!(M.Plan(g; budget = Inf)), keep = (seed, t))
+end
+
+@kernel function add2!(d, @Const(x), @Const(y))
+    i = @index(Global)
+    @inbounds d[i] = x[i] + y[i]
+end
+
+const E = Mantle
+
+@testset "two plans in one process commit the max, not the sum" begin
+    # The gate for the device-owned arena. It can only pass if the `Device` owns
+    # the reservation: two plans that each allocate cannot share, whatever the
+    # placer does inside either of them.
+    #
+    # `small` is built FIRST so that `big` has to grow the pool underneath it and
+    # remap it. A correct answer from `small` afterwards is `remap!` having
+    # re-materialised its transients into the new allocation — which is the half
+    # of this that a test built in the other order would not reach.
+    #
+    # The device is cached per process, its arena never shrinks, and a plan an
+    # earlier file still holds stays a tenant: the arena may already hold `held`
+    # bytes. The max of everything is still exact — any sum would be larger. An
+    # arena already bigger than `big` leaves the remap half unexercised here, which
+    # is said rather than passed silently.
+    dev = M.Device(TESTBACKEND)
+    held = haskey(M.pool(dev).arenas, E.Buffers()) ? M.pool(dev).arenas[E.Buffers()].bytes : 0
+    small = Base.invokelatest(chainplan, dev, 250_000, 3)
+    big   = Base.invokelatest(chainplan, dev, 2_000_000, 3)
+
+    ps, pb = M.peakbytes(small.plan), M.peakbytes(big.plan)
+    held < pb || @info "the arena already holds $held bytes, more than `big` needs: its growth under `small` is not exercised"
+    # The arena lives on the core `Pool` now, not on the backend's device: the
+    # sharing this asserts is a property every backend gets, not Lava's.
+    arena = M.pool(dev).arenas[E.Buffers()]
+    @test arena.bytes == max(held, ps, pb)
+    # Both are tenants; others may be, if an earlier file still holds a plan.
+    @test count(t -> t === small.plan || t === big.plan, M.tenants!(arena)) == 2
+    @test M.sharing(M.pool(dev), E.Buffers())
+
+    # Interleaved, a hundred times: two plans alternating on one arena, each
+    # run's recording opening with the global barrier that orders it behind
+    # whatever ran last, and no arena memory of who that was: a handover decided
+    # at record time from such a memory gives the first of two alternating
+    # recorded plans no barrier at all.
+    for _ in 1:100
+        M.run!(small.plan)
+        M.run!(big.plan)
+    end
+    KernelAbstractions.synchronize(dev)
+    @test all(==(5f0), Array(M.storage(small.out)))
+    @test all(==(5f0), Array(M.storage(big.out)))
+    @test !hasfield(M.Arena, :lastrun)
+end
+
+@testset "a transient larger than one allocation fails at compile, with numbers" begin
+    dev = M.Device(TESTBACKEND)
+    # Whichever bound is binding on THIS device. `maxalloc` is 4 GB on the APU
+    # this runs on and `typemax(Int)` — "no limit" — on NVIDIA, so a
+    # test pinned to it passes on one machine and allocates 8 exabytes on the
+    # other. `arenaroom` is the number the compiler actually checks against.
+    #
+    # ONE transient past it, not two of it: a placement too tall for one
+    # allocation now spills into another (the testset below), so what still
+    # cannot run is an item no single allocation holds.
+    #
+    # Measured AFTER `makeroom!`, which is what `Plan` itself runs when a placement
+    # overflows: it collects and trims, and the room it finds is the room the check
+    # compares against. Measured before it, the room could grow by a whole staging
+    # block between here and the check, and a 4 KB margin was swallowed: on NVIDIA,
+    # where the budget and not `maxalloc` is the bound, the "too large" transient
+    # fit, ~19 GB were reserved, and every later testset in this file ran out of
+    # budget.
+    M.makeroom!(M.pool(dev), dev)
+    n = M.arenaroom(M.pool(dev), dev, E.Buffers()) ÷ sizeof(Float32) + 1024
+    err = try
+        g = M.Graph(dev)
+        seed = M.Buffer(dev, zeros(Float32, 16))
+        t = M.Transient.Buffer(g, Float32, n)
+        out = M.Buffer(dev, zeros(Float32, 16))
+        M.dispatch!(g, bump!, (t, seed), 16; name = "a")
+        M.dispatch!(g, bump!, (out, t), 16; name = "b")
+        Base.invokelatest(M.Plan, g)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    msg = sprint(showerror, err)
+    @test occursin("does not fit", msg)
+    @test occursin("Lower bound", msg)         # so a reader can tell placement from size
+    @test occursin("Largest items", msg)       # and knows which buffer to drop
+    # Nothing was allocated on the way to the throw: the check runs on the
+    # placement, before `reserve!`.
+    @test !haskey(M.pool(dev).arenas, E.Buffers()) ||
+          M.pool(dev).arenas[E.Buffers()].bytes < n * sizeof(Float32)
+end
+
+# A plan whose transients need more at once than one allocation holds, each of
+# them fitting: two live together at 0.6 of `maxalloc` apiece. It did not compile
+# at all before `ArenaPart` — "arena Buffers() does not fit" — which is what the
+# Qwen-Image VAE hit decoding 1664x928: 5.8 GB of buffers at its peak against
+# RADV's 4 GB `maxalloc`, the largest piece 1.66 GB. Only meaningful where the
+# device's budget holds more than one allocation's worth, which is what it asks.
+@testset "a placement larger than one allocation spills into parts" begin
+    dev = M.Device(TESTBACKEND)
+    cap = M.maxalloc(dev)
+    # `cap < capacity ÷ 2`, not `2cap < capacity`: NVIDIA's `maxalloc` is
+    # `typemax(Int)`, "no limit", and doubling it wrapped negative, so the test ran
+    # on the one device it means nothing on and built a transient of 0 elements.
+    if cap < M.capacity(dev) ÷ 2
+        n = (6 * cap ÷ 10) ÷ sizeof(Float32)
+        g = M.Graph(dev)
+        seed = M.Buffer(dev, zeros(Float32, 16))
+        t1 = M.Transient.Buffer(g, Float32, n)
+        t2 = M.Transient.Buffer(g, Float32, n)
+        out = M.Buffer(dev, zeros(Float32, 16))
+        M.dispatch!(g, bump!, (t1, seed), 16; name = "a")
+        M.dispatch!(g, bump!, (t2, t1), 16; name = "b")
+        # `t1` is read again after `t2` is written, so the two are live together.
+        M.dispatch!(g, add2!, (out, t1, t2), 16; name = "c")
+        plan = Base.invokelatest(M.Plan, g)
+        @test length(plan.arenas) == 2
+        @test Set(plan.arenas) == Set([E.Buffers(), E.ArenaPart(E.Buffers(), 2)])
+        @test plan.parts[1] != plan.parts[2]
+        @test all(r -> length(r) <= cap, plan.slabs)
+        M.record!(plan)
+        M.run!(plan)
+        KernelAbstractions.synchronize(dev)
+        @test all(==(3f0), Array(M.storage(out)))        # (0 + 1) + (0 + 1 + 1)
+        M.free!(plan)
+        # The part is an arena of its own in the pool, and giving the plan up
+        # empties it like the first.
+        @test M.pool(dev).arenas[E.ArenaPart(E.Buffers(), 2)].region === nothing
+        # Nearly 5 GB of blocks, handed back rather than left to the testsets
+        # after this one.
+        GC.gc(true)
+        while M.reclaim!(M.pool(dev), dev; wait = true) > 0 end
+        M.trim!(M.pool(dev), dev)
+    else
+        @test_skip 2 * cap < M.capacity(dev)
+    end
+end
+
+@testset "a recorded plan runs bit-exact, and records nothing" begin
+    dev = M.Device(TESTBACKEND)
+    s = Base.invokelatest(chainplan, dev, 20_000, 200)     # 202 passes, recorded at build
+    @test M.recorded(s.plan)
+    @test M.record!(s.plan) === s.plan                     # idempotent
+    rec = s.plan.recording
+
+    M.run!(s.plan)
+    KernelAbstractions.synchronize(dev)
+    want = copy(Array(M.storage(s.out)))
+
+    # Thirty runs submit the one recording: the plan is still recorded and its
+    # recording is the same object, so nothing was recorded again. A run of an
+    # unrecorded plan would have walked it instead (`execute!`).
+    fill!(M.storage(s.out), 0f0)
+    KernelAbstractions.synchronize(dev)
+    for _ in 1:30
+        M.run!(s.plan)
+    end
+    KernelAbstractions.synchronize(dev)
+    @test M.recorded(s.plan)
+    @test s.plan.recording === rec
+    @test Array(M.storage(s.out)) == want                  # bit-exact, not merely close
+end
+
+@testset "a recorded plan survives a full GC between runs" begin
+    # A plan holds references to every resource its recording names, so a full
+    # collection between two runs cannot free storage the command buffer points
+    # at. `test_recording_lifecycle.jl` asserts the same thing on a smaller plan;
+    # this is the 50 000-element chain.
+    dev = M.Device(TESTBACKEND)
+    p = Base.invokelatest(chainplan, dev, 50_000, 8)
+    M.run!(p.plan)
+    KernelAbstractions.synchronize(dev)
+    want = copy(Array(M.storage(p.out)))
+
+    M.record!(p.plan)
+    for _ in 1:6
+        GC.gc(true)
+        fill!(M.storage(p.out), 0f0)
+        KernelAbstractions.synchronize(dev)
+        M.run!(p.plan)
+        KernelAbstractions.synchronize(dev)
+        @test Array(M.storage(p.out)) == want
+    end
+end
+
+@testset "growing the arena under a recorded plan patches it" begin
+    # The one way M1 and M5 interact. Plans share the device's arena, so a
+    # later, larger plan grows it and remaps every tenant. A recorded tenant is
+    # what makes that hard: its command buffer holds the addresses the previous
+    # allocation had, so re-materialising underneath it gives a run that reads
+    # freed storage, deterministically and quietly.
+    #
+    # Those addresses are not IN the command buffer — they are in the plan's
+    # argument memory, at offsets the one pack recorded (`recpatch!`). So the
+    # growth announces itself (`notify_move!`) and the next
+    # run writes the new addresses as commands in its own submission: the same
+    # recording answers, with the right numbers.
+    dev = M.Device(TESTBACKEND)
+    small = Base.invokelatest(chainplan, dev, 100_000, 3)
+    M.run!(small.plan)
+    KernelAbstractions.synchronize(dev)
+    M.record!(small.plan)
+    rec = small.plan.recording
+
+    big = Base.invokelatest(chainplan, dev, 4_000_000, 3)   # needs a much bigger arena
+    M.run!(big.plan)
+    KernelAbstractions.synchronize(dev)
+
+    M.run!(small.plan)
+    KernelAbstractions.synchronize(dev)
+    @test small.plan.recording === rec
+    @test Array(M.storage(small.out)) == fill(Float32(3 + 2), 100_000)
+    M.free!(small.plan)
+    M.free!(big.plan)
+end
+
+"""Whatever `holdleaves!` reaches, kept so the test can look."""
+struct LeafHolder
+    leaves::Vector{Any}
+end
+Mantle.hold!(h::LeafHolder, x) = (push!(h.leaves, x); x)
+
+@testset "the lifetime walk stops at a device region" begin
+    # `holdleaves!` is documented as walking "a plain Julia value tree" that
+    # "names no driver". Two of Mantle's own types are not plain value trees and
+    # had no method saying where to stop:
+    #
+    #   * `DeviceArray` is NOT an `AbstractArray` — it is a region and a shape —
+    #     so the array method did not cover it and the generic walker descended
+    #     `region` -> `block` -> `memory` -> `buffer` -> `Vulkan.Device` ->
+    #     `PhysicalDevice` -> `Instance`.
+    #   * `Buffer` carries `dev` so it can free itself, which reaches the same
+    #     place by the other road.
+    #
+    # `Vulkan.Instance`'s `destructor` is a closure that captures the
+    # `Instance`, so that is a value CYCLE and the walk never returned: a
+    # `StackOverflowError` 53320 frames deep, from a `KI.Kernel` launch handed a
+    # `Mantle.Buffer` as an argument. The assertion is simply that it returns.
+    #
+    # The holder is the test's own: anything that answers `hold!` is one, and the
+    # walk is the same whatever holds the leaves.
+    dev = M.Device(TESTBACKEND)
+    b = M.Buffer(dev, Float32, (64,))
+    held = LeafHolder(Any[])
+    # Both spellings, and a couple of leaves that must not confuse it.
+    @test M.holdleaves!(held, (b, M.storage(b), 1, nothing)) === nothing
+    @test !isempty(held.leaves)
+    M.free!(b)
+end
+
+@testset "a profiled plan reports both halves of a recorded run" begin
+    dev = M.Device(TESTBACKEND)
+    # `bake!` REFUSED a profiled plan, because `timings` measures host recording
+    # per pass and a baked plan did not record — the numbers would have been the
+    # capture's, reported forever. Recording is not a second mode any more: the
+    # host number is what writing the pass cost, sampled once because it happens
+    # once, and the GPU number comes from timestamps inside the recording and is
+    # resampled on every run. Both are honest; neither is a frozen copy of the
+    # other.
+    g = M.Graph(dev)
+    seed = M.Buffer(dev, zeros(Float32, 64))
+    out  = M.Buffer(dev, zeros(Float32, 64))
+    M.dispatch!(g, bump!, (out, seed), 64; name = "only")
+    profiled = Base.invokelatest(M.Plan, g; profile = true)
+    M.record!(profiled)
+    for _ in 1:4
+        M.run!(profiled)
+    end
+    KernelAbstractions.synchronize(dev)
+    t = M.timings(profiled)
+    # Two passes: the update pass every plan with a declared buffer has, which
+    # was never written (nothing was stored, so it has no host time and no
+    # frame of GPU time), and the one that was.
+    @test [x.name for x in t] == ["updates", "only"]
+    @test t[2].host_ms > 0                 # the one recording
+    # …and at least one frame of GPU time, where the device times its passes
+    M.timestamps(dev) && @test t[2].samples >= 1
+    M.free!(profiled)
+end
+
+# GPU time of a pass: only where the device times its passes.
+M.timestamps(M.Device(TESTBACKEND)) && @testset "a profiled pass reports the time it actually took" begin
+    # `samples >= 1` above says a frame was COLLECTED, not that the number in it
+    # is right, and the difference hid a bug for as long as nothing asked:
+    # `timings` reported **0.0 ms** for a 2048x2048 `mm` that takes 2.3 ms.
+    #
+    # The cause is that `collect!` reads the query pool WITHOUT waiting, on
+    # purpose, and the reset for the next frame sits at the head of its
+    # recording. A slot that has been reset and not yet written back reads as
+    # value 0 with availability 1 — Vulkan says a reset query is unavailable,
+    # RADV reports it available and zero — so `elapsed(0, 0)` became a
+    # plausible 0.0 ms sample. Over 33 samples, 15 were that, and a median over
+    # a set half of which is zero IS zero. The real samples were all there and
+    # all correct.
+    #
+    # So the assertion is against the CLOCK, not against zero: a pass cannot
+    # take less time than the loop that ran it, to within the submission
+    # overhead the wall time also includes.
+    dev = M.Device(TESTBACKEND)
+    n = 1 << 24          # 16 Mi elements: milliseconds, well above a submission
+    g = M.Graph(dev)
+    seed = M.Buffer(dev, zeros(Float32, n))
+    out  = M.Buffer(dev, zeros(Float32, n))
+    M.dispatch!(g, bump!, (out, seed), n; name = "only")
+    profiled = Base.invokelatest(M.Plan, g; profile = true)
+    M.record!(profiled)
+
+    # No synchronise inside the loop: running them back to back is what opens
+    # the reset window this is here for. Every sample read in it is a real one.
+    reps = 30
+    for _ in 1:reps
+        M.run!(profiled)
+    end
+    KernelAbstractions.synchronize(dev)
+    t = M.timings(profiled)
+    i = findfirst(x -> x.name == "only", t)
+    @test t[i].samples >= 1
+    @test t[i].gpu_ms > 0                         # the assertion that was missing
+    @test all(>(0), profiled.profiler.gpu_ns[i])
+    nwindow = length(profiled.profiler.gpu_ns[i])
+
+    # Bracketed by the wall clock from both sides, run by run: the pass cannot
+    # have taken longer than the submission that contained it, and a pass that
+    # reports a small fraction of it is reporting a truncated interval rather
+    # than a fast kernel. Each run waits, so the next one reads its frame, once.
+    #
+    # Not the loop above against a wall time of its own: back to back, a frame is
+    # sampled only when the read finds it finished, two or three of sixty on an
+    # RTX 3070, and that laptop's clock ramps from 3 ms to 0.1 ms a run within
+    # the testset. A median of the early samples against the wall time of later
+    # runs failed on clock speed alone.
+    walls = Float64[]
+    for _ in 1:reps
+        push!(walls, @elapsed begin
+            M.run!(profiled)
+            KernelAbstractions.synchronize(dev)
+        end)
+    end
+    M.timings(profiled)                           # reads the last run's frame
+    med(x) = sort(x)[(length(x) + 1) ÷ 2]
+    timed = profiled.profiler.gpu_ns[i][nwindow+1:end] ./ 1e6
+    @test length(timed) == reps
+    @test med(timed) <= 1000 * med(walls)
+    @test med(timed) >= 0.2 * 1000 * med(walls)
+    M.free!(profiled)
+end
+
+# A pass is timed from when everything before it has FINISHED. The start
+# timestamp was at `TOP_OF_PIPE`, which the command processor writes as soon as it
+# reaches it — while the previous pass is still running — so every pass reported
+# its predecessor's time as well as its own: on the Qwen-Image 2.1 VAE a 2.95 ms
+# norm reported the 1105 ms convolution in front of it. A heavy pass followed by
+# a trivial one is that, reduced.
+@kernel function spin!(dst, @Const(src))
+    i = @index(Global)
+    x = @inbounds src[i]
+    for _ in 1:4096
+        x = muladd(x, 0.999f0, 1f-3)
+    end
+    @inbounds dst[i] = x
+end
+
+# GPU time of a pass: only where the device times its passes.
+M.timestamps(M.Device(TESTBACKEND)) && @testset "a pass is not billed the pass before it" begin
+    dev = M.Device(TESTBACKEND)
+    n = 1 << 20
+    g = M.Graph(dev)
+    seed = M.Buffer(dev, rand(Float32, n))
+    mid  = M.Buffer(dev, zeros(Float32, n))
+    tiny = M.Buffer(dev, zeros(Float32, 64))
+    M.dispatch!(g, spin!, (mid, seed), n; name = "heavy")
+    M.dispatch!(g, bump!, (tiny, mid), 64; name = "light")
+    profiled = Base.invokelatest(M.Plan, g; profile = true)
+    M.record!(profiled)
+    for _ in 1:10
+        M.run!(profiled)
+    end
+    KernelAbstractions.synchronize(dev)
+    t = M.timings(profiled)
+    heavy = t[findfirst(x -> x.name == "heavy", t)].gpu_ms
+    light = t[findfirst(x -> x.name == "light", t)].gpu_ms
+    @test heavy > 0
+    # 64 elements against a million doing 4096 multiply-adds each. Billed the
+    # heavy pass, `light` came out equal to it.
+    @test light < 0.1 * heavy
+    M.free!(profiled)
+end
+
+@testset "two recorded plans alternating on one arena stay bit-exact" begin
+    # Both recorded up front, so neither run emits anything: what orders b's
+    # writes behind a's reads of the same bytes is the barrier each recording
+    # opens with, and nothing else: the arena keeps no record of who ran last,
+    # so a run has nothing to claim.
+    dev = M.Device(TESTBACKEND)
+    a = Base.invokelatest(chainplan, dev, 50_000, 2)
+    b = Base.invokelatest(chainplan, dev, 50_000, 2)
+    M.record!(a.plan)
+    M.record!(b.plan)
+    for _ in 1:100
+        M.run!(a.plan)
+        M.run!(b.plan)
+    end
+    KernelAbstractions.synchronize(dev)
+    @test all(==(4f0), Array(M.storage(a.out)))
+    @test all(==(4f0), Array(M.storage(b.out)))
+    @test !isdefined(M, :takeover!)
+end
+
+@testset "an N-dimensional buffer reaches the GPU with its shape" begin
+    # The Lava half of `Buffer(dev, T, dims)`: `deviceview` hard-coding
+    # `LavaArray{T,1}(…, (length(a),))` delivers a 2-D region to a kernel
+    # flattened, with every index recomputed from a width the kernel has
+    # to be told separately.
+    dev = M.Device(TESTBACKEND)
+    want = reshape(collect(1f0:12f0), 3, 4)
+    b = M.Buffer(dev, want)
+    @test size(b) == (3, 4)
+    # Was `Mantle.LavaArray{Float32,2}`, which is one backend's array type in a
+    # file that runs against all of them. What the property IS: a Buffer's
+    # storage is the backend's own 2-D device array, whatever that is.
+    @test M.storage(b) isa AbstractArray{Float32,2}
+    @test size(M.storage(b)) == (3, 4)
+    @test Array(b) == want
+    M.free!(b)
+end
+
+# The same property as the `Buffer` test above, one level down: a TRANSIENT is
+# shaped too, so a kernel indexes it N-dimensionally instead of being handed a
+# flat region plus the extents as scalars.
+#
+# It carried a scalar `n` until 2026-09-15. That is also what blocked declaring a
+# graph rather than capturing one: `use` interns by object identity, so
+# `use(p, reshape(t, dims))` mints a fresh id per view and two views of one
+# transient show the barrier phase no hazard at all — the handle has to be the
+# transient, so the transient has to carry the shape.
+@kernel function nd_shape!(a)
+    i, j = @index(Global, NTuple)
+    @inbounds a[i, j] = Float32(10 * i + j)
+end
+
+@testset "an N-dimensional transient reaches the GPU with its shape" begin
+    dev = M.Device(TESTBACKEND)
+    # …and the one-argument form is still the N = 1 case, not a different thing.
+    # Its own graph, because an unused transient has no interval to place and
+    # `Liveness` says so rather than placing it anyway.
+    @test size(M.Transient.Buffer(M.Graph(dev), Float32, 8)) == (8,)
+    g = M.Graph(dev)
+    t = M.Transient.Buffer(g, Float32, 3, 4)
+    @test size(t) == (3, 4)
+    @test length(t) == 12
+    @test ndims(t) == 2
+    @test eltype(t) === Float32
+    M.dispatch!(g, nd_shape!, (t,), size(t); name = "shape")
+    pl = M.Plan(g; budget = Inf)
+    @test M.storage(t) isa AbstractArray{Float32,2}
+    @test size(M.storage(t)) == (3, 4)
+    M.record!(pl)
+    M.run!(pl)
+    M.waitidle(dev)
+    @test Array(M.storage(t)) == Float32[10i + j for i in 1:3, j in 1:4]
+    M.free!(pl)
+end
+
+# Slow enough that a submission is still in flight when the next line runs:
+# every element spins, and the total is far past what a fence poll sees pass.
+# The loop reads its step from the array, so no driver can evaluate it at
+# compile time: with a constant step it is a constant, and a kernel that is
+# folded away has signalled before the next line runs.
+# Long enough that the host reaches `reclaim!` while it still runs. 2M iterations
+# took 93 ms on LapWin's Radeon 8060S, and once, on a fresh Julia 1.12.7 process, the
+# host took longer than that between the launch and the first `reclaim!`; 20M take
+# 385 ms there, well inside Windows' 2 s GPU watchdog.
+@kernel function arena_slow!(a)
+    i = @index(Global)
+    @inbounds step = a[i]
+    s = 0f0
+    for k in 1:20_000_000
+        s += sin(Float32(k) * step)
+    end
+    @inbounds a[i] = s
+end
+
+@testset "a retired region waits for the device, then comes back" begin
+    # The device half of `reclaim!`. Unlike the host, a fence here carries real
+    # information: a region dropped while a batch is open may be named by a
+    # command already recorded into it, so releasing on the spot would hand
+    # those bytes to the next caller while the GPU is still reading them.
+    #
+    # So the first `reclaim!` only stamps, and the release waits for the
+    # timeline. That ordering is the whole safety argument, and asserting the
+    # count alone would pass just as well if it released immediately.
+    dev = M.Device(TESTBACKEND)
+    pool = M.pool(dev)
+    b = M.Buffer(dev, fill(1f0, 4096))
+    # Anything this file retired earlier goes back first, so the counts below
+    # are about `b` and `b3` rather than about the order of the testsets. A full
+    # collection FIRST: a buffer an earlier testset dropped retires from its
+    # finalizer, so without it the drain below finds nothing and a collection
+    # between here and the count pushes them — 9 of them once the spill testset
+    # above left its seed and output buffers behind. `reserved` is read after
+    # the drain, which gives those blocks back.
+    GC.gc(true)
+    while M.reclaim!(pool, dev; wait = true) > 0 end
+    # …and the blocks those regions came from, which a drain empties but does not
+    # hand back: the count of RESERVED bytes below is about `b`'s block alone.
+    M.trim!(pool, dev)
+    # The PERSISTENT kind, where `b` lives. The whole pool also holds the staging
+    # and argument blocks, and those come and go with whatever the next upload or
+    # launch needs: once uploads staged through `Readback` instead of `Unified`,
+    # the slow launch below took a fresh 4 MiB argument block and a whole-pool
+    # count read that as `b2` not reusing `b`'s bytes.
+    reserved = M.reserved(pool, M.Persistent())
+
+    # Retire with a submission IN FLIGHT, which is the case that must wait: a
+    # command the device is still running can name these bytes. A slow kernel
+    # keeps the timeline behind the value the region is stamped with.
+    scratch = KernelAbstractions.allocate(dev, Float32, 16)
+    fill!(scratch, 1f-3)
+    arena_slow!(dev, 16)(scratch; ndrange = 16)
+    M.free!(b)
+    @test M.reclaim!(pool, dev) == 0        # stamped, not released: it has not signalled
+
+    # Wait, so the fence it was stamped with has passed.
+    M.waitidle(dev)
+    @test M.reclaim!(pool, dev) == 1        # now
+    @test M.reclaim!(pool, dev) == 0
+
+    b2 = M.Buffer(dev, fill(2f0, 4096))
+    @test M.reserved(pool, M.Persistent()) == reserved   # reused, not reallocated
+    @test Array(b2) == fill(2f0, 4096)
+    M.free!(b2)
+
+    # And the idle case, which is the one that must NOT wait. `fence` returning
+    # `next_timeline + 1` unconditionally means a region dropped by an
+    # application that then submits nothing more waited for a signal nobody
+    # would ever raise — the same leak this path removes, wearing a hat.
+    M.waitidle(dev)
+    b3 = M.Buffer(dev, fill(3f0, 4096))
+    while M.reclaim!(pool, dev; wait = true) > 0 end
+    M.free!(b3)
+    @test M.reclaim!(pool, dev) == 1        # nothing is in flight, so: now
+end

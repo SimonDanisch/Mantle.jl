@@ -1,0 +1,20 @@
+MANTLE PLAN RECONCILIATION — 2026-10-29
+
+Current authority: docs/recording-plan.md, docs/api.md, docs/execution-contracts.md, docs/refactor-ledger.md; latest user routing/capability ruling in explicit-routing-ruling.json.
+
+- An array has one owning Mantle Device/domain; many nodes in multiple graphs may reference it.
+- A Group contains operation nodes, not adapted arrays/devices; no recording-device wrapper or returned Group alias.
+- Ordinary eager numerical methods keep Julia signatures, without an extra public device argument.
+- The separate recorded-call entry explicitly names Graph/Group and a supported function.
+- One shared Mantle/GPUArrays-style operation layer serves eager and recorded calls and owns device-capability dispatch; backend algorithm duplication is forbidden.
+- Known operation definitions/recipes supply shared validation, effects, returns, candidate materialization and resource management; arbitrary Julia capture is not promised.
+- Return contracts are explicit per operation definition: mul! returns C; recorded Array returns a typed future; neither ! nor a universal-future heuristic determines this.
+- Array(a) is standard blocking eager conversion; call!(target,Array,a) declares a snapshot; Readback(previous_future) only requests its next execution. No separate public eager Readback(array).
+- Actual CPU work during replay uses explicit HostCall staging/host cuts; unsupported call! never falls back to it or eager execution.
+- The core selector intersects enabled hardware/compiler capability, precision/layout/shape/alias/workspace and recording/control requirements, then compares eligible candidates using measured evidence.
+- Eager calls materialize immediately; graph compile materializes/reselects retained recipes; replay uses baked choices without probing/tuning.
+- KA.get_backend(a) stays the owning Mantle Device; ordinary host length/size queries synchronize and return snapshots, never a recording target or hidden graph provenance.
+
+Original 24 findings and ten follow-up findings retain stable IDs; historical documents/reports are archived. Adaptation, returned Group aliases, public numerical device/group overloads and a separate eager Readback(array) are superseded.
+
+Implementation schedule: five coherent batches, eight fixed MWE specifications, persistent Julia workers, affected-test reruns and full suites at qualification. Runtime/native replacement gates remain open.

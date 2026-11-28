@@ -43,10 +43,12 @@ function build_chain(dev, win, n)
     seed = cloud(n)
     pos = M.Buffer(dev, seed)
     col = M.Buffer(dev, tint.(seed))
-    siz = M.Scalar(dev, 2.0f0)
-    mvp = Ref(camera(0.0f0))
+    siz = M.GPURef(dev, 2.0f0)
+    # Read again every frame (`measure_chain` stores a new camera into it each
+    # loop), so a `GPURef`: the draw holds its device address.
+    mvp = M.GPURef(dev, camera(0.0f0))
 
-    fb = LavaFramebuffer(W, H; depth = false)
+    fb = M.Framebuffer(dev, W, H; depth = false)
 
     g = M.Graph(dev)
 
@@ -59,25 +61,17 @@ function build_chain(dev, win, n)
     raw = M.Transient.Buffer(g, UInt8, NPX * 4)
     stage = [M.Transient.Buffer(g, Vec4f, NPX) for _ in 1:(STAGES + 1)]
 
-    M.compute!(g, "unpack") do p
-        src = M.use(p, raw; read = true)
-        dst = M.use(p, stage[1]; write = true)
-        M.dispatch!(p, unpack!, (dst, src, Int32(W), Int32(H)), (W, H); group = (16, 16))
-    end
+    M.dispatch!(g, unpack!, (stage[1], raw, Int32(W), Int32(H)), (W, H); group = (16, 16), name = "unpack")
 
     for k in 1:STAGES
-        M.compute!(g, "blur $k") do p
-            src = M.use(p, stage[k]; read = true)
-            dst = M.use(p, stage[k + 1]; write = true)
-            M.dispatch!(p, blur!, (dst, src, Int32(W), Int32(H)), (W, H); group = (16, 16))
-        end
+        M.dispatch!(g, blur!, (stage[k + 1], stage[k], Int32(W), Int32(H)), (W, H); group = (16, 16), name = "blur $k")
     end
 
-    (; g, fb, raw, out = stage[end], mvp, plan = M.Plan(g))
+    (; g, fb, raw, out = stage[end], mvp, plan = M.record!(M.Plan(g)))
 end
 
 function measure_chain(frames = 300; n = 200_000)
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     win = RenderWindow(W, H; title = "mantle: transient chain", vsync = false)
     s = build_chain(dev, win, n)
     bq = dev.bq
@@ -86,15 +80,17 @@ function measure_chain(frames = 300; n = 200_000)
     t0 = time()
     for _ in 1:frames
         isopen(win) || break
-        Lava.GLFW.PollEvents()
+        Mantle.GLFW.PollEvents()
         tf = time()
         s.mvp[] = camera(0.4f0 * Float32(time() - t0))
         acquire_next_image!(win)
         M.run!(s.plan)                               # render + compute chain
-        copy_framebuffer!(M.storage(s.raw), s.fb)     # ColorAttachment -> CopySrc
+        Mantle.copy_framebuffer!(M.storage(s.raw), s.fb) # ColorAttachment -> CopySrc
         blit!(bq, WindowTarget(win), M.storage(s.out))
-        present_frame!(bq, win)
-        Lava.flush!(bq, dev.ctx.device)
+        present_frame!(bq, win, Mantle.oneshot(bq) do e
+            Mantle.presentready!(e, win)
+        end)
+        Mantle.flush!(bq, dev.ctx.device)
         push!(times, time() - tf)
     end
     img = readback_window(win)
@@ -104,10 +100,9 @@ function measure_chain(frames = 300; n = 200_000)
     q = sort(steady); m = length(q)
     (frames = length(times),
      peak_mb = round(M.peakbytes(s.plan) / 2^20, digits = 2),
-     naive_mb = round(MantleLavaExtNaive(s.plan) / 2^20, digits = 2),
+     naive_mb = round(Mantle.naivebytes(s.plan) / 2^20, digits = 2),
      median_ms = round(1000 * q[m ÷ 2], digits = 3),
      fps = round(m / sum(steady), digits = 0),
      img = img)
 end
 
-MantleLavaExtNaive(plan) = Base.get_extension(Mantle, :MantleLavaExt).naivebytes(plan)

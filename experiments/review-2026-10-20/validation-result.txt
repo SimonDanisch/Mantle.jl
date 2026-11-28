@@ -1,0 +1,9 @@
+Julia 1.12.7; host-only validation, 2026-10-20
+Test Summary:               | Pass  Total  Time
+FaultDevice native boundary |   78     78  0.7s
+Test Summary:                          | Pass  Total  Time
+Execution model with negative controls |   34     34  0.3s
+Test Summary:                   | Pass  Total  Time
+Shared caps and fixture helpers |   19     19  0.2s
+Parsed 52 suite/design/doc Julia files; expanded/lowered 42 areas with 585 unique cases. No GPU bodies executed.
+Mantle imported: false; Lava imported: false

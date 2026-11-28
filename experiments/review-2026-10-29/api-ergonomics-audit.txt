@@ -1,0 +1,44 @@
+FOLLOW-UP API AUDIT — 2026-10-29
+CURRENT AUTHORITY: explicit-routing-ruling.json and the shared Mantle operation layer in docs/recording-plan.md.
+Prior adaptation/returned-binding/public numerical target-overload proposals are superseded.
+Specification only; runtime gates OPEN.
+
+AE-01 Readback(array) changed meaning after compilation
+call!(target,Array,a) always declares a recorded position; Readback(previous_future) requests that output again. Standard eager Array(a) needs no new public eager readback future.
+Ledger F100; existing MWE-01.
+
+AE-02 Pending readback requests were owned/cancelled by a retiring plan
+Graph owns pending output IDs/requests; compatible replacement rebinds them, submitted futures retain old staging.
+Ledger F101; existing MWE-01.
+
+AE-03 Graph inspection had an eager-conversion detour and ambiguous host conversion semantics
+Arrays own one Device. Eager Array needs no adaptation; a recorded position explicitly uses call!(Graph/Group,Array,a).
+Ledger F102; existing MWE-01, MWE-07.
+
+AE-04 Scratch data initialization and snapshot/rebinding exceptions contradicted lifetime rules
+Persistent data initializes once; explicit scratch initializer follows its construction region, while device identity never changes. Other regions reference it directly within valid lifetime.
+Ledger F103; existing MWE-01.
+
+AE-05 Image examples/signatures mixed zero-based mips, color/depth defaults and undocumented window overload
+Julia one-based image views infer an appropriate aspect; document window constructor; color volume example uses RGBA, preserving existing Float32 depth convention.
+Ledger F104; existing MWE-06.
+
+AE-06 Inferred operation returned an eager destination after recording into a Group
+The shared definition supplies returns: mul! returns C itself, recorded Array supplies a future; no Group-bound aliases, !-name inference or universal-future rule.
+Ledger F105; existing MWE-04.
+
+AE-07 Omitted keyword defaults were required in the literal API signatures
+Document origin=nothing diagnostic default and hardware=nothing capability selection; explicit true requires hardware, false is software reference. Window, pipeline and ray-program optional defaults are explicit too.
+Ledger F106; existing MWE-04, MWE-05.
+
+AE-08 Examples hid missing shape/initialization work and consumer helpers looked like Mantle API
+Use app_* only for consumer helpers, actual window draw entry, deterministic sources, initialized simulation state and coherent full model resize. Import only LinearAlgebra.mul! to avoid its BLAS module colliding with Mantle.BLAS.
+Ledger F107; existing MWE-01, MWE-02, MWE-04.
+
+AE-09 Zero-copy rebinding said same physical device rather than ownership domain
+Same Device/context domain is required; a second driver for the same hardware is a different domain and needs explicit transport/import.
+Ledger F108; existing MWE-07.
+
+AE-10 Unrequested readback outputs could continue transferring capacity-sized payloads
+Core omits or gates unrequested payload transfers using existing region/segment machinery, without exponential output-subset recordings.
+Ledger F109; existing MWE-01, MWE-08.

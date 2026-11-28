@@ -1,0 +1,4 @@
+%v = cmpxchg ptr %slot, i32 0, i32 1 syncscope("device") acq_rel acquire
+Cannot determine pointee type for inttoptr result: LLVM.IntToPtrInst(%p = inttoptr i64 4096 to ptr)
+%v = atomicrmw add ptr %slot, i32 1 syncscope("device") acq_rel
+Cannot determine pointee type for inttoptr result: LLVM.IntToPtrInst(%p = inttoptr i64 4096 to ptr)

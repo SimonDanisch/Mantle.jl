@@ -1,0 +1,7 @@
+{
+  "scope": "Abstract counterexamples only; no Julia or GPU execution",
+  "alias_frontier_counterexample": true,
+  "dependency_wait_exceeds_watchdog_without_long_kernel": true,
+  "dirty_shadow_without_clear_keeps_removed_occluder": true,
+  "length_prepare_rejected_by_documented_loopable_methods": true
+}

@@ -1,72 +1,59 @@
-# The runtime surface. Generic here; a backend extension implements it.
-#
-# Lifetime is in the name, not in an argument: `Buffer(dev, ...)` is persistent
-# and you update! it, `Transient.Buffer(g, ...)` is the compiler's. Neither is
-# ever freed by hand.
+# Portable runtime vocabulary; graphs and native backends provide concrete methods.
 
-abstract type Device end
+"""Device(api)
+    Device(api; select)
+    Device(backend)
+
+A device owns its graphs, resources and submit channels, and is a
+KernelAbstractions backend. Device(api) returns its cached default; select
+creates an independent device without installing it. Device(backend) returns a
+device unchanged and resolves a vendor backend to its device.
+See devices, selectdevice and defaultdevice!. Every device keeps the
+`DebugConfig` it was made with in its `debug` field, and the channels
+`allocate_batch_queue!` handed out in its `channels` field."""
+abstract type Device <: KernelAbstractions.Backend end
+Device(d::Device) = d
 abstract type Resource end
-abstract type Graph end
-abstract type Plan end
+# Graph and Plan are shared concrete types in graph/types.jl.
 
-"""
-    Window(width, height; title = "", vsync = false)
+# DeviceCaps and caps are imported from KernelInterface; all device handles share them.
 
-Something to render into, and the only reason a frame loop exists.
+"""todevice(x) -> Device
 
-    win = Window(1000, 750; title = "particles")
-    while isopen(win)
-        run!(plan)
-    end
-    close(win)
+Return a Device unchanged, or resolve a KernelAbstractions.Backend to its cached
+device."""
+todevice(d::Device) = d
+todevice(b::KernelAbstractions.Backend) = Device(b)
 
-`isopen` is a predicate and nothing more: events are pumped by `run!`, once per
-frame, for every surface the plan draws to. A loop that asks whether the window
-is open and then draws therefore behaves the way it reads, and nothing has to
-remember to poll.
+"""Window(width, height; title="", vsync=false)
+    Window(backend, width, height; title="", vsync=false, color_format=BGRA{N0f8}, srgb=false)
 
-There is no `flush` in that loop, and no `present` either. `run!` submits the
-frame and the next one waits on the fence for its own slot, which is the pacing;
-a wait for the GPU to go idle would only stop the CPU from working ahead. A
-readback synchronises itself, because it must.
-"""
-abstract type Window end
+A presentation window; the short form uses defaultbackend(). isopen only queries
+state. run! pumps events, submits and presents; frame slots provide pacing.
+By default shaders write display-referred values; srgb=true encodes linear values.
 
-"""
-    backend(device)
+Core owns the platform window `handle` (GLFW) and whose frame it is (`acquirer`, the
+task holding an acquired image, `nothing` between frames); the backend owns
+`surface`, what frames draw into (`graphics/window.jl`)."""
+mutable struct Window{S}
+    handle::GLFW.Window
+    surface::S
+    acquirer::Union{Nothing,Task}
+    open::Bool
+end
 
-The KernelAbstractions backend behind a device, for kernels launched outside a
-graph — data produced by something the graph knows nothing about and then handed
-to an `Update`.
+Window(width::Integer, height::Integer; kw...) =
+    Window(defaultbackend(), width, height; kw...)
 
-    advect!(backend(dev))(positions, velocities, dt; ndrange = n)
+"""screenshot(window) -> Matrix
 
-Inside a graph, `dispatch!` is the way: the graph then knows the kernel wrote
-that buffer, and orders the passes that read it.
-"""
-function backend end
-
-"""
-    screenshot(window) -> Matrix
-
-The pixels currently on the window, as a matrix of its format's element type.
-Synchronises internally, and returns the image it acquired to the presentation
-engine rather than leaving it outstanding.
-"""
+Read window pixels in its format's element type, synchronizing internally and
+returning the acquired image to presentation. See readback_window."""
 function screenshot end
 
-"""
-What a render pass does with whatever is already in its target.
-
-Three answers, not two. `Keep` loads, `Clear` overwrites with a value, and
-`Discard` says the pass covers every pixel and the old contents are worth
-nothing. Only the last is free: it is `LOAD_OP_DONT_CARE`, and inferring the load
-op from "was a clear colour given" can never reach it.
-
-It is also the whole of `discards`, which is what lets a barrier into the target
-come from `UNDEFINED` and drop the read access bit. RPS derives the same thing
-from `DISCARD_DATA_BEFORE` (`rps_vk_runtime_backend.cpp:143`).
-"""
+"""Attachment load policy: Keep loads, Clear(value) overwrites, and Discard skips
+loading because the pass promises to write every pixel. Clear and Discard allow
+prior contents to be discarded during layout transitions."""
 abstract type LoadOp end
 
 struct KeepOp <: LoadOp end
@@ -86,84 +73,72 @@ discards(::KeepOp) = false
 discards(::DiscardOp) = true
 discards(::Clear) = true
 
-function Buffer end
-function Scalar end
 function Surface end
 function Attribute end
-"""
-    draw!(pass, pipeline, args, count; frag_args = ())
+"""draw!(pass, pipeline, args, count; frag_args=())
 
-Record a draw. `args` are the vertex shader's, `count` is how many vertices it
-runs for, and `frag_args` are the fragment shader's.
-
-A pipeline has one push constant range, so a draw's arguments belong to one
-stage and giving them to both is an error rather than a silently wrong layout.
-Which stage is the one that reads them: a mesh pass puts its buffers on the
-vertex shader and hands the fragment shader varyings, and a fullscreen pass does
-the reverse — its vertex shader makes a triangle out of `vertex_index()` and
-takes nothing, and its fragment shader reads a g-buffer per pixel.
-
-    shade(inputs, albedo, depth, invvp::Mat4f, w::Int32, h::Int32) = ...
-
-    render!(g, "light", screen => Discard) do p
-        draw!(p, LIGHTING, (), 3;
-              frag_args = (use(p, albedo; read = true), use(p, depth; read = true),
-                           inverse_vp, Int32(w), Int32(h)))
-    end
-
-A fragment shader takes its varyings first and these after, which is why `shade`
-above begins with `inputs` even though a fullscreen pass has no varyings to read.
-
-`use` rather than `Attribute` for the buffers, because `Attribute` is a vertex
-binding and this is a shader read in the fragment stage; the barrier follows
-from that.
-"""
+Declare a draw with vertex arguments or fragment arguments. A fragment receives
+varyings before frag_args. The pipeline has one argument range: use the stage
+that reads the arguments, or the same tuple for both. Fragment buffers use use,
+not the vertex-binding Attribute wrapper."""
 function draw! end
 
-"""
-    dispatch!(pass, kernel, args, ndrange; group = nothing)
-
-Launch a kernel as part of a pass, so what it reads and writes is what orders it
-against everything else.
-
-`group` is the workgroup size, and it is worth giving one whenever `ndrange` is
-two-dimensional. The default partitions an ndrange along its first axis, which
-for anything image-shaped means a workgroup is one long row: a pass that reads a
-row-major g-buffer and writes a column-major target then has one of the two
-uncoalesced, and it costs about nine times the square arrangement — 1.06 ms
-against 0.12 ms at 1280x800 on the machine this was measured on.
-
-    dispatch!(p, shade!, args, (w, h); group = (16, 16))
-
-`nothing` means the backend picks, which is right for a one-dimensional ndrange
-and is what everything that does not say otherwise gets.
-"""
-function dispatch! end
 function render! end
 
+"""newpass(graph, name, kind) -> pass
+    handle(graph, pass) -> declaration handle
+    dispatches(pass) -> recorded operations
+    passes(graph) -> passes in declaration order
+
+Shared pass-declaration accessors; concrete Graph/Pass methods live in graph/build.jl."""
+function newpass end
+function handle end
+function dispatches end
+
+"""checklive(plan, regions, ntransients)
+
+Reject a freed plan: a plan declaring transients requires live pool regions
+before it can record or run."""
+function checklive(plan, regions, ntransients::Integer)
+    (ntransients > 0 && isempty(regions)) && throw(ArgumentError(
+        "this plan has been freed — `free!` gave its arenas back, and running it " *
+        "now would record against memory the pool may have handed to another " *
+        "plan. Build a new plan from the graph."))
+    return plan
+end
+
+"""Identity-based resource IDs for scheduling, with a reverse id-to-resource table.
+Native array views use their shared storage owner instead of wrapper identity.
+IDs are assigned in first-use order and remain stable within the graph."""
+struct IdTable
+    ids::IdDict{Any,Int}
+    by_id::Dict{Int,Any}
+end
+IdTable() = IdTable(IdDict{Any,Int}(), Dict{Int,Any}())
+
+"""Stable storage owner used by native-array views; resources default to identity.
+
+Backends answer this allocation fact for their array type. Core interns all of
+its scalar/vector/reshape views together, so scheduling and synchronization do
+not mistake another view of a write for an unrelated buffer.
 """
-    Update(graph, buf) -> ref
+resource_identity(r)=r
 
-Reserve a position in the schedule where `buf` may be rewritten, and return a
-callable that supplies the data.
+"""The id `r` is known by, assigning one if this is the first time it is named."""
+resourceid(t::IdTable, r) = get!(t.ids, resource_identity(r)) do
+    id = length(t.ids) + 1
+    t.by_id[id] = r
+    id
+end
 
-    ref = Update(g, positions)
-    on(obs) do new_data
-        ref(new_data)          # a store. any thread, any moment.
-    end
+"""What an id names. The inverse of [`resourceid`](@ref)."""
+byid(t::IdTable, id::Integer) = t.by_id[id]
+Base.haskey(t::IdTable, r) = haskey(t.ids, resource_identity(r))
 
-`ref(x)` retains `x` and marks the resource dirty. It does not copy, allocate or
-touch the GPU, because it runs on whatever task set the observable and there is
-no command buffer open there. The write happens at the reserved position during
-`run!`, and the barriers around it are derived from `CopyDst` like any other
-usage.
-
-Firing twice before a frame replaces the reference; the older array is dropped.
-If the caller means to mutate `x` before the next frame, they pass `copy(x)` —
-there is no keyword for it, because `copy` says the same thing where a profile
-can see it.
-"""
-function Update end
+"""Look up an existing resource ID. Unlike resourceid, this never registers a resource."""
+Base.getindex(t::IdTable, r) = t.ids[resource_identity(r)]
+Base.get(t::IdTable, r, default) = get(t.ids, resource_identity(r), default)
+Base.length(t::IdTable) = length(t.ids)
 
 """
     copy!(graph, name, dst, src)
@@ -172,17 +147,19 @@ A copy as a graph pass, so its layouts and ordering are derived rather than
 stated.
 """
 function copy! end
-function compute! end
+# `dispatch!` is a graph verb and lives with the graph, in `graph/build.jl`.
+
 function run! end
 function npipelines end
 
-"""
-What one pass cost. `host_ms` is recording it, `gpu_ms` is running it.
+"""free!(plan)
 
-The two are not parts of one total: recording happens this frame, the GPU work
-happens when the queue reaches it, and adjacent passes overlap on the GPU. A sum
-down the column is not the frame time.
-"""
+Release a plan's pool regions and arena tenancy now. Optional: a dropped plan's
+finalizer queues it, and the next reclaim! frees it on the owning thread."""
+function free! end
+
+"""Per-pass host recording time and GPU execution time. These overlap across
+passes and frames; their sum is not frame latency."""
 struct PassTiming
     name::String
     kind::Symbol
@@ -206,53 +183,53 @@ function Base.show(io::IO, ::MIME"text/plain", ts::Vector{PassTiming})
     end
 end
 
-"""
-    timings(plan) -> Vector{PassTiming}
+"""timings(plan) -> Vector{PassTiming}
 
-Per pass, what it cost: host time to record it and GPU time to run it.
-
-Off unless the plan was built with `Plan(g; profile = true)`, because measuring
-costs two timestamp writes per pass and a query pool. On, the cost is paid where
-it is asked for rather than behind a global switch.
-
-The GPU numbers are read without waiting: a frame whose timestamps are not back
-yet is skipped rather than stalled for, so profiling does not change the frame
-time it is measuring. Both figures are medians over the last `NSAMPLES` *samples*
-kept, because a single frame's recording time is mostly whatever the OS was
-doing. Samples, not frames: with frames in flight most reads find the results
-not ready and are skipped, so four hundred frames may leave twenty samples a
-pass. `PassTiming.samples` is how many are actually behind a number, and a small
-one means the median is over very little.
-
-    plan = Plan(g; profile = true)
-    for _ in 1:120; run!(plan); end
-    timings(plan)
-
-is the whole of it — with the caveat that the first measurements out of a fresh
-session are not the steady state. Pipelines are created, memory is faulted in
-and the clocks are still ramping: on the twenty-pass renderer in bench the first
-four hundred frames average 2.6 ms each and the next four hundred 0.95. Anything
-comparing two configurations has to discard the first, or it is comparing the
-order they were measured in.
-
-`timings(plan)[i].gpu_ms` is pass `i` in scheduled order,
-which is not declaration order when the scheduler reorders.
-"""
+Available for Plan(g; profile=true). Report medians over up to NSAMPLES completed
+samples, in scheduled pass order. Timestamp results are polled without waiting;
+not-ready frames are skipped. Inspect PassTiming.samples and warm the workload
+before comparing configurations."""
 function timings end
 
-"""How many frames a profiled plan keeps, and what `timings` takes the median
-over. Two seconds at 60 Hz, which is long enough to be stable and short enough to
-follow a change."""
+"""importhost(backend, A::DenseArray) -> device array
+
+Map A's host allocation for device access without a copy; keep A alive and
+unmoved while used. Throws unless canimporthost. Vulkan needs the pointer
+aligned at both ends, which importablehost provides. Discrete devices read
+imported memory across the bus."""
+importhost(backend, A::DenseArray) = throw(ArgumentError(
+    "importhost: $(nameof(typeof(backend))) cannot read host memory in place " *
+    "(canimporthost(backend) is false); upload it instead"))
+
+"""importablehost(T, n) -> Vector{T}
+
+Private anonymous, page-aligned host storage for importhost. On Linux it requests
+transparent huge pages to reduce GPU address-translation cost."""
+function importablehost(::Type{T}, n::Integer) where {T}
+    a = Mmap.mmap(Vector{T}, n; shared = false)
+    @static if Sys.islinux()
+        MADV_HUGEPAGE = Cint(14)
+        r = ccall(:madvise, Cint, (Ptr{Cvoid}, Csize_t, Cint), a, sizeof(a), MADV_HUGEPAGE)
+        r == 0 || @warn("madvise(MADV_HUGEPAGE) failed (errno $(Libc.errno())): imported memory " *
+                        "is read in 4 KiB pages, at about two thirds of the bandwidth", maxlog = 1)
+    end
+    return a
+end
+
+"""
+    canimporthost(backend) -> Bool
+
+Whether [`importhost`](@ref) works on `backend`.
+"""
+canimporthost(backend) = false
+
+"""Maximum completed samples retained per profiled pass."""
 const NSAMPLES = 120
 
-"""
-    stride(x) -> Int
+"""stride(x) -> Int
 
-Elements to advance per index. Zero means one value shared by every element, so a
-scalar and a per-element array take the same shader path and the same pipeline.
-Nothing branches on it: the shader computes `1 + stride * (i - 1)` and with a
-stride of zero every invocation reads element one.
-"""
+Elements per logical index. Zero broadcasts one value: shaders read
+1 + stride * (i - 1), sharing the same pipeline for scalar and array operands."""
 function stride end
 
 """Number of elements a draw covers, taken from the binding so it cannot disagree."""

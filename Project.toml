@@ -2,30 +2,98 @@ name = "Mantle"
 uuid = "8f4c1f2e-6a3d-4b71-9c05-2e7d8a1b6f34"
 version = "0.1.0"
 
+# Vulkan and host backends are built in; ROCm is optional.
 [deps]
-ColorTypes = "3da002f7-5984-5a60-b8a6-cbb66c0b333f"
-
-[weakdeps]
 Lava = "3a680b1f-cb25-4bee-9cf7-bc880b76dc8c"
 Vulkan = "9f14b124-c50e-4008-a7d4-969b3a6cd68a"
-
-[extensions]
-MantleLavaExt = "Lava"
-MantleVulkanExt = "Vulkan"
-
-[compat]
-julia = "1.12"
-
-[extras]
+AcceleratedKernels = "6a4ca0a5-0e36-4168-a932-d9be78d558f1"
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
+Atomix = "a9b6321e-bd34-4604-b9c9-b65b8de01458"
+BFloat16s = "ab4f0b2a-ad5b-11e8-123f-65d77653426b"
 ColorTypes = "3da002f7-5984-5a60-b8a6-cbb66c0b333f"
+FileWatching = "7b1f6079-737a-58dc-b8bc-7a2ca5c1b5ee"
 GLFW = "f7f18e0c-5ee9-5ccd-a5bf-e8befd85ed98"
+GPUArrays = "0c68f7d7-f131-5f86-a1c3-88cf8149b2d7"
+GPUArraysCore = "46192b85-c4d5-4398-a991-12ede77f4527"
+GPUCompiler = "61eb1bfa-7361-4325-ad38-22787b887f55"
+GPUToolbox = "096a3bc2-3ced-46d0-87f4-dd12716f4bfc"
 GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+KernelInterface = "4ee993da-d684-4d17-a7dd-4e58e78d92bf"
+LLVM = "929cbde3-209d-540e-8aea-75f648917ca0"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
+Mmap = "a63ad114-7e13-5084-954f-fe012c677804"
+PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
+Raycore = "afc56b53-c9a9-482a-a956-d1d800e05559"
+SPIRV_Tools_jll = "6ac6d60f-d740-5983-97d7-a4482c0689f4"
+Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+UnsafeAtomics = "013be700-e6cd-48c3-b4a1-df204f14c38f"
+
+[weakdeps]
+AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
+
+[extensions]
+MantleROCmExt = "AMDGPU"
+
+[sources]
+# GPUArrays 12.3.0 with capability-aware union-array conformance tests.
+GPUArrays = {url = "https://github.com/SimonDanisch/GPUArrays.jl", rev = "7290db5ea73f8e5f60da6f2306eee38a7b4eeb4b"}
+Hikari = {url = "https://github.com/JuliaGraphics/Hikari.jl", rev = "d9ef5fc0ce71166cd667c9940e2c76146db22959"}
+Lava = {url = "https://github.com/SimonDanisch/Lava.jl", rev = "607b414a300e09f2a7bbbee6f3de7aaf768d5e7f"}
+# The graphics compiler uses Metal.jl's stage compiler extension API.
+Metal = {url = "https://github.com/JuliaGPU/Metal.jl", rev = "main"}
+Raycore = {url = "https://github.com/JuliaGeometry/Raycore.jl", rev = "master"}
+
+[compat]
+AMDGPU = "2"
+AcceleratedKernels = "0.5.13"
+Adapt = "4.7"
+Atomix = "1.5"
+BFloat16s = "0.5, 0.6"
+ColorTypes = "0.12"
+FileWatching = "1"
+GLFW = "4"
+GPUArrays = "12.1"
+GPUArraysCore = "0.2.1"
+GPUCompiler = "2.22"
+GPUToolbox = "3.3"
+GeometryBasics = "0.5.13"
+KernelAbstractions = "0.10.7"
+KernelInterface = "0.4.6"
+LLVM = "10.4"
+Lava = "0.1"
+Libdl = "1"
+LinearAlgebra = "1"
+Metal = "1.12"
+Mmap = "1"
+PrecompileTools = "1.4"
+Raycore = "0.3"
+SPIRV_LLVM_Backend_jll = "21.1.4, 22, 23"
+SPIRV_Tools_jll = "2025.4"
+Serialization = "1"
+StaticArrays = "1.9.17"
+UnsafeAtomics = "0.4"
+julia = "1.12"
+Vulkan = "0.7"
+
+[extras]
+# Additional test-only dependencies.
+Hikari = "afc56b53-c9a9-482a-a956-d1d800e05558"
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+Lavapipe_jll = "89601188-ea2b-501d-a121-fa144db6cabf"
+Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Profile = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
-Lava = "3a680b1f-cb25-4bee-9cf7-bc880b76dc8c"
+SPIRV_LLVM_Backend_jll = "4376b9bf-cff8-51b6-bb48-39421dff0d0c"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+StructArrays = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
-Vulkan = "9f14b124-c50e-4008-a7d4-969b3a6cd68a"
 
 [targets]
-test = ["Test", "Vulkan", "Lava", "ColorTypes", "GLFW", "GeometryBasics", "LinearAlgebra", "KernelAbstractions", "Random"]
+test = ["Hikari", "JLD2", "Lavapipe_jll", "Logging", "Printf", "Profile", "Random", "SPIRV_LLVM_Backend_jll", "SparseArrays",
+        "Statistics", "StructArrays", "Test"]

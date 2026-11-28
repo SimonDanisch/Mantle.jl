@@ -1,0 +1,295 @@
+# The compile output, pinned.
+#
+# This exists for ONE job: the five backend-independent phases (Dag, Schedule,
+# Liveness, Place, Aliasing) live in `src/vulkan/graph.jl` and are
+# about to be lifted into core so a second backend does not have to copy them.
+# A refactor that changes what they compute must fail here, loudly, rather than
+# show up later as a wrong offset on one machine.
+#
+# It pins the COMPILE output — scheduled order, peak bytes, liveness intervals,
+# which passes carry a barrier — and deliberately not pixels or frame times.
+# Those are the backend's business; these five phases are not.
+#
+# Needs Lava today. That is the point of the lift: once the phases are in core
+# and a Host backend exists, `buildprobe` takes a host device and this whole file
+# runs with no GPU present.
+
+using Test
+import Mantle
+const M = Mantle
+# The backend this run is for. `runtests.jl` includes this file once per
+# available backend (`Mantle.eachbackend()`); a bare `include` from the REPL
+# gets the default one. Nothing below names a backend, which is the point:
+# these testsets check PORTABLE behaviour, on whichever backend is there.
+const TESTBACKEND = isdefined(Main, :MANTLE_TEST_BACKEND) ?
+    Main.MANTLE_TEST_BACKEND : M.defaultbackend()
+
+
+using KernelAbstractions: @kernel, @index, @Const
+
+@kernel function goldenscale!(dst, @Const(src), a::Float32)
+    i = @index(Global)
+    @inbounds dst[i] = src[i] * a
+end
+
+"""
+    buildprobe(dev, n) -> Graph
+
+A chain of three passes plus two independent branches off the source.
+
+The chain forces an order; the branches do not, so `Schedule` has a real choice
+rather than one legal answer. Both branches only READ `src`, so no data
+dependency links them to anything — and they still end up with barriers, because
+their transients are placed on memory the chain has finished with. That is the
+aliasing hazard, and having it in the probe is the reason this file is worth
+more than a smoke test.
+"""
+function buildprobe(dev, n::Integer)
+    g = M.Graph(dev)
+    src = M.Buffer(dev, fill(1.0f0, n))
+    t = [M.Transient.Buffer(g, Float32, n) for _ in 1:5]
+    chain = (src, t[1], t[2], t[3])
+    for k in 1:3
+        M.dispatch!(g, goldenscale!, (chain[k + 1],
+                                          chain[k], 2.0f0), n; name = "chain$k")
+    end
+    for (k, dsti) in enumerate((4, 5))
+        M.dispatch!(g, goldenscale!, (t[dsti],
+                                          src, Float32(k)), n; name = "branch$k")
+    end
+    return g
+end
+
+"Everything the five phases decided, as plain data — comparable across a refactor."
+compileresult(g, plan) = (
+    peak       = M.peakbytes(plan),
+    scheduled  = [pp.pass.name for pp in plan.passes],
+    # A pass "has a barrier" if the backend was given anything to emit before it:
+    # the memory barrier a driver builds an object for, or the transitions a
+    # backend with no such object reads instead (Metal's recorder sets one bit
+    # from them). Reading only the object made this blind to the second kind.
+    barriered  = [pp.barrier !== nothing || !isempty(pp.pre) for pp in plan.passes],
+    intervals  = sort([(t.first, t.last) for t in values(g.transient_by_id)]),
+)
+
+@testset "compile output is pinned" begin
+    dev = M.Device(TESTBACKEND)
+    n = 1 << 16
+    g = buildprobe(dev, n)
+    plan = M.Plan(g)
+    r = compileresult(g, plan)
+
+    # 5 transients x 65536 Float32 = 1_310_720 B if nothing aliased. The placer
+    # gets it to exactly two buffers, which is what `bench/chain.jl` predicts in
+    # prose ("about two buffers, not five") and what this asserts in numbers.
+    @test r.peak == 524_288
+
+    # The chain is forced; the branches are free but must not overtake it. The
+    # `updates` pass is first in every plan: it is where the host's stores to
+    # declared `Buffer`s and `GPURef`s land (`Plan.hostwritten`), and it is
+    # scheduled ahead of everything that could read them.
+    @test r.scheduled == ["updates", "chain1", "chain2", "chain3", "branch1", "branch2"]
+
+    # The two independent branches still need ALIASING barriers. A recorded
+    # entry dependency covers updates and chain1; those no longer need duplicate
+    # first-use barriers. The actual chain and alias hazards remain pinned.
+    # Backend-aware, because a backend whose passes each commit their own command
+    # buffer on one queue is ordered by commit order and may derive nothing —
+    # `sync/backend.jl` asks exactly that of it, and reading the answer here rather
+    # than assuming one is the difference between a portable assertion and one
+    # backend's. Asked with a REAL pair of usages: a write followed by a read of the
+    # same buffer, which is the hazard this graph's chain is made of. Asked with
+    # `Any, Any` it only works while every method ignores its
+    # arguments — the portable rule in `sync/transition.jl` reads them.
+    W = M.Storage{M.BufferKind, M.Access{false, true}}
+    R = M.Storage{M.BufferKind, M.Access{true, false}}
+    derives = M.needs_transition(M.syncbackend(dev), M.BufferKind(), W, R)
+    expected = !derives ? falses(6) : M.ordered_entry(M.Compile(plan)) ?
+               Bool[false, false, true, true, true, true] : trues(6)
+    @test r.barriered == expected
+
+    # Pass indices are 1-based over the schedule above, so the update pass at
+    # position 1 shifts every transient's interval by one.
+    @test r.intervals == [(2, 3), (3, 4), (4, 4), (5, 5), (6, 6)]
+    M.free!(plan)
+end
+
+# ── KNOWN GAP: nothing above guards `Dag` ─────────────────────────────────────
+#
+# MEASURED 2026-08-07, by stubbing the phase out entirely:
+#
+#     Mantle.run!(::Mantle.Dag, c) =
+#         (Mantle.analysis(c).deps = [Int[] for _ in Mantle.passes(c)]; c)
+#
+# With the DAG finding NO dependencies at all, every assertion above still
+# passes — identical peak, order, barriers and intervals. So this file currently
+# proves nothing about `Dag`, and a refactor could break it silently.
+#
+# Why: `Dag` only ever makes pass j depend on an EARLIER-declared pass i
+# (`for j in eachindex(ps), i in 1:(j-1)`), so declaration order is by
+# construction a legal topological order, and `Overlap` prefers declaration
+# order. An empty DAG therefore schedules identically. Liveness intervals come
+# from `touch!` during graph construction, not from deps, so the peak does not
+# move either.
+#
+# A probe that declares the chain BACKWARDS and asserts the scheduler fixes it
+# is not here: it does not, and should not. The declaration is the program, as
+# in RPS.
+#
+# What discriminates is `Compact`, which actively reorders to save memory and so
+# needs the edges to know what it may not move past. That is the testset below.
+
+"""
+    buildtemptation(dev, big, small) -> Graph
+
+A graph `Compact` wants to schedule in an order the DAG forbids.
+
+`fill` writes a large transient: pure allocation, no free, the worst memory score
+available. `drain` reads it and writes a tiny one: it FREES the large buffer, so
+`Compact`'s memory term wants it first — and it is declared second, so even the
+declaration-order tiebreak does not rescue the right answer.
+
+Only the dependency stops it. That is the point: `buildprobe` cannot see a broken
+`Dag` (measured — see the note above), and neither can `buildprobe` under
+`Compact`: its two branches genuinely have no dependencies, so a correct DAG and
+an empty one agree, and both produce
+`["branch1", "branch2", "chain1", "chain2", "chain3"]`. Here they disagree.
+"""
+function buildtemptation(dev, big::Integer, small::Integer)
+    g = M.Graph(dev)
+    src = M.Buffer(dev, fill(1.0f0, big))
+    t = M.Transient.Buffer(g, Float32, big)
+    u = M.Transient.Buffer(g, Float32, small)
+    M.dispatch!(g, goldenscale!, (t,
+                                      src, 2.0f0), big; name = "fill")
+    M.dispatch!(g, goldenscale!, (u,
+                                      t, 3.0f0), small; name = "drain")
+    return g
+end
+
+"""
+The backend's compilation context, so a phase can be run and read on its own.
+
+`Plan` exposes only what a frame needs. Asserting a phase's OUTPUT means reaching
+the context it writes into, which is what `compile!(ctx, prefix)` was built for.
+"""
+compilectx(g; kw...) = Mantle.Compile(g; kw...)
+
+@testset "Dag: the edges themselves" begin
+    dev = M.Device(TESTBACKEND)
+    c = M.compile!(compilectx(buildtemptation(dev, 1 << 18, 1 << 4)), (M.Dag(),))
+    # "drain" reads what "fill" wrote. One edge, and it points backwards.
+    @test M.analysis(c).deps == [Int[], [1]]
+
+    c2 = M.compile!(compilectx(buildprobe(dev, 1 << 12)), (M.Dag(),))
+    # chain2 <- chain1, chain3 <- chain2. The two branches only READ `src`, and
+    # read-after-read is deliberately not an edge, so they depend on nothing.
+    @test M.analysis(c2).deps == [Int[], [1], [2], Int[], Int[]]
+end
+
+# Asserted directly, and not through the schedule, for a measured reason: THREE
+# attempts to observe `Dag` through `Schedule` all came back identical with the
+# phase stubbed out to find nothing.
+#
+#   buildprobe under Overlap  — same order, peak, barriers, intervals
+#   buildprobe under Compact  — same order (["branch1","branch2","chain1",…])
+#   buildtemptation, Compact  — same order (["fill","drain"])
+#
+# The last is the interesting one, built specifically so `Compact` would want to
+# hoist the pass that frees a megabyte. It does not: reading a
+# transient nothing has written yet counts that transient as an ALLOCATION in the
+# memory term, so the illegal order already scores worst. The scoring disfavours
+# illegal schedules on its own, which makes the edges nearly unobservable
+# downstream on graphs this size — and is why guarding `Dag` by pinning a
+# schedule is guarding nothing.
+
+@testset "Schedule: the order itself, and that the policy decides it" begin
+    dev = M.Device(TESTBACKEND)
+    prefix = (M.Dag(), M.Schedule())
+    order(g; kw...) = M.analysis(M.compile!(compilectx(g; kw...), prefix)).order
+
+    # Overlap prefers declaration order and there is nothing forcing it off.
+    @test order(buildprobe(dev, 1 << 12)) == [1, 2, 3, 4, 5]
+
+    # Compact prefers whatever frees more than it allocates, and reaches a
+    # DIFFERENT legal order on the same graph. Pinned exactly, because "they
+    # differ" alone would survive a scoring change that made them differ wrongly.
+    @test order(buildprobe(dev, 1 << 12); policy = M.Compact()) == [4, 5, 1, 2, 3]
+
+    # …and no policy may put `drain` before the `fill` it reads.
+    @test order(buildtemptation(dev, 1 << 18, 1 << 4); policy = M.Compact()) == [1, 2]
+end
+
+@testset "alias = false gives every transient the whole timeline" begin
+    dev = M.Device(TESTBACKEND)
+    g = buildprobe(dev, 1 << 16)
+    plan = M.Plan(g; alias = false)
+    # Nothing may share bytes, so the peak IS the naive sum — 5 x 65536 Float32.
+    # This is what guards `Liveness`: the intervals are the only thing `alias`
+    # changes, and if they stopped being derived from use this would still come
+    # back 524_288 like the aliased case.
+    @test M.peakbytes(plan) == 1_310_720
+end
+
+@testset "alias handovers respect bytes, lifetimes and arenas" begin
+    dev = M.Device(TESTBACKEND)
+    g = M.Graph(dev)
+    ts = [M.Transient.Buffer(g, Float32, 8), M.Transient.Buffer(g, UInt16, 8),
+          M.Transient.Buffer(g, UInt8, 16), M.Transient.Buffer(g, Float32, 4),
+          M.Transient.Buffer(g, UInt8, 8), M.Transient.Buffer(g, UInt8, 8)]
+    for (t, (a, b)) in zip(ts, [(1, 2), (3, 4), (2, 3), (5, 6), (7, 8), (9, 10)])
+        t.first, t.last = a, b
+    end
+    c = compilectx(g)
+    a = M.analysis(c)
+    a.offsets = [0, 16, 16, 32, 20, 0]
+    a.parts = Any[:first, :first, :first, :first, :first, :second]
+    M.run!(M.Aliasing(), c)
+    # 2 reuses the top half of 1; 5 reuses bytes of 1, 2 and 3. The live
+    # overlap of 2 and 3, adjacent bytes of 4, and separate arena of 6 add none.
+    @test a.alias_begins == Dict(3 => [(2, 1)], 7 => [(5, 1), (5, 2), (5, 3)])
+end
+
+@testset "hazards depend on the wait set and destination" begin
+    R = M.Storage{M.BufferKind,M.ReadOnly}
+    W = M.Storage{M.BufferKind,M.WriteOnly}
+    RW = M.Storage{M.BufferKind,M.ReadWrite}
+    ts = [M.Transition(1, R, Type[R, W], RW),
+          M.Transition(2, W, Type[W, R], RW),
+          M.Transition(3, R, Type[R, W], R),
+          M.Transition(4, R, Type[R], RW)]
+    hazards = M.barrierhazards(ts)
+    @test length(hazards) == 3
+    @test count(h -> h[2] === RW && issetequal(h[1], [R, W]), hazards) == 1
+    @test any(h -> h[2] === R && issetequal(h[1], [R, W]), hazards)
+    @test any(h -> h[2] === RW && h[1] == [R], hazards)
+end
+
+@testset "partially overlapping views survive replanning" begin
+    dev = M.Device(TESTBACKEND)
+    g = M.Graph(dev)
+    src = M.Buffer(dev, Float32.(1:16))
+    out = M.Buffer(dev, fill(NaN32, 16))
+    tmp = M.Transient.Buffer(g, Float32, 16)
+    window(b, offset) = M.ResourceView{Float32,1,typeof(b)}(b, (8,), offset)
+    M.dispatch!(g, goldenscale!, (tmp, src, 2f0), 16)
+    M.dispatch!(g, goldenscale!, (window(out, 0), window(tmp, 0), 3f0), 8)
+    M.dispatch!(g, goldenscale!, (window(out, 8), window(tmp, 4), 4f0), 8)
+    try
+        # The first compile interns segments of the overlapping ranges; the
+        # second must find those same segments without changing their hazards.
+        for _ in 1:2
+            plan = M.Plan(g)
+            try
+                M.record!(plan)
+                M.run!(plan)
+                @test Array(out) == vcat(6f0 .* (1:8), 8f0 .* (5:12))
+            finally
+                M.free!(plan)
+            end
+        end
+    finally
+        M.free!(src)
+        M.free!(out)
+    end
+end

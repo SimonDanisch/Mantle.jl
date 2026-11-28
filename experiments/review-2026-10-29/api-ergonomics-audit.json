@@ -1,0 +1,217 @@
+{
+  "date": "2026-10-29",
+  "scope": "Follow-up target API ergonomics/consistency audit; no runtime implementation/native passes; adaptation and returned-binding decisions superseded by explicit-routing-ruling.json",
+  "before_sha256": {
+    "api.md": "8709deb1deb2da816588da1a3be83f09c5ff30a0a2ec24276a9b6bf2bc065ffe",
+    "examples.jl": "a175796f2b4a4cab0d036e7a9b841c5704a0c9dff232b9b5269514a6d31d9518",
+    "execution-contracts.md": "b65f8d5a6b96ed485ddd0259be08402cfc2b35709dec672bb70be5a40776f57e",
+    "internals.jl": "a772cfef10525ee68d08dad159b8b220ad667474bbfaa3039c3533bd35fb17c6",
+    "recording-plan.md": "ea95cd2bcb52b1d03cd1cf1a5fa99562941b8e5e3ed168ed5e07ae683a30ef56",
+    "refactor-ledger.md": "1464834c5155dd4246e04a179ad35ced117c98091ae76ddd4cec7d974d6f3233",
+    "resizing-and-raytracing.jl": "2c9f37f4b07cb92796087d4ccd014eb1eeb6f0298f5d37ce05368820ef9cf6f4"
+  },
+  "before_archive": "api-audit-before.tar.gz",
+  "base_revision": "a30a423da24cfc841e09943b409ea091383f93cc",
+  "findings": [
+    {
+      "id": "AE-01",
+      "problem": "Readback(array) changed meaning after compilation",
+      "decision": "call!(target,Array,a) always declares a recorded position; Readback(previous_future) requests that output again. Standard eager Array(a) needs no new public eager readback future.",
+      "ledger": "F100",
+      "fixed_mwes": [
+        "MWE-01"
+      ],
+      "contracts": [
+        "docs/api.md",
+        "docs/execution-contracts.md"
+      ],
+      "acceptance": [
+        "Two recorded snapshots around a writer remain distinct before/after compilation; eager Array sees accepted work and never chooses a graph."
+      ],
+      "design_status": "superseded_by_user_routing_ruling",
+      "runtime_status": "open",
+      "superseded_decision": "Readback array forms always declare a new position; Readback(previous_future) alone reuses an output.",
+      "ruling": "explicit-routing-ruling.json"
+    },
+    {
+      "id": "AE-02",
+      "problem": "Pending readback requests were owned/cancelled by a retiring plan",
+      "decision": "Graph owns pending output IDs/requests; compatible replacement rebinds them, submitted futures retain old staging.",
+      "ledger": "F101",
+      "fixed_mwes": [
+        "MWE-01"
+      ],
+      "contracts": [
+        "docs/api.md",
+        "docs/execution-contracts.md",
+        "docs/internals.jl"
+      ],
+      "acceptance": [
+        "Request then grow/recompile then run: requested snapshot completes; submitted old snapshots remain intact; deletion/free rejects only unsubmitted requests."
+      ],
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open"
+    },
+    {
+      "id": "AE-03",
+      "problem": "Graph inspection had an eager-conversion detour and ambiguous host conversion semantics",
+      "decision": "Arrays own one Device. Eager Array needs no adaptation; a recorded position explicitly uses call!(Graph/Group,Array,a).",
+      "ledger": "F102",
+      "fixed_mwes": [
+        "MWE-01",
+        "MWE-07"
+      ],
+      "contracts": [
+        "docs/api.md",
+        "docs/recording-plan.md",
+        "docs/execution-contracts.md"
+      ],
+      "acceptance": [
+        "Use one array directly in two graphs; their recorded Array calls select their own positions; eager Array(a) never executes either graph."
+      ],
+      "design_status": "superseded_by_user_routing_ruling",
+      "runtime_status": "open",
+      "superseded_decision": "Graph-bound host conversions reject with Readback guidance; eager host snapshots remain direct; explicit Readback(graph,a) can inspect a retained same-domain root.",
+      "ruling": "explicit-routing-ruling.json"
+    },
+    {
+      "id": "AE-04",
+      "problem": "Scratch data initialization and snapshot/rebinding exceptions contradicted lifetime rules",
+      "decision": "Persistent data initializes once; explicit scratch initializer follows its construction region, while device identity never changes. Other regions reference it directly within valid lifetime.",
+      "ledger": "F103",
+      "fixed_mwes": [
+        "MWE-01"
+      ],
+      "contracts": [
+        "docs/api.md",
+        "docs/recording-plan.md",
+        "docs/execution-contracts.md",
+        "docs/resizing-and-raytracing.jl"
+      ],
+      "acceptance": [
+        "Scratch initialized per owner-region execution; explicit owner-local Readback holds independent staging; cross-run escape rejects."
+      ],
+      "design_status": "superseded_by_user_routing_ruling",
+      "runtime_status": "open",
+      "superseded_decision": "Persistent data initializes once; explicit scratch-data construction initializes each execution of its owner region, including repeated iterations; owner-local scratch snapshots and rebinding inside the same owning Graph/run is legal.",
+      "ruling": "explicit-routing-ruling.json"
+    },
+    {
+      "id": "AE-05",
+      "problem": "Image examples/signatures mixed zero-based mips, color/depth defaults and undocumented window overload",
+      "decision": "Julia one-based image views infer an appropriate aspect; document window constructor; color volume example uses RGBA, preserving existing Float32 depth convention.",
+      "ledger": "F104",
+      "fixed_mwes": [
+        "MWE-06"
+      ],
+      "contracts": [
+        "docs/api.md",
+        "docs/execution-contracts.md",
+        "docs/examples.jl"
+      ],
+      "acceptance": [
+        "Public mip 2 maps to native level 1 once; depth view never defaults ColorAspect; window extent refresh and color volume sample path qualify independently."
+      ],
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open"
+    },
+    {
+      "id": "AE-06",
+      "problem": "Inferred operation returned an eager destination after recording into a Group",
+      "decision": "The shared definition supplies returns: mul! returns C itself, recorded Array supplies a future; no Group-bound aliases, !-name inference or universal-future rule.",
+      "ledger": "F105",
+      "fixed_mwes": [
+        "MWE-04"
+      ],
+      "contracts": [
+        "docs/api.md",
+        "docs/execution-contracts.md",
+        "docs/internals.jl"
+      ],
+      "acceptance": [
+        "call!(group,mul!,C,A,B) returns C; its KA backend stays its owning device; a known ! definition with another return follows that definition; unsupported f never eager-executes."
+      ],
+      "design_status": "superseded_by_user_routing_ruling",
+      "runtime_status": "open",
+      "superseded_decision": "Both inferred and explicit-target entries return resolved-target aliases; original handles remain unchanged, broadcast forwards bound result.",
+      "ruling": "explicit-routing-ruling.json"
+    },
+    {
+      "id": "AE-07",
+      "problem": "Omitted keyword defaults were required in the literal API signatures",
+      "decision": "Document origin=nothing diagnostic default and hardware=nothing capability selection; explicit true requires hardware, false is software reference. Window, pipeline and ray-program optional defaults are explicit too.",
+      "ledger": "F106",
+      "fixed_mwes": [
+        "MWE-04",
+        "MWE-05"
+      ],
+      "contracts": [
+        "docs/api.md"
+      ],
+      "acceptance": [
+        "Existing no-origin dispatch and TLAS(dev) examples satisfy signatures; unsupported explicit hardware request fails before mutation."
+      ],
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open"
+    },
+    {
+      "id": "AE-08",
+      "problem": "Examples hid missing shape/initialization work and consumer helpers looked like Mantle API",
+      "decision": "Use app_* only for consumer helpers, actual window draw entry, deterministic sources, initialized simulation state and coherent full model resize. Import only LinearAlgebra.mul! to avoid its BLAS module colliding with Mantle.BLAS.",
+      "ledger": "F107",
+      "fixed_mwes": [
+        "MWE-01",
+        "MWE-02",
+        "MWE-04"
+      ],
+      "contracts": [
+        "docs/examples.jl",
+        "docs/resizing-and-raytracing.jl"
+      ],
+      "acceptance": [
+        "All sketches parse as Julia; growing model initializes new persistent elements and resizes weights/workspace before replay; no invented graph_array entry.",
+        "Public examples do not import the conflicting LinearAlgebra.BLAS export; unqualified call names are documented entries, Base/selected stdlib calls, local definitions or explicit app_* placeholders."
+      ],
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open"
+    },
+    {
+      "id": "AE-09",
+      "problem": "Zero-copy rebinding said same physical device rather than ownership domain",
+      "decision": "Same Device/context domain is required; a second driver for the same hardware is a different domain and needs explicit transport/import.",
+      "ledger": "F108",
+      "fixed_mwes": [
+        "MWE-07"
+      ],
+      "contracts": [
+        "docs/api.md",
+        "docs/internals.jl"
+      ],
+      "acceptance": [
+        "Reject same-physical-GPU different-driver alias; retain supported same-domain imports/aliases with canonical roots."
+      ],
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open"
+    },
+    {
+      "id": "AE-10",
+      "problem": "Unrequested readback outputs could continue transferring capacity-sized payloads",
+      "decision": "Core omits or gates unrequested payload transfers using existing region/segment machinery, without exponential output-subset recordings.",
+      "ledger": "F109",
+      "fixed_mwes": [
+        "MWE-01",
+        "MWE-08"
+      ],
+      "contracts": [
+        "docs/execution-contracts.md",
+        "docs/recording-plan.md"
+      ],
+      "acceptance": [
+        "Requested snapshot copies matching bytes/size; next run with no request copies zero payload bytes; report bounded control cost and recording/cache size across output counts."
+      ],
+      "design_status": "reconciled_in_target_documents",
+      "runtime_status": "open"
+    }
+  ],
+  "superseding_user_ruling": "explicit-routing-ruling.json"
+}

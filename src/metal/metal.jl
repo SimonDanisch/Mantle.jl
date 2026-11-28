@@ -1,0 +1,93 @@
+# Mantle's Metal backend, beside `src/vulkan/`. It needs neither Lava nor SPIR-V:
+# Metal.jl compiles the kernels.
+#
+# Metal buffers have no usage flags, only a storage mode, so the storage mode is
+# the only constraint on sharing. On Apple silicon `Shared` memory is unified, so
+# `upload!` is a `copyto!` without staging or barriers. One `MTLSharedEvent`
+# counts submissions and backs `fence`/`passed`/`waitfor`.
+
+using Metal
+using Metal: MtlArray
+# Device intrinsics must be `@device_override`s, not plain methods: `KI.barrier`
+# has a host method that errors, and a plain method would replace it on the host.
+using Metal: @device_override
+# Core owns the GLFW window; `@objc`/`id` put a `CAMetalLayer` on its view.
+# ObjectiveC 7 gives each `@objc` call its own autorelease pool and Metal.jl returns
+# retained wrappers, so builds must not be wrapped in a global `@autoreleasepool`.
+using Metal.ObjectiveC: @objc, id
+# `MTLSetReportFailureBlock` is looked up by name and receives an `NSString` block (`debug.jl`).
+import Libdl
+using Metal.ObjectiveC: @objcblock
+using Metal.ObjectiveC.Foundation: NSString, NSBlock
+const OCObject = Metal.ObjectiveC.Object
+const MTL = Metal.MTL
+
+include("bindings/bindings.jl")
+include("intrinsics/intrinsics.jl")
+include("device.jl")
+include("debug.jl")
+include("memory.jl")
+include("caps.jl")
+include("kernelinterface.jl")
+include("device_intrinsics.jl")
+include("linalg/linalg.jl")
+include("ka.jl")
+include("raytracing.jl")
+# After raytracing.jl: needs `MetalTLAS` and `MetalBLAS`.
+include("hwtlas.jl")
+
+include("compiler/compiler.jl")
+include("graphics.jl")
+
+# After graphics.jl: needs its stage wrappers and the stage compiler.
+include("mesh.jl")
+# After graphics.jl: needs its `nativeformat` table.
+include("images.jl")
+# After graphics.jl: needs its `nativeformat` table, `framebuffer!` and `commit!`.
+include("window.jl")
+
+# Last: recording a plan into an indirect command buffer needs every other file.
+include("record.jl")
+
+# No pipeline thread: Metal.jl compiles on the calling thread. Core's exit hook
+# retires every device (`retireall!`).
+function Mantle.initbackend!(::MetalAPI)
+    building = ccall(:jl_generating_output, Cint, ()) != 0
+    # Metal.jl's `__init__` loads CoreGraphics and MetalPerformanceShadersGraph, but
+    # returns before that while a package image is built, and a dependent's workload
+    # that reaches a GEMM stopped at "Couldn't find class MPSGraph". QuartzCore holds
+    # `CAMetalLayer` (`window.jl`), which Metal.jl never loads.
+    frameworks = building ? ("CoreGraphics", "MetalPerformanceShadersGraph", "QuartzCore") : ("QuartzCore",)
+    foreach(loadframework, frameworks)
+    register_backend!(; name = :metal, priority = 90) do
+        # `functional` answers false while a package image is built, because Metal.jl's
+        # `__init__` stops early there. A workload has the device all the same, and
+        # without it every runner's workload was skipped and its first call compiled.
+        (building ? !isempty(Metal.devices()) : Metal.functional()) ? Device(MetalAPI()) : nothing
+    end
+    return nothing
+end
+
+"""Load a system framework, so that the Objective-C classes it defines resolve."""
+loadframework(name::AbstractString) =
+    (Libdl.dlopen("/System/Library/Frameworks/$name.framework/$name"); nothing)
+
+# `staged_gemm_tile` is core's (`array/gemm.jl`); a method here would be an
+# overwrite. Metal devices decline the staged GEMM by their 8x8 `caps` tile.
+
+# Metal counts compilations of compute kernels and render stages. A total for cache
+# hits also needs Metal's compute lookup counter, when the loaded version exposes it.
+metal_cache_hits() = @static if isdefined(Metal, :cache_hits)
+    Metal.cache_hits[] + METAL.stagehits[]
+else
+    missing
+end
+
+kernelcompiles(::MetalDevice) = (; hits = metal_cache_hits() - METAL.hitbase,
+                                   misses = Metal.compilations[] - METAL.compilebase)
+function resetkernelcompiles!(::MetalDevice)
+    METAL.compilebase = Metal.compilations[]
+    METAL.hitbase = coalesce(metal_cache_hits(), 0)
+    return nothing
+end
+kerneloverlays(::MetalDevice) = Metal.method_table

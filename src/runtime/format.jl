@@ -1,39 +1,74 @@
-"""
-Pixel formats are element types, not an enum.
+# Pixel formats are element types, not an enum: `RGBA{Float16}` names
+# `R16G16B16A16_SFLOAT` in a type kernels, `fill!` and readback can use.
+# ColorTypes' layouts match the backends' byte for byte (`RGBA{N0f8}`/`BGRA{N0f8}`
+# 8-bit UNORM, `RGBA{Float16}`/`RGBA{Float32}` float, `Float32` as 32-bit depth,
+# `UInt32` 32-bit unsigned, `SVector{2,UInt32}` two of those). sRGB changes
+# conversion, not memory, so it is an image keyword; depth is the `Depth` usage.
+# Core owns which element types are pixels and the rules on them; a backend only
+# names its value for each (`nativeformat`).
 
-`Transient.Image(g, RGBA{Float16}, (w, h))` says the same thing as
-`VK_FORMAT_R16G16B16A16_SFLOAT` and says it in a type a kernel can compute with,
-`fill!` can write, and readback can return an array of. A parallel enum would be
-a second name for something Julia already names, and the two would drift.
-
-ColorTypes' layouts match Vulkan's byte for byte, which is what makes this work
-rather than merely read well:
-
-| element type    | bytes | Vulkan                          |
-|-----------------|-------|---------------------------------|
-| `RGBA{N0f8}`    | 4     | `R8G8B8A8_UNORM`                |
-| `BGRA{N0f8}`    | 4     | `B8G8R8A8_UNORM`                |
-| `RGBA{Float16}` | 8     | `R16G16B16A16_SFLOAT`           |
-| `RGBA{Float32}` | 16    | `R32G32B32A32_SFLOAT`           |
-| `Float32`       | 4     | `D32_SFLOAT` as a depth target  |
-
-The one thing an element type cannot express is sRGB: `B8G8R8A8_SRGB` and
-`B8G8R8A8_UNORM` have identical memory and differ only in how the hardware
-converts on read and write. That is a property of the image, so it is a keyword
-on the image and not part of the type.
-
-Depth is not a separate format vocabulary either. `Float32` is the element type;
-what makes an attachment a depth attachment is the `Depth` usage it is declared
-with, which the sync vocabulary already carries.
-"""
-
-"""Bytes one pixel occupies. `sizeof` is the answer for every format whose
-element type is its layout, which is all of them."""
+"""Bytes one pixel occupies: `sizeof` of its element type, which is its layout."""
 pixelbytes(::Type{T}) where {T} = sizeof(T)
 
 """
-    vkformat(backend, T; srgb = false) -> backend format
-
-Implemented in the backend extension, which is the only place a format is named.
+The pixel layout an element type names. The tuple spellings portable shaders
+write are the colour types of the same layout.
 """
-function vkformat end
+pixeltype(::Type{T}) where {T} = T
+pixeltype(::Type{NTuple{4,UInt8}}) = RGBA{N0f8}
+pixeltype(::Type{NTuple{4,Float16}}) = RGBA{Float16}
+pixeltype(::Type{NTuple{4,Float32}}) = RGBA{Float32}
+pixeltype(::Type{<:StaticVector{2,UInt32}}) = SVector{2,UInt32}
+
+"""
+What `Float32` names as a render target: a 32-bit float depth attachment, since no
+backend renders into a single-channel float colour target the way it tests depth.
+"""
+struct Depth32 end
+
+"""Whether `P` has an sRGB form: sRGB encodes 8-bit colour only."""
+hassrgb(::Type{P}) where {P} = P <: Union{RGBA{N0f8},BGRA{N0f8}}
+
+"""
+    pixelformat(api, T; srgb = false) -> native format
+
+The backend's format for render targets and images of element type `T`; `Float32`
+is depth. `srgb` picks the encoding form, which only 8-bit colour has.
+"""
+function pixelformat(api::Backend, ::Type{T}; srgb::Bool = false) where {T}
+    P = T === Float32 ? Depth32 : pixeltype(T)
+    srgb && !hassrgb(P) && throw(ArgumentError(
+        "there is no sRGB format for $T: sRGB encodes 8-bit colour only"))
+    return nativeformat(api, P, srgb)
+end
+
+"""
+    sampledformat(api, T) -> native format
+
+The backend's format for a sampled texture of `T`: as [`pixelformat`](@ref), except
+that a scalar float is a colour channel, since a sampler rejects depth.
+"""
+sampledformat(api::Backend, ::Type{T}) where {T} = nativeformat(api, pixeltype(T), false)
+
+"""
+    nativeformat(api, P, srgb) -> native format
+
+A backend's value for the pixel layout `P` ([`pixeltype`](@ref), or [`Depth32`](@ref)),
+in its sRGB form if `srgb`, which core has checked `P` has.
+"""
+nativeformat(api::Backend, ::Type{P}, srgb::Bool) where {P} = throw(ArgumentError(
+    "$(nameof(typeof(api))) has no pixel format for $P"))
+
+"""
+    eltypefor(api, f) -> Type
+
+The element type whose [`pixelformat`](@ref) is the native format `f`, in its plain
+or sRGB form: sRGB and UNORM share a memory layout, so both read back as the same
+colorant.
+"""
+function eltypefor(api::Backend, f)
+    for T in (BGRA{N0f8}, RGBA{N0f8}, RGBA{Float16}, RGBA{Float32}, Float32, UInt32, SVector{2,UInt32})
+        (pixelformat(api, T) == f || hassrgb(T) && pixelformat(api, T; srgb = true) == f) && return T
+    end
+    throw(ArgumentError("no Julia element type is registered for the format $f"))
+end

@@ -1,0 +1,7 @@
+device	path	baseline	launches	old_bytes	new_bytes	old_drained	new_drained
+AMD Radeon RX 7900 XTX (RADV NAVI31)	diagonal-left	b06b12c	100	62144	57344	496	496
+AMD Radeon RX 7900 XTX (RADV NAVI31)	diagonal-right	b06b12c	100	62208	57408	528	528
+AMD Radeon RX 7900 XTX (RADV NAVI31)	diagonal-both	b06b12c	100	95904	95904	864	864
+NVIDIA RTX 4000 Ada Generation	diagonal-left	b06b12c	100	52800	47872	496	496
+NVIDIA RTX 4000 Ada Generation	diagonal-right	b06b12c	100	62208	57408	528	528
+NVIDIA RTX 4000 Ada Generation	diagonal-both	b06b12c	100	95904	95904	864	864
