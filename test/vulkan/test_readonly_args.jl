@@ -87,11 +87,8 @@ end
     tt = Tuple{map(a -> M.devicetype(dev, a), (dst, src))...}
     job = Lava.lava_kernel_job(ro_one_inference!, tt; workgroup_size = (64, 1, 1),
                                features = dev.features, readonly = mask)
-    interp = GPUCompiler.get_interpreter(job)
-    world = GPUCompiler.get_inference_world(interp)
-    cache = Core.Compiler.WorldView(Core.Compiler.code_cache(interp), world, world)
     # Before compiling: the walk inferred the very signature the compile infers.
-    @test Core.Compiler.haskey(cache, job.source)
+    @test GPUCompiler.lookup_ci(GPUCompiler.cache_owner(job), job.source, job.world, job.world) !== nothing
     KI.@launch dev ndrange=16 ro_one_inference!(dst, src)
     @test Array(dst) == 2f0 .* Float32.(1:16)
 end
