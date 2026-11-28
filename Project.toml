@@ -42,7 +42,7 @@ MantleROCmExt = "AMDGPU"
 # GPUArrays 12.3.0 with capability-aware union-array conformance tests.
 GPUArrays = {url = "https://github.com/SimonDanisch/GPUArrays.jl", rev = "7290db5ea73f8e5f60da6f2306eee38a7b4eeb4b"}
 Hikari = {url = "https://github.com/JuliaGraphics/Hikari.jl", rev = "d9ef5fc0ce71166cd667c9940e2c76146db22959"}
-Lava = {url = "https://github.com/SimonDanisch/Lava.jl", rev = "43acea69131ce78f760473c7a76f98cfae1ab307"}
+Lava = {url = "https://github.com/SimonDanisch/Lava.jl", rev = "d314b2dea052e7f3cce72e43069faa75afc831d3"}
 # The graphics compiler uses Metal.jl's stage compiler extension API.
 Metal = {url = "https://github.com/JuliaGPU/Metal.jl", rev = "main"}
 Raycore = {url = "https://github.com/JuliaGeometry/Raycore.jl", rev = "master"}
