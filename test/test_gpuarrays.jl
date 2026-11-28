@@ -40,8 +40,6 @@ function count_results(ts::Test.DefaultTestSet)
         if r isa Test.DefaultTestSet
             sub = count_results(r)
             pass += sub[1]; fail += sub[2]; err += sub[3]; broken += sub[4]
-        elseif r isa Test.Pass
-            pass += 1
         elseif r isa Test.Fail
             fail += 1
         elseif r isa Test.Error

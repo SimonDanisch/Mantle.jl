@@ -1,4 +1,6 @@
 const TEST_LAVAPIPE = get(ENV, "MANTLE_TEST_LAVAPIPE", "false") == "true"
+const TEST_METAL = get(ENV, "MANTLE_TEST_METAL", "false") == "true"
+const TEST_SOFTWARE_MESH = get(ENV, "MANTLE_TEST_SOFTWARE_MESH", "false") == "true"
 if TEST_LAVAPIPE
     using Lavapipe_jll
     ENV["VK_DRIVER_FILES"] = Lavapipe_jll.lvp_icd
@@ -7,7 +9,19 @@ end
 
 using Mantle, Test
 
+if TEST_METAL
+    import Metal
+    Metal.functional() || error("Metal CI requires a usable Metal device")
+    availablebackends() == [:metal] || error("Metal CI requires Metal as the sole backend")
+    Metal.versioninfo()
+    if !TEST_SOFTWARE_MESH
+        reason = Metal.metal4_unsupported_reason(Metal.device())
+        reason === nothing || error("Full Metal CI requires the Metal 4 command API: $reason.")
+    end
+end
+
 include(joinpath(@__DIR__, "backend_probe.jl"))
+include(joinpath(@__DIR__, "test_inventory.jl"))
 
 # Loadable AND registered. Loadability alone stopped being the question when
 # VulkanCore, Vulkan and Lava were made to compile NOTHING on a platform with no
@@ -32,6 +46,13 @@ if TEST_LAVAPIPE
     name = Mantle.devicename(device)
     occursin("llvmpipe", lowercase(name)) || error("Expected Lavapipe, selected $name")
 end
+
+if TEST_SOFTWARE_MESH
+    @testset "Mantle mesh fallback" begin
+        include(joinpath(@__DIR__, "test_software_mesh.jl"))
+        save_test_inventory("suite")
+    end
+else
 
 # BOTH backends are probed here, before anything runs.
 #
@@ -610,6 +631,7 @@ include(joinpath(@__DIR__, "test_isubd_mesh.jl"))
 # gates itself on the capability, so the same assertions run on every backend
 # that has it. Both were found by RayMakie's RASTER mode on a Mac.
 include(joinpath(@__DIR__, "test_mesh_pipeline_graph.jl"))
+include(joinpath(@__DIR__, "test_software_mesh.jl"))
 include(joinpath(@__DIR__, "test_discard.jl"))
 include(joinpath(@__DIR__, "test_headless_rebindable_draw.jl"))
 # A shader drawn after a method it inlines was redefined (Revise).
@@ -930,6 +952,7 @@ foreachbackend(joinpath(@__DIR__, "test_graphics_pipeline.jl"))
 foreachbackend(joinpath(@__DIR__, "test_video_decode.jl"))
 
 foreachbackend(joinpath(@__DIR__, "test_access_kernels.jl"))
+foreachbackend(joinpath(@__DIR__, "test_readonly_args.jl"))
 # What the access walk says a dispatch only reads compiles as read-only memory, at the walked types.
 _VULKAN_OK && foreachbackend(joinpath(@__DIR__, "vulkan", "test_readonly_args.jl"))
 _VULKAN_OK && foreachbackend(joinpath(@__DIR__, "vulkan", "test_pipeline_cache_merge.jl"))
@@ -1008,7 +1031,11 @@ else
             isempty(found) && error("child: no backend named $bename here; loaded: " *
                                     string(collect(Mantle.eachbackend())))
             @eval Main MANTLE_TEST_BACKEND = \$(only(found))
-            include($(repr(joinpath(@__DIR__, wf))))"""
+            include($(repr(joinpath(@__DIR__, "test_inventory.jl"))))
+            @testset $(repr(wf)) begin
+                include($(repr(joinpath(@__DIR__, wf))))
+                save_test_inventory()
+            end"""
         cmd = `$(Base.julia_cmd()) --project=$(Base.active_project()) -e $child`
         # `append`: both streams name one file, and opened twice without it each
         # writes from offset 0 over the other, so the log read on failure was garbled.
@@ -1060,4 +1087,6 @@ else
 end
 
 
+save_test_inventory("suite")
 end  # @testset "Mantle.jl"
+end  # full suite

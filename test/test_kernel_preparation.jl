@@ -23,6 +23,36 @@ end
     Mantle.runlaunches!(be, (Mantle.ArrayLaunch(preparation_group!, (out,), 64),))
     @test all(>(0), Array(out))
 end
+
+KernelAbstractions.@kernel function short_range_index!(out, ::Val{seed}) where {seed}
+    i = @index(Global)
+    @inbounds out[i] = Int32(i) + seed
+end
+
+@testset "changing a short launch range reuses the compiled kernel" begin
+    dev = Mantle.Device(TESTBACKEND)
+    seed = rand(Int32(1000):Int32(1_000_000))
+    lengths = (3, 5, 9, 17, 33)
+    outputs = [Mantle.devicearray(dev, zeros(Int32, n + 1)) for n in lengths]
+    try
+        Mantle.resetkernelcompiles!(dev)
+        Mantle.runlaunches!(dev, (Mantle.ArrayLaunch(short_range_index!,
+            (first(outputs), Val(seed)), first(lengths)),))
+        misses = Mantle.kernelcompiles(dev).misses
+        @test misses > 0
+        for (out, n) in zip(outputs[2:end], lengths[2:end])
+            Mantle.runlaunches!(dev, (Mantle.ArrayLaunch(short_range_index!,
+                (out, Val(seed)), n),))
+        end
+        @test Mantle.kernelcompiles(dev).misses == misses
+        for (out, n) in zip(outputs, lengths)
+            @test Array(out) == [seed .+ Int32.(1:n); Int32(0)]
+        end
+    finally
+        Mantle.waitidle(dev)
+    end
+end
+
 struct PreparationDevice <: Mantle.Device
     launches::Vector{Any}
 end
