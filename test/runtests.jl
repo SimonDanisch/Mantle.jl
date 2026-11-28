@@ -1,4 +1,5 @@
 const TEST_LAVAPIPE = get(ENV, "MANTLE_TEST_LAVAPIPE", "false") == "true"
+const TEST_METAL = get(ENV, "MANTLE_TEST_METAL", "false") == "true"
 if TEST_LAVAPIPE
     using Lavapipe_jll
     ENV["VK_DRIVER_FILES"] = Lavapipe_jll.lvp_icd
@@ -7,7 +8,15 @@ end
 
 using Mantle, Test
 
+if TEST_METAL
+    import Metal
+    Metal.functional() || error("Metal CI requires a usable Metal device")
+    availablebackends() == [:metal] || error("Metal CI requires Metal as the sole backend")
+    Metal.versioninfo()
+end
+
 include(joinpath(@__DIR__, "backend_probe.jl"))
+include(joinpath(@__DIR__, "test_inventory.jl"))
 
 # Loadable AND registered. Loadability alone stopped being the question when
 # VulkanCore, Vulkan and Lava were made to compile NOTHING on a platform with no
@@ -1008,7 +1017,11 @@ else
             isempty(found) && error("child: no backend named $bename here; loaded: " *
                                     string(collect(Mantle.eachbackend())))
             @eval Main MANTLE_TEST_BACKEND = \$(only(found))
-            include($(repr(joinpath(@__DIR__, wf))))"""
+            include($(repr(joinpath(@__DIR__, "test_inventory.jl"))))
+            @testset $(repr(wf)) begin
+                include($(repr(joinpath(@__DIR__, wf))))
+                save_test_inventory()
+            end"""
         cmd = `$(Base.julia_cmd()) --project=$(Base.active_project()) -e $child`
         # `append`: both streams name one file, and opened twice without it each
         # writes from offset 0 over the other, so the log read on failure was garbled.
@@ -1060,4 +1073,5 @@ else
 end
 
 
+save_test_inventory("suite")
 end  # @testset "Mantle.jl"

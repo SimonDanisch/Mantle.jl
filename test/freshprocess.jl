@@ -27,8 +27,21 @@ function infreshprocess(code::AbstractString; before::AbstractString = "", debug
     script = string(before, "\n",
                     "using Mantle, KernelAbstractions, Test\n",
                     "const KA = KernelAbstractions\n",
-                    "const BACKEND = Mantle.eachbackend()[", i, "]\n",
-                    code)
+                    "const BACKEND = Mantle.eachbackend()[", i, "]\n")
+    if isempty(get(ENV, "MANTLE_TEST_INVENTORY", ""))
+        script *= code
+    else
+        inventory = joinpath(@__DIR__, "test_inventory.jl")
+        source = Test.get_testset().file
+        filename = source === nothing ? "subprocess.jl" : basename(source) * " subprocess"
+        script *= """
+            include($(repr(inventory)))
+            @testset "Subprocess tests" begin
+                include_string(Main, $(repr(code)), $(repr(filename)))
+                save_test_inventory()
+            end
+            """
+    end
     env = debug === nothing ? Pair{String,String}[] : Mantle.debugenv(TESTBACKEND, debug)
     cmd = addenv(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`, env...)
     out = IOBuffer()
