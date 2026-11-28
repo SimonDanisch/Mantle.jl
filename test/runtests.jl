@@ -13,6 +13,10 @@ if TEST_METAL
     Metal.functional() || error("Metal CI requires a usable Metal device")
     availablebackends() == [:metal] || error("Metal CI requires Metal as the sole backend")
     Metal.versioninfo()
+    supports_mesh_pipeline(Mantle.Device()) ||
+        error("Metal CI requires mesh shading. $(Metal.device().name) lacks Apple GPU family 7.")
+    reason = Metal.metal4_unsupported_reason(Metal.device())
+    reason === nothing || error("Metal CI requires the Metal 4 command API: $reason.")
 end
 
 include(joinpath(@__DIR__, "backend_probe.jl"))

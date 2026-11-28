@@ -224,6 +224,8 @@ function compile_pipeline(d::MetalDevice, p::Mantle.MeshPipeline,
                           color_formats::Vector{MTL.MTLPixelFormat},
                           depth_format::Union{Nothing,MTL.MTLPixelFormat},
                           mesh_bufs::Type, frag_bufs::Type)
+    Mantle.supports_mesh_pipeline(d) || throw(ArgumentError(
+        "this Metal device does not support mesh shading (requires Apple GPU family 7 or later)"))
     dev = d.dev
     cfg = Mantle.meshconfig(p)
     Obj = mesh_object_of(p)
@@ -272,7 +274,7 @@ end
 # `draw!` is core's (`graphics/record.jl`), over `compile_draw` and `record_draw!`.
 
 
-Mantle.supports_mesh_pipeline(::MetalDevice) = true
+Mantle.supports_mesh_pipeline(d::MetalDevice) = MTL.supports_family(d.dev, MTL.MTLGPUFamilyApple7)
 
 # Geometry pipelines run as mesh pipelines via `Mantle.lower_geometry_to_mesh`,
 # so `supports_geometry_stage` is `false` and the same `GraphicsPipeline` still draws.
