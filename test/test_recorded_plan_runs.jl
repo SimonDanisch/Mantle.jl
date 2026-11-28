@@ -445,8 +445,13 @@ end
     if table === nothing
         @test_skip table !== nothing
     else
-        overlapping = filter(m -> iszero((@atomic m.dispatch_status) & Base.StaticData.METHOD_SIG_LATEST_ONLY),
-                             Base.MethodList(table).ms)
+        overlays = Base.MethodList(table).ms
+        overlapping = @static if VERSION >= v"1.14-"
+            filter(m -> !isempty(m.interferences), overlays)
+        else
+            reinfer = isdefined(Base, :ReinferUtils) ? Base.ReinferUtils : Base.StaticData
+            filter(m -> iszero((@atomic m.dispatch_status) & reinfer.METHOD_SIG_LATEST_ONLY), overlays)
+        end
         @test isempty(overlapping)
         isempty(overlapping) || @error "overlays that overlap" overlapping
     end
