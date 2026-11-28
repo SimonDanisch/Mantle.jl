@@ -820,6 +820,11 @@ draw!(p::PassHandle, shader, b::DrawBinding; frag_args = (), viewport = nothing,
 function draw!(p::PassHandle, shader, args, n; frag_args = (),
                viewport = nothing, scissor = nothing, bindings = nothing, indices = nothing,
                instances::Integer = 1)
+    dev = graphof(p).dev
+    if uses_mesh_fallback(dev, shader)
+        return draw_software_mesh!(p, shader, args, n;
+                                    frag_args, viewport, scissor, bindings, indices, instances)
+    end
     # A rebindable cell's contents are what the shader receives and what the
     # draw touches; rebinding keeps the same types and resources.
     va = drawargs(args)
@@ -834,7 +839,6 @@ function draw!(p::PassHandle, shader, args, n; frag_args = (),
         "pipeline has one push constant range. Put them on the stage that reads " *
         "them and pass what the other needs as a varying, or give both stages the " *
         "same list."))
-    dev = graphof(p).dev
     isempty(va) || declare!(p, va, vertextouches(dev, shader, va))
     isempty(frag_args) || declare!(p, frag_args, fragmenttouches(dev, shader, frag_args))
     push!(p.pass.draws, DrawCall(shader, args, drawover(p, n), frag_args,

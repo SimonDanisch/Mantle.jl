@@ -224,7 +224,7 @@ function compile_pipeline(d::MetalDevice, p::Mantle.MeshPipeline,
                           color_formats::Vector{MTL.MTLPixelFormat},
                           depth_format::Union{Nothing,MTL.MTLPixelFormat},
                           mesh_bufs::Type, frag_bufs::Type)
-    Mantle.supports_mesh_pipeline(d) || throw(ArgumentError(
+    native_mesh_shading(d) || throw(ArgumentError(
         "this Metal device does not support mesh shading (requires Apple GPU family 7 or later)"))
     dev = d.dev
     cfg = Mantle.meshconfig(p)
@@ -274,7 +274,16 @@ end
 # `draw!` is core's (`graphics/record.jl`), over `compile_draw` and `record_draw!`.
 
 
-Mantle.supports_mesh_pipeline(d::MetalDevice) = MTL.supports_family(d.dev, MTL.MTLGPUFamilyApple7)
+native_mesh_shading(d::MetalDevice) = MTL.supports_family(d.dev, MTL.MTLGPUFamilyApple7)
+Mantle.supports_mesh_pipeline(::MetalDevice) = true
+Mantle.uses_mesh_fallback(d::MetalDevice, ::Union{Mantle.MeshPipeline,Mantle.GeometryPipeline}) =
+    !native_mesh_shading(d)
+
+# The compute version uses the same one-based coordinates as a native mesh stage.
+Base.Experimental.@overlay Metal.method_table Lava.mesh_thread_index() =
+    Int32(Metal.thread_index_in_threadgroup())
+Base.Experimental.@overlay Metal.method_table Lava.mesh_group_index() =
+    Int32(Metal.threadgroup_position_in_grid().x)
 
 # Geometry pipelines run as mesh pipelines via `Mantle.lower_geometry_to_mesh`,
 # so `supports_geometry_stage` is `false` and the same `GraphicsPipeline` still draws.
