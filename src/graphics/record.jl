@@ -182,6 +182,10 @@ function draw!(device, pipeline::Union{GraphicsPipeline, MeshPipeline},
                depth_clear::Union{Nothing, Float32} = 1f0,
                indices = nothing, bindings = nothing)
     dev = todevice(device)
+    if uses_mesh_fallback(dev, pipeline)
+        return draw_software_mesh!(dev, pipeline, target, count;
+                                    args, frag_args, instances, clear_color, depth_clear, indices, bindings)
+    end
     # Manual draws resolve arguments here; graph draws resolve them during placement.
     args = argmap(a -> resolve(dev, a), args)
     frag_args = argmap(a -> resolve(dev, a), frag_args)

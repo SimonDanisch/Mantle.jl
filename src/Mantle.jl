@@ -148,6 +148,7 @@ include("raytracing/api.jl")
 
 # Needs resources, graphics commands and backend hooks above.
 include("graph/build.jl")
+include("graphics/mesh_fallback.jl")
 # KernelAbstractions plan execution; Vulkan overrides it with native recording.
 include("graph/readback.jl")
 include("graph/kalaunch.jl")
