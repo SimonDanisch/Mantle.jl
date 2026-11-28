@@ -11,6 +11,7 @@ struct SoftwareMeshOutput{V,P,F,C}
     group::Int32
     vertex_base::Int32
     primitive_base::Int32
+    max_primitives::Int32
 end
 
 @inline mesh_output_value(a, v) = eltype(a)(NamedTuple{fieldnames(eltype(a))}(v))
@@ -24,7 +25,10 @@ end
         # explicit primitive writer instead.
         s = Int32(slot) - Int32(1)
         arity = Int32(fieldcount(eltype(o.primitives)))
-        s % arity == 0 && Lava.set_mesh_primitive_data!(o, s ÷ arity + Int32(1), flat)
+        if s % arity == 0
+            p = s ÷ arity + Int32(1)
+            p <= o.max_primitives && Lava.set_mesh_primitive_data!(o, p, flat)
+        end
     end
     return nothing
 end
@@ -65,7 +69,7 @@ function expand_mesh!(program, vertices, primitives, flat, counts, maxv::Int32, 
                       args::Vararg{Any,N}) where {N}
     group = Int32(KI.get_group_id().x)
     base = group - Int32(1)
-    out = SoftwareMeshOutput(vertices, primitives, flat, counts, group, base * maxv, base * maxp)
+    out = SoftwareMeshOutput(vertices, primitives, flat, counts, group, base * maxv, base * maxp, maxp)
     splatcall(program, (out,), args)
     return nothing
 end
@@ -103,7 +107,10 @@ mesh_list_topology(::Union{TriangleList,TriangleStrip}) = TriangleList()
 mesh_list_topology(::Union{LineList,LineStrip}) = LineList()
 mesh_list_topology(::PointList) = PointList()
 
-function software_mesh_stages(allocate, p::MeshPipeline, groups::Int, fragargs)
+function software_mesh_stages(allocate, dev, p::MeshPipeline, groups::Int, fragargs)
+    maxgroups = first(KI.max_num_groups(dev))
+    groups <= maxgroups || throw(ArgumentError(
+        "software mesh drawing supports at most $maxgroups groups per draw, got $groups"))
     m = p.mesh
     cfg = meshconfig(p)
     maxv, maxp = Int32(cfg.max_vertices), Int32(cfg.max_primitives)
@@ -134,7 +141,7 @@ function software_mesh_stages(allocate, p::MeshPipeline, groups::Int, fragargs)
             lanes = Base.checked_mul(groups, cfg.threads), threads = cfg.threads)
 end
 
-function mesh_dispatch(p::MeshPipeline, args, groups, indices, instances)
+function mesh_dispatch(dev, p::MeshPipeline, args, groups, indices, instances)
     groups isa Integer || throw(ArgumentError("software mesh drawing requires an integer group count"))
     groups >= 0 || throw(ArgumentError("mesh group count must be nonnegative"))
     instances == 1 || throw(ArgumentError("software mesh drawing takes one instance per draw"))
@@ -142,10 +149,11 @@ function mesh_dispatch(p::MeshPipeline, args, groups, indices, instances)
     return p, args, Int(groups)
 end
 
-function mesh_dispatch(p::GeometryPipeline, args, count, indices, instances)
+function mesh_dispatch(dev, p::GeometryPipeline, args, count, indices, instances)
     count isa Integer || throw(ArgumentError("software geometry drawing requires an integer count"))
     count >= 0 || throw(ArgumentError("vertex count must be nonnegative"))
-    instances == 1 || throw(ArgumentError("software geometry drawing takes one instance per draw"))
+    instances == 1 || error("a lowered geometry pipeline draws one instance per draw, got $instances")
+    requirevertexindex(stagefunction(p.vertex), devicetype(dev, args))
     mesh = lower_geometry_to_mesh(p; indexed = indices !== nothing)
     indices === nothing || count <= length(indices) || throw(BoundsError(indices, count))
     meshargs = indices === nothing ? args : (args..., indices)
@@ -155,11 +163,11 @@ end
 function draw_software_mesh!(h::PassHandle, shader, args, count;
                              frag_args, viewport, scissor, bindings, indices, instances)
     args isa DrawBinding && throw(ArgumentError("software mesh drawing requires fixed draw arguments"))
-    mesh, meshargs, groups = mesh_dispatch(shader, args, count, indices, instances)
-    checkstages(h.graph.dev, mesh)
-    groups == 0 && return nothing
     g = h.graph
-    draw = software_mesh_stages((T, n) -> Transient.Buffer(g, T, n), mesh, groups, frag_args)
+    mesh, meshargs, groups = mesh_dispatch(g.dev, shader, args, count, indices, instances)
+    checkstages(g.dev, mesh)
+    groups == 0 && return nothing
+    draw = software_mesh_stages((T, n) -> Transient.Buffer(g, T, n), g.dev, mesh, groups, frag_args)
     dispatch!(g, expand_mesh!, (draw.compute..., meshargs...), draw.lanes;
               group = draw.threads, name = h.pass.name * " mesh expansion")
     # The draw declares reads of the generated buffers. Install their writer
@@ -173,11 +181,11 @@ end
 
 function draw_software_mesh!(dev::Device, shader, target, count;
                              args, frag_args, instances, clear_color, depth_clear, indices, bindings)
-    mesh, meshargs, groups = mesh_dispatch(shader, args, count, indices, instances)
+    mesh, meshargs, groups = mesh_dispatch(dev, shader, args, count, indices, instances)
     checkstages(dev, mesh)
     checkdepthtarget(mesh.depth, depthformat(target) !== nothing)
     groups == 0 && return pass!(_ -> nothing, dev, target; clear = clear_color, depth_clear)
-    draw = software_mesh_stages((T, n) -> devicearray(dev, T, n), mesh, groups, frag_args)
+    draw = software_mesh_stages((T, n) -> devicearray(dev, T, n), dev, mesh, groups, frag_args)
     resolved = argmap(a -> resolve(dev, a), meshargs)
     launch = ArrayLaunch(expand_mesh!, (draw.compute..., resolved...), draw.lanes, draw.threads)
     runlaunches!(dev, (launch,))
