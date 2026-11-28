@@ -24,9 +24,7 @@ if TESTBACKEND isa Mantle.LavaDevice
             @test Array(a) == Float32[value]
             mktempdir() do dir
                 path = joinpath(dir, "pipelines.bin")
-                snapshot(cache) = (; device_lost = false, pipeline_cache = cache,
-                    device = dev.device, physical_device = dev.physical_device)
-                Mantle.save_pipeline_cache!(snapshot(newer), path)
+                Mantle.save_pipeline_cache!(dev, path)
                 @test Mantle.pipeline_cache_compatible(read(path), dev.physical_device)
                 function refused_from_disk()
                     cache = Mantle.create_lava_pipeline_cache(dev.device, path, dev.physical_device)
@@ -44,7 +42,8 @@ if TESTBACKEND isa Mantle.LavaDevice
                 baseline_refusals = refused_from_disk()
                 # Both caches were opened before either save. The older process
                 # learned nothing, but must not erase the newer one's compile.
-                Mantle.save_pipeline_cache!(snapshot(older), path)
+                dev.pipeline_cache = older
+                Mantle.save_pipeline_cache!(dev, path)
                 @test refused_from_disk() <= baseline_refusals
                 @test !ispath(path * ".pid")
             end
