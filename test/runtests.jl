@@ -939,6 +939,7 @@ foreachbackend(joinpath(@__DIR__, "test_graphics_pipeline.jl"))
 foreachbackend(joinpath(@__DIR__, "test_video_decode.jl"))
 
 foreachbackend(joinpath(@__DIR__, "test_access_kernels.jl"))
+foreachbackend(joinpath(@__DIR__, "test_readonly_args.jl"))
 # What the access walk says a dispatch only reads compiles as read-only memory, at the walked types.
 _VULKAN_OK && foreachbackend(joinpath(@__DIR__, "vulkan", "test_readonly_args.jl"))
 _VULKAN_OK && foreachbackend(joinpath(@__DIR__, "vulkan", "test_pipeline_cache_merge.jl"))
