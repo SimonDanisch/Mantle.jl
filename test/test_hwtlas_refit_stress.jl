@@ -1,7 +1,6 @@
-# Stress: 1M grains, two instances each (2M instances in two batches), refit
-# 1000 times from records a kernel rewrites every frame. The claim is the cost:
-# a refit of 2M instances, records to driver descriptors included, under 50 ms
-# on average. And that the 1000th refit still moved the instances.
+# Refit two instance batches from records a kernel rewrites every frame.
+# On a GPU, refit 2M instances 1000 times and check the mean time stays under 50 ms.
+# CPU Vulkan runs the same correctness checks with a smaller workload.
 #
 # Positions are shifted on the GPU each frame via a small inline kernel to
 # avoid constructing 12MB CPU vectors x 1000 frames (= 12GB cumulative alloc).
@@ -24,13 +23,16 @@ end
 
 if Mantle.supports_hwtlas(TESTBACKEND)
 
-@testset "1M-grain instance refit stress" begin
+@testset "repeated instance refits" begin
+    dev = Mantle.Device(TESTBACKEND)
+    name = Mantle.devicename(dev)
+    software = any(info -> info.kind === :cpu && info.name == name, Mantle.devices())
+    N, n_frames = software ? (10_000, 100) : (1_000_000, 1000)
     # A triangle of the grain's radius around its centre, in its plane z = 0.
-    blas = Mantle.build_accel!(Mantle.batchqueue(Mantle.Device(TESTBACKEND))) do ctx
+    blas = Mantle.build_accel!(Mantle.batchqueue(dev)) do ctx
         Mantle.build_blas(ctx, [(-1f0, -1f0, 0f0), (1f0, -1f0, 0f0), (0f0, 1f0, 0f0)], UInt32[0, 1, 2])
     end
 
-    N = 1_000_000
     radius = 0.005f0
     grid(i) = Point3f(Float32(0.01 * (i % 1000)), Float32(0.01 * ((i ÷ 1000) % 1000)), 0f0)
 
@@ -50,9 +52,8 @@ if Mantle.supports_hwtlas(TESTBACKEND)
 
     shift_kernel = shift_positions_x_kernel!(TESTBACKEND)
 
-    # 1000 refits with positions shifted +0.001 in x each frame (GPU-only shift).
-    n_frames    = 1000
-    dx          = 0.001f0
+    # Shift by one unit in total with either frame count.
+    dx = 1f0 / n_frames
     refit_times = Float64[]
     sizehint!(refit_times, n_frames)
 
@@ -74,7 +75,7 @@ if Mantle.supports_hwtlas(TESTBACKEND)
 
     avg_refit_ms = (sum(refit_times) / length(refit_times)) * 1000
     @info "Average refit time" avg_refit_ms
-    @test avg_refit_ms < 50.0   # Sanity: refit should beat 50ms at 2M instances.
+    @test avg_refit_ms < 50.0 skip=software
 
     # The last refit moved the grains: a ray onto where a few of them are now
     # hits them (physics records, mask 0x02), and one onto where they started
